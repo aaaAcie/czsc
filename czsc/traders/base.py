@@ -577,7 +577,7 @@ class CzscTrader(CzscSignals):
         :return: pd.DataFrame
             columns = ['dt', 'symbol', 'weight', 'price']
         """
-        from czsc.traders.weight_backtest import get_ensemble_weight
+        from czsc.py.weight_backtest import get_ensemble_weight
         method = self.__ensemble_method if not method else method
         return get_ensemble_weight(self, method)
 
@@ -592,7 +592,7 @@ class CzscTrader(CzscSignals):
 
         :return: 回测结果
         """
-        from czsc.traders.weight_backtest import WeightBacktest
+        from czsc.py.weight_backtest import WeightBacktest
 
         method = kwargs.get("method", self.__ensemble_method)
         digits = kwargs.get("digits", 2)

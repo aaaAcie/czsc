@@ -946,10 +946,9 @@ class Position:
         op = Operate.HO
         op_desc = ""
         for event in self.events:
-            m, f = event.is_match(s)
-            if m:
+            if event.is_match(s):
                 op = event.operate
-                op_desc = f"{event.name}@{f}"
+                op_desc = f"{event.name}"
                 break
 
         symbol, dt, price, bid = s["symbol"], s["dt"], s["close"], s["id"]

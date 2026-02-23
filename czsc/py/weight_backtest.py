@@ -8,6 +8,7 @@ describe: 按持仓权重回测
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 from tqdm import tqdm
 from loguru import logger
 from pathlib import Path
@@ -17,12 +18,15 @@ from multiprocessing import cpu_count
 from concurrent.futures import ProcessPoolExecutor
 
 import czsc
-from czsc.traders.base import CzscTrader
 from czsc.utils.io import save_json
 from czsc.utils.analysis.stats import daily_performance, evaluate_pairs
+from typing import Union, AnyStr, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from czsc.traders.base import CzscTrader
 
 
-def get_ensemble_weight(trader: CzscTrader, method: Union[AnyStr, Callable] = "mean"):
+def get_ensemble_weight(trader: "CzscTrader", method: Union[AnyStr, Callable] = "mean"):
     """获取 CzscTrader 中所有 positions 按照 method 方法集成之后的权重
 
     函数计算逻辑：
@@ -74,13 +78,13 @@ def get_ensemble_weight(trader: CzscTrader, method: Union[AnyStr, Callable] = "m
     else:
         method = method.lower()
         if method == "mean":
-            dfp["weight"] = dfp[pos_cols].mean(axis=1)
+            dfp["weight"] = dfp[pos_cols].select_dtypes(include=[np.number]).mean(axis=1)
         elif method == "max":
-            dfp["weight"] = dfp[pos_cols].max(axis=1)
+            dfp["weight"] = dfp[pos_cols].select_dtypes(include=[np.number]).max(axis=1)
         elif method == "min":
-            dfp["weight"] = dfp[pos_cols].min(axis=1)
+            dfp["weight"] = dfp[pos_cols].select_dtypes(include=[np.number]).min(axis=1)
         elif method == "vote":
-            dfp["weight"] = dfp[pos_cols].apply(lambda x: np.sign(np.sum(x)), axis=1)
+            dfp["weight"] = dfp[pos_cols].select_dtypes(include=[np.number]).apply(lambda x: np.sign(np.sum(x)), axis=1)
         else:
             raise ValueError(f"method {method} not supported")
 
@@ -213,7 +217,8 @@ class WeightBacktest:
         self.dfw = dfw.copy()
         self.dfw["dt"] = pd.to_datetime(self.dfw["dt"])
         if self.dfw.isnull().sum().sum() > 0:
-            raise ValueError("dfw 中存在空值, 请先处理")
+            logger.warning(f"dfw 中存在空值，将自动删除包含空值的行：\n{self.dfw[self.dfw.isnull().any(axis=1)]}")
+            self.dfw = self.dfw.dropna().reset_index(drop=True)
 
         self.digits = digits
         self.weight_type = weight_type.lower()
@@ -290,9 +295,9 @@ class WeightBacktest:
         dfv = pd.pivot_table(df, index="date", columns="symbol", values="long_return").fillna(0)
 
         if self.weight_type == "ts":
-            dfv["total"] = dfv.mean(axis=1)
+            dfv["total"] = dfv.select_dtypes(include=[np.number]).mean(axis=1)
         elif self.weight_type == "cs":
-            dfv["total"] = dfv.sum(axis=1)
+            dfv["total"] = dfv.select_dtypes(include=[np.number]).sum(axis=1)
         else:
             raise ValueError(f"weight_type {self.weight_type} not supported")
 
@@ -306,9 +311,9 @@ class WeightBacktest:
         dfv = pd.pivot_table(df, index="date", columns="symbol", values="short_return").fillna(0)
 
         if self.weight_type == "ts":
-            dfv["total"] = dfv.mean(axis=1)
+            dfv["total"] = dfv.select_dtypes(include=[np.number]).mean(axis=1)
         elif self.weight_type == "cs":
-            dfv["total"] = dfv.sum(axis=1)
+            dfv["total"] = dfv.select_dtypes(include=[np.number]).sum(axis=1)
         else:
             raise ValueError(f"weight_type {self.weight_type} not supported")
 
@@ -594,10 +599,13 @@ class WeightBacktest:
 
         if self.weight_type == "ts":
             # 时序策略每日收益为各品种收益的等权
-            dret["total"] = dret[list(res.keys())].mean(axis=1)
+            # 显式只选择数值列进行平均，避免 datetime.date 参与计算
+            cols = [c for c in res.keys() if c in dret.columns]
+            dret["total"] = dret[cols].select_dtypes(include=[np.number]).mean(axis=1)
         elif self.weight_type == "cs":
             # 截面策略每日收益为各品种收益的和
-            dret["total"] = dret[list(res.keys())].sum(axis=1)
+            cols = [c for c in res.keys() if c in dret.columns]
+            dret["total"] = dret[cols].select_dtypes(include=[np.number]).sum(axis=1)
         else:
             raise ValueError(f"weight_type {self.weight_type} not supported, should be 'ts' or 'cs'")
 
@@ -628,7 +636,7 @@ class WeightBacktest:
         res["绩效评价"] = stats
         return res
 
-    def report(self, res_path):
+    def report(self, res_path, **kwargs):
         """回测报告"""
         res_path = Path(res_path)
         res_path.mkdir(exist_ok=True, parents=True)
@@ -645,16 +653,34 @@ class WeightBacktest:
         logger.info(f"品种等权费后日收益率已保存到 {res_path.joinpath('daily_return.xlsx')}")
 
         # 品种等权费后日收益率资金曲线绘制
-        dret = dret.cumsum()
-        fig = px.line(dret, y=dret.columns.to_list(), title="费后日收益率资金曲线")
-        fig.for_each_trace(lambda trace: trace.update(visible=True if trace.name == "total" else "legendonly"))
+        dret = dret.set_index("date") if "date" in dret.columns else dret
+        dret = dret.select_dtypes(include=[np.number]).cumsum().reset_index()
+        
+        fig = go.Figure()
+        for col in [x for x in dret.columns if x != 'date']:
+            # 默认只显示 total 曲线，其他曲线在图例中点击可显示
+            visible = True if col == 'total' else 'legendonly'
+            fig.add_trace(go.Scatter(x=dret["date"], y=dret[col], name=col, visible=visible))
+            
+        title = kwargs.get("title", "费后日收益率资金曲线")
+        fig.update_layout(title=title, template="plotly_white", xaxis_title="日期", yaxis_title="累计收益",
+                          legend=dict(orientation="h", y=1.02, xanchor="right", x=1))
         fig.write_html(res_path.joinpath("daily_return.html"))
         logger.info(f"费后日收益率资金曲线已保存到 {res_path.joinpath('daily_return.html')}")
 
         # 绘制alpha曲线
         alpha = self.alpha.copy()
-        alpha[["策略", "基准", "超额"]] = alpha[["策略", "基准", "超额"]].cumsum()
-        fig = px.line(alpha, x="date", y=["策略", "基准", "超额"], title="策略超额收益")
+        alpha = alpha.set_index("date") if "date" in alpha.columns else alpha
+        alpha = alpha.select_dtypes(include=[np.number]).cumsum().reset_index()
+        
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=alpha["date"], y=alpha["策略"], name="策略", line=dict(color="red", width=2)))
+        fig.add_trace(go.Scatter(x=alpha["date"], y=alpha["基准"], name="基准", line=dict(color="blue", width=2)))
+        fig.add_trace(go.Scatter(x=alpha["date"], y=alpha["超额"], name="超额", line=dict(color="green", width=2)))
+        
+        title = kwargs.get("title", "策略超额收益")
+        fig.update_layout(title=title, template="plotly_white", xaxis_title="日期", yaxis_title="累计收益",
+                          legend=dict(orientation="h", y=1.02, xanchor="right", x=1))
         fig.write_html(res_path.joinpath("alpha.html"))
 
         # 所有开平交易记录的表现

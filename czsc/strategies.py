@@ -17,8 +17,11 @@ from copy import deepcopy
 from datetime import timedelta, datetime
 from abc import ABC, abstractmethod
 from loguru import logger
-from typing import List
-from czsc.traders.base import CzscTrader
+from typing import List, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from czsc.traders.base import CzscTrader
+
 from czsc.traders.sig_parse import get_signals_freqs, get_signals_config
 from czsc.utils.io import dill_dump, save_json, read_json
 from czsc.py.bar_generator import check_freq_and_market
@@ -133,7 +136,7 @@ class CzscStrategyBase(ABC):
             bars2 = [x for x in bars if x.dt > bg.end_dt]
             return bg, bars2
 
-    def init_trader(self, bars: List[RawBar], **kwargs) -> CzscTrader:
+    def init_trader(self, bars: List[RawBar], **kwargs):
         """使用策略定义初始化一个 CzscTrader 对象
 
         **注意：** 这里会将所有持仓策略在 sdt 之后的交易信号计算出来并缓存在持仓策略实例内部，所以初始化的过程本身也是回测的过程。
@@ -154,6 +157,7 @@ class CzscStrategyBase(ABC):
 
         :return: 完成策略初始化后的 CzscTrader 对象
         """
+        from czsc.traders.base import CzscTrader
         bg, bars2 = self.init_bar_generator(bars, **kwargs)
         trader = CzscTrader(bg=bg, positions=deepcopy(self.positions),  # type: ignore
                             signals_config=deepcopy(self.signals_config), **kwargs)
@@ -161,16 +165,17 @@ class CzscStrategyBase(ABC):
             trader.on_bar(bar)
         return trader
 
-    def backtest(self, bars: List[RawBar], **kwargs) -> CzscTrader:
+    def backtest(self, bars: List[RawBar], **kwargs):
         trader = self.init_trader(bars, **kwargs)
         return trader
 
-    def dummy(self, sigs: List[dict], **kwargs) -> CzscTrader:
+    def dummy(self, sigs: List[dict], **kwargs):
         """使用信号缓存进行策略回测
 
         :param sigs: 信号缓存，一般指 generate_czsc_signals 函数计算的结果缓存
         :return: 完成策略回测后的 CzscTrader 对象
         """
+        from czsc.traders.base import CzscTrader
         sleep_time = kwargs.get("sleep_time", 0)
         sleep_step = kwargs.get("sleep_step", 1000)
 
@@ -211,7 +216,8 @@ class CzscStrategyBase(ABC):
         :return:
         """
         from czsc.utils import x_round
-        
+        from czsc.traders.base import CzscTrader
+
         if kwargs.get("refresh", False):
             shutil.rmtree(res_path, ignore_errors=True)
 
@@ -224,9 +230,10 @@ class CzscStrategyBase(ABC):
         bg, bars2 = self.init_bar_generator(bars, **kwargs)
         trader = CzscTrader(bg=bg, positions=deepcopy(self.positions),  # type: ignore
                             signals_config=deepcopy(self.signals_config), **kwargs)
+
         for position in trader.positions:
             pos_path = os.path.join(res_path, position.name)
-            os.makedirs(pos_path, exist_ok=exist_ok)
+            os.makedirs(pos_path, exist_ok=True)
 
         for bar in bars2:
             trader.on_bar(bar)
@@ -268,6 +275,7 @@ class CzscStrategyBase(ABC):
             n    初始化最小K线数量
         :return:
         """
+        from czsc.traders.base import CzscTrader
         if kwargs.get("refresh", False):
             shutil.rmtree(res_path, ignore_errors=True)
 

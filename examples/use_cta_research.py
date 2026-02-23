@@ -15,7 +15,7 @@ from czsc import CTAResearch
 from czsc.strategies import CzscStrategyExample2
 from czsc.connectors.research import get_raw_bars, get_symbols
 
-bot = CTAResearch(results_path=r"D:\CTA投研\策略测试", signals_module_name='czsc.signals',
+bot = CTAResearch(results_path=r"results/策略测试", signals_module_name='czsc.signals',
                   strategy=CzscStrategyExample2, read_bars=get_raw_bars)
 
 # 策略回放

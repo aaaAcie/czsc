@@ -76,29 +76,17 @@ def create_long_short_V230909(symbol, **kwargs):
     opens = [
         {
             "operate": "开多",
-            "signals_all": [],
+            "signals_all": [f"{base_freq}_D1_表里关系V230101_向上_任意_任意_0"],
             "signals_any": [],
-            "signals_not": [],
-            "factors": [
-                {
-                    "signals_all": [f"{base_freq}_D1_表里关系V230101_向上_任意_任意_0"],
-                    "signals_any": [],
-                    "signals_not": [f"{base_freq}_D1_涨跌停V230331_涨停_任意_任意_0"],
-                }
-            ],
+            "signals_not": [f"{base_freq}_D1_涨跌停V230331_涨停_任意_任意_0"],
+            "factors": [],
         },
         {
             "operate": "开空",
-            "signals_all": [],
+            "signals_all": [f"{base_freq}_D1_表里关系V230101_向下_任意_任意_0"],
             "signals_any": [],
-            "signals_not": [],
-            "factors": [
-                {
-                    "signals_all": [f"{base_freq}_D1_表里关系V230101_向下_任意_任意_0"],
-                    "signals_any": [],
-                    "signals_not": [f"{base_freq}_D1_涨跌停V230331_跌停_任意_任意_0"],
-                }
-            ],
+            "signals_not": [f"{base_freq}_D1_涨跌停V230331_跌停_任意_任意_0"],
+            "factors": [],
         },
     ]
 
@@ -124,16 +112,19 @@ class Strategy(czsc.CzscStrategyBase):
     @property
     def positions(self):
         pos_list = [
-            # create_long_short_V230908(self.symbol),
             create_long_short_V230909(self.symbol, base_freq='30分钟'),
             create_long_short_V230909(self.symbol, base_freq='60分钟'),
             create_long_short_V230909(self.symbol, base_freq='日线'),
         ]
         return pos_list
 
+    @property
+    def freqs(self):
+        return ['30分钟', '60分钟', '日线']
+
 
 if __name__ == '__main__':
-    results_path = Path(r'D:\策略研究\笔非多即空')
+    results_path = Path('results/笔非多即空')
     results_path.mkdir(exist_ok=True, parents=True)
     logger.add(results_path / "czsc.log", rotation="1 week", encoding="utf-8")
 
@@ -146,8 +137,14 @@ if __name__ == '__main__':
     logger.info(f"信号函数配置列表：{tactic.signals_config}")
 
     # replay 查看策略的编写是否正确，执行过程是否符合预期
-    bars = research.get_raw_bars(symbol, freq=tactic.base_freq, sdt='20150101', edt='20220101')
-    trader = tactic.replay(bars, sdt='20210101', res_path=results_path / "replay", refresh=True)
-
+    bars = research.get_raw_bars(symbol, freq=tactic.base_freq, sdt='20140101', edt='20220101')
+    # trader = tactic.replay(bars, sdt='20210101', res_path=results_path / "replay", refresh=True)
+    trader = tactic.backtest(bars, sdt='20150101')
+    
+    # 新增：执行权重回测并生成收益报告
+    logger.info("正在生成收益报告...")
+    wb = trader.weight_backtest(fee_rate=0.0002) # 设置万二手续费
+    wb.report(results_path / "report")
+    
     # 当策略执行过程符合预期后，将持仓策略保存到本地 json 文件中
     tactic.save_positions(results_path / "positions")

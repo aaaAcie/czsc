@@ -1,9 +1,0 @@
-本次线段数量: 5
-线段1: dir=向下, confirmed=True, start=(2024-10-02 14:00:00, 103.12), end=(2024-10-24 14:30:00, 75.79)
-线段2: dir=向上, confirmed=True, start=(2024-10-24 14:30:00, 75.79), end=(2024-11-04 09:30:00, 89.88)
-线段3: dir=向下, confirmed=True, start=(2024-11-04 09:30:00, 89.88), end=(2024-11-19 10:00:00, 81.86)
-线段4: dir=向上, confirmed=True, start=(2024-11-19 10:00:00, 81.86), end=(2024-12-06 09:30:00, 102.03)
-线段5: dir=向下, confirmed=False, start=(2024-12-06 09:30:00, 102.03), end=(2024-12-28 11:00:00, 82.4)
-本次中枢数量: 1
-中枢1: dir=向下, confirmed=False, ZG=89.88, ZD=81.86, enter_seg=0, body=[1-4], exit_seg=None, confirm_seg=None
-  时间: enter_start=2024-10-02 14:00:00, body_start=2024-10-24 14:30:00, body_end=2024-12-28 11:00:00

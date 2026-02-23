@@ -60,7 +60,7 @@ def get_events_matched(refresh=False):
         "sdt": "2022-01-01",
         "edt": "2023-01-01",
         "max_workers": 10,
-        "results_path": r"D:\量化投研\EMS测试A",
+        "results_path": r"results/EMS测试A",
     }
     path = Path(ems_params['results_path'])
     if path.exists() and refresh:
