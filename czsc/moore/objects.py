@@ -28,7 +28,8 @@ class TurningK:
 
     # 状态标记
     is_valid: bool = False    # 是否已经通过了基础验证（法则1,2）成立
-    is_perfect: bool = False  # 是否通过了结构完美性验证（法则3: 中枢）
+    is_perfect: bool = False  # 内政：内部是否包含线段中枢（微观几何成立）
+    is_locked: bool = False   # 外交：是否被趋势正式锁定为不可更改的历史锚点（宏观锁定，不可被趋势穿透吞噬）
     cache: dict = field(default_factory=dict)
 
     def __repr__(self):

@@ -51,6 +51,17 @@ class MooreCZSC:
         # 中枢引擎内部状态
         self.center_state = 0
         self.current_k0 = None
+
+        # --- 趋势穿透层状态 ---
+        self.trend_state: Optional[Direction] = None        # 当前趋势方向
+        self.trend_high: Optional[float] = None             # 趋势内全局最高价
+        self.trend_low: Optional[float] = None              # 趋势内全局最低价
+        self.trend_extreme_k: Optional[TurningK] = None     # 代表全局极值的 TurningK
+        self.segment_start_extreme: Optional[float] = None  # 当前线段起点极值（上一确认线段终点价格）
+
+        # 穿透灵敏度配置
+        # 1=STRUCT_ONLY(仅结构) / 2=BREAK_SEG_START(或突破线段起点) / 3=BREAK_TREND_GLOBAL(或突破趋势全局极值)
+        self.penetration_level: int = 2
         
         for bar in bars:
             self.update(bar)
@@ -308,21 +319,36 @@ class MooreCZSC:
                 final_tk.is_valid = True
                 final_tk.is_perfect = perfect_struct
                 
-                # 同向替换（新生刷新）逻辑增强：支持深层穿透
+                # 同向刷新 / 趋势穿透多层回溯 / 正常追加
                 if self.turning_ks:
                     if self.turning_ks[-1].mark == final_tk.mark:
-                        # 正常相邻刷新
+                        # 正常相邻同向刷新：直接替换末端
                         self.turning_ks.pop()
-                    elif len(self.turning_ks) >= 2 and self.turning_ks[-2].mark == final_tk.mark and not self.turning_ks[-1].is_perfect:
-                        # 跨越式深度刷新：清理掉中间的不完美中继和旧同向点
-                        self.turning_ks.pop() # pop 掉中间的异向虚线点
-                        self.turning_ks.pop() # pop 掉被刷新的旧同向点
-                    
+                    elif self._check_penetration(final_tk, final_tk.is_perfect):
+                        # 趋势级穿透：动态多层吞噬不稳定链
+                        # segment_start_extreme 在回溯期间保持不变（线段延申而非重置）
+                        self._consume_imperfect_chain(final_tk)
+
+                # 追加新 TurningK
                 self.turning_ks.append(final_tk)
+
+                # 新反向线段确立后，锁定上上个同向点（它成为历史端点）
+                if len(self.turning_ks) >= 3:
+                    candidate_lock = self.turning_ks[-3]
+                    if candidate_lock.mark != final_tk.mark:
+                        candidate_lock.is_locked = True
+
+                # 更新线段起点极值（仅真正反向时更新，同向刷新时不动）
+                if len(self.turning_ks) >= 2 and self.turning_ks[-2].mark != final_tk.mark:
+                    self.segment_start_extreme = self.turning_ks[-2].price
+
+                # 更新趋势状态
+                self._update_trend_state(final_tk)
+
                 self._update_segments()
                 self.candidate_tk = None
                 self._rollback_center_engine()
-                self.potential_centers = [] # 确立后清空暂存区区，为下一轮寻找准备
+                self.potential_centers = [] # 确立后清空暂存区，为下一轮寻找准备
 
     def _validate_four_rules(self, tk: TurningK) -> tuple[bool, bool]:
         """顶底四法则验真。
@@ -386,12 +412,11 @@ class MooreCZSC:
             return False, False  # 没交叉，连基础确立都不算
 
         # 3. 第三法则：结构完整性 (内部必须包含中枢)
-        # 您要求暂时不启用此法则，但我们依然进行标记以供可视化参考
+        # 不拦截线段生成，但真实写入 is_perfect 标记，供趋势穿透层使用
         is_perfect = True
         if not self.potential_centers:
-            # 记录失败但不拦截返回
             self._debug_rule_fail[3] = self._debug_rule_fail.get(3, 0) + 1
-            # is_perfect = False # 暂时保持 True 使得线段画实线，或按需设为 False
+            is_perfect = False  # 无中枢 → 微观结构不完美（虚线标记）
 
         return True, is_perfect
 
@@ -418,8 +443,140 @@ class MooreCZSC:
             self.segments = self.segments[-self.max_segments:]
 
     # =========================================================================
-    # 第二模块：双轨中枢状态机引擎 (The Core Center Engine)
+    # 第一模块附属：趋势穿透层 (The Trend Penetration Layer)
     # =========================================================================
+
+    def _check_penetration(self, new_tk: TurningK, is_perfect: bool) -> bool:
+        """根据 penetration_level 判断是否触发趋势穿透（允许跨越回溯）
+        
+        OR 递进关系：高级别天然包含低级别条件。
+          Level 1: 仅结构不完美 → 允许吞噬
+          Level 2: Level1 OR 突破线段起点极值
+          Level 3: Level1 OR 突破趋势全局极值（最宽松）
+        """
+        # 条件 A：结构不完美（所有级别均包含）
+        if not is_perfect:
+            return True
+
+        # 条件 B：突破线段起点极值（Level 2 / 3）
+        if self.penetration_level >= 2 and self.segment_start_extreme is not None:
+            if new_tk.mark == Mark.G and new_tk.price > self.segment_start_extreme:
+                return True
+            if new_tk.mark == Mark.D and new_tk.price < self.segment_start_extreme:
+                return True
+
+        # 条件 C：突破趋势全局极值（Level 3）
+        if self.penetration_level >= 3:
+            if self.trend_high is not None and new_tk.mark == Mark.G and new_tk.price > self.trend_high:
+                return True
+            if self.trend_low is not None and new_tk.mark == Mark.D and new_tk.price < self.trend_low:
+                return True
+
+        return False
+
+    def _consume_imperfect_chain(self, new_pivot: TurningK):
+        """双重门多层回溯引擎：动态吞噬不稳定结构链
+        
+        门1（方向门）：只吞噬正确方向的异向中继
+        门2（防御门）：宏观锁定（is_locked）为绝对铁门；结构完美（is_perfect）为弹性门
+        门3（价格门）：新 pivot 必须在价格上碾压旧同向点
+        """
+        MAX_BACKTRACK = 50
+        backtrack_count = 0
+        while len(self.turning_ks) >= 2:
+            if backtrack_count > MAX_BACKTRACK:
+                break
+            last_opposite = self.turning_ks[-1]   # 最近的异向点（待吞噬的中继）
+            last_same     = self.turning_ks[-2]   # 最近的同向点（待替换的旧极值）
+
+            # 门1：方向必须正确
+            if last_opposite.mark == new_pivot.mark:
+                break
+
+            # 门2：双重防御（宏观铁门 > 弹性微观门）
+            # 绝对防御：宏观锁定，任何情况不可吞噬
+            if last_opposite.is_locked:
+                break
+            # 弹性防御：结构完美 + 保守模式（Level 1），停止
+            if last_opposite.is_perfect:
+                if self.penetration_level == 1:   # STRUCT_ONLY
+                    break
+                # Level 2/3：完美但未锁定，继续看价格门
+
+            # 门3：价格替代 — 新 pivot 必须在价格上碾压旧同向点
+            if last_same.mark != new_pivot.mark:
+                break
+            if new_pivot.mark == Mark.G and new_pivot.price < last_same.price:
+                break
+            if new_pivot.mark == Mark.D and new_pivot.price > last_same.price:
+                break
+
+            # 通过三重门 → 吞噬一层
+            self.turning_ks.pop()   # 吞噬异向中继
+            self.turning_ks.pop()   # 吞噬旧同向点
+            backtrack_count += 1
+
+    def _update_trend_state(self, new_tk: TurningK):
+        """在新 TurningK 确立后，更新趋势状态、全局极值与翻转判断"""
+        # 趋势初始化：第一根有效线段生成时赋值
+        if self.trend_state is None:
+            if len(self.turning_ks) >= 2:
+                self.trend_state = Direction.Up if self.turning_ks[0].mark == Mark.D else Direction.Down
+                g_tks = [tk for tk in self.turning_ks if tk.mark == Mark.G]
+                d_tks = [tk for tk in self.turning_ks if tk.mark == Mark.D]
+                self.trend_high = max(tk.price for tk in g_tks) if g_tks else None
+                self.trend_low  = min(tk.price for tk in d_tks) if d_tks else None
+                if self.trend_state == Direction.Up:
+                    self.trend_extreme_k = max(g_tks, key=lambda x: x.price) if g_tks else None
+                else:
+                    self.trend_extreme_k = min(d_tks, key=lambda x: x.price) if d_tks else None
+            return
+
+        # 更新全局极值
+        if new_tk.mark == Mark.G:
+            if self.trend_high is None or new_tk.price > self.trend_high:
+                self.trend_high = new_tk.price
+                if self.trend_state == Direction.Up:
+                    self.trend_extreme_k = new_tk
+        if new_tk.mark == Mark.D:
+            if self.trend_low is None or new_tk.price < self.trend_low:
+                self.trend_low = new_tk.price
+                if self.trend_state == Direction.Down:
+                    self.trend_extreme_k = new_tk
+
+        # 趋势翻转双重锁（满足其一即翻转）
+        if self.trend_state == Direction.Up:
+            # V 型反转：新底直接打穿全局最低
+            if new_tk.mark == Mark.D and self.trend_low is not None and new_tk.price < self.trend_low:
+                self._flip_trend(Direction.Down, new_tk)
+            # 结构翻转：完美反向线段突破最近关键节点
+            elif (new_tk.mark == Mark.D and new_tk.is_perfect
+                  and len(self.segments) >= 2):
+                key_node = self.segments[-2].start_k.price   # 最近上涨段的起点
+                if new_tk.price < key_node:
+                    self._flip_trend(Direction.Down, new_tk)
+        else:  # Direction.Down
+            if new_tk.mark == Mark.G and self.trend_high is not None and new_tk.price > self.trend_high:
+                self._flip_trend(Direction.Up, new_tk)
+            elif (new_tk.mark == Mark.G and new_tk.is_perfect
+                  and len(self.segments) >= 2):
+                key_node = self.segments[-2].start_k.price
+                if new_tk.price > key_node:
+                    self._flip_trend(Direction.Up, new_tk)
+
+    def _flip_trend(self, new_direction: Direction, trigger_tk: TurningK):
+        """执行趋势翻转：重置方向与全局极值"""
+        self.trend_state = new_direction
+        # 翻转后以触发点为新趋势的起始极值
+        if new_direction == Direction.Up:
+            self.trend_low  = trigger_tk.price
+            self.trend_high = None
+        else:
+            self.trend_high = trigger_tk.price
+            self.trend_low  = None
+        self.trend_extreme_k = trigger_tk
+
+
     def _rollback_center_engine(self):
         """回滚中枢巡航游标 (Engineering Defenses #3)"""
         self.center_state = 0
