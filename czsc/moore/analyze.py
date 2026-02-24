@@ -141,26 +141,41 @@ class MooreCZSC:
                     self._debug_trigger_count += 1
 
         # ==================================================================
-        # 步骤零：处理上一次遗留的“蓝框后移确立”
-        # ==================================================================
-        # ==================================================================
         # 步骤A：轮询校验。即使没有新触发，已有备选点可能在这一根K线满足了法则二(均线交叉)
         # ==================================================================
         if self.candidate_tk:
-            if self._validate_four_rules(self.candidate_tk):
+            valid_base, perfect_struct = self._validate_four_rules(self.candidate_tk)
+            if valid_base:
                 final_tk = self.candidate_tk
                 final_tk.is_valid = True
-                
-                # 同向替换（新生刷新）
-                if self.turning_ks and self.turning_ks[-1].mark == final_tk.mark:
-                    self.turning_ks.pop()
-                    
+                final_tk.is_perfect = perfect_struct
+
+                # 同向刷新 / 趋势穿透多层回溯 / 正常追加
+                if self.turning_ks:
+                    if self.turning_ks[-1].mark == final_tk.mark:
+                        self.turning_ks.pop()
+                    elif self._check_penetration(final_tk):
+                        self._consume_imperfect_chain(final_tk)
+
                 self.turning_ks.append(final_tk)
+
+                # 新反向线段确立后，为上一条完整线段两端点发放免死金牌
+                if len(self.turning_ks) >= 3:
+                    self.turning_ks[-3].is_locked = True
+                    self.turning_ks[-2].is_locked = True
+
+                # 更新线段起点极值（仅真正反向时）
+                if len(self.turning_ks) >= 2 and self.turning_ks[-2].mark != final_tk.mark:
+                    self.segment_start_extreme = self.turning_ks[-2].price
+
+                # 更新趋势状态
+                self._update_trend_state(final_tk)
+
                 self._update_segments()
                 self.candidate_tk = None
                 self._rollback_center_engine()
-                self.potential_centers = [] # 确立后清空，为下一轮寻找准备
-                return # 确立成功不再走候选逻辑
+                self.potential_centers = []
+                return  # 确立成功不再走候选逻辑
 
         # ==================================================================
         # 步骤零：处理上一次遗留的“蓝框后移确立”
@@ -324,7 +339,7 @@ class MooreCZSC:
                     if self.turning_ks[-1].mark == final_tk.mark:
                         # 正常相邻同向刷新：直接替换末端
                         self.turning_ks.pop()
-                    elif self._check_penetration(final_tk, final_tk.is_perfect):
+                    elif self._check_penetration(final_tk):
                         # 趋势级穿透：动态多层吞噬不稳定链
                         # segment_start_extreme 在回溯期间保持不变（线段延申而非重置）
                         self._consume_imperfect_chain(final_tk)
@@ -332,11 +347,11 @@ class MooreCZSC:
                 # 追加新 TurningK
                 self.turning_ks.append(final_tk)
 
-                # 新反向线段确立后，锁定上上个同向点（它成为历史端点）
+                # 新反向线段确立（第3个点出现），为上一条完整线段的两个端点发放免死金牌
+                # 例：[顶1, 底1, 顶2] → 顶1和底1组成的线段已成历史定局，两者均上锁
                 if len(self.turning_ks) >= 3:
-                    candidate_lock = self.turning_ks[-3]
-                    if candidate_lock.mark != final_tk.mark:
-                        candidate_lock.is_locked = True
+                    self.turning_ks[-3].is_locked = True
+                    self.turning_ks[-2].is_locked = True
 
                 # 更新线段起点极值（仅真正反向时更新，同向刷新时不动）
                 if len(self.turning_ks) >= 2 and self.turning_ks[-2].mark != final_tk.mark:
@@ -446,26 +461,34 @@ class MooreCZSC:
     # 第一模块附属：趋势穿透层 (The Trend Penetration Layer)
     # =========================================================================
 
-    def _check_penetration(self, new_tk: TurningK, is_perfect: bool) -> bool:
+    def _check_penetration(self, new_tk: TurningK) -> bool:
         """根据 penetration_level 判断是否触发趋势穿透（允许跨越回溯）
         
+        穿透判定看的是**待被吞噬的中继结构（turning_ks[-1]）** 是否稳固，
+        而不是新 pivot 自身是否完美（新 pivot 是主动方，无需评判其结构）。
+
         OR 递进关系：高级别天然包含低级别条件。
-          Level 1: 仅结构不完美 → 允许吞噬
-          Level 2: Level1 OR 突破线段起点极值
-          Level 3: Level1 OR 突破趋势全局极值（最宽松）
+          Level 1: 仅中继结构不完美 → 允许吞噬
+          Level 2: Level1 OR 新 pivot 突破线段起点极值
+          Level 3: Level1 OR 新 pivot 突破趋势全局极值（最宽松）
         """
-        # 条件 A：结构不完美（所有级别均包含）
-        if not is_perfect:
+        if not self.turning_ks:
+            return False
+
+        last_opposite = self.turning_ks[-1]  # 待审判的中继结构
+
+        # 条件 A：中继结构不完美（all levels）
+        if not last_opposite.is_perfect:
             return True
 
-        # 条件 B：突破线段起点极值（Level 2 / 3）
+        # 条件 B：新 pivot 突破线段起点极值（Level 2 / 3）
         if self.penetration_level >= 2 and self.segment_start_extreme is not None:
             if new_tk.mark == Mark.G and new_tk.price > self.segment_start_extreme:
                 return True
             if new_tk.mark == Mark.D and new_tk.price < self.segment_start_extreme:
                 return True
 
-        # 条件 C：突破趋势全局极值（Level 3）
+        # 条件 C：新 pivot 突破趋势全局极值（Level 3）
         if self.penetration_level >= 3:
             if self.trend_high is not None and new_tk.mark == Mark.G and new_tk.price > self.trend_high:
                 return True
