@@ -220,7 +220,9 @@ def resample_bars(df: pd.DataFrame, target_freq: Union[Freq, AnyStr], raw_bars=T
 
     :return: 转换后的K线序列
     """
-    if not isinstance(target_freq, Freq):
+    if hasattr(target_freq, "value"):
+        target_freq = Freq(target_freq.value)
+    elif not isinstance(target_freq, Freq):
         target_freq = Freq(target_freq)
 
     base_freq = kwargs.get("base_freq", None)
