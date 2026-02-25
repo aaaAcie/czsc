@@ -16,6 +16,7 @@
 """
 import collections
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import List, Optional
 
 from czsc.py.objects import RawBar
@@ -71,6 +72,22 @@ class SegmentState:
     # -------------------------------------------------------------------------
     center_state: int                 = 0
     current_k0: Optional[RawBar]      = None
+
+    # 观测病房（Pending Center）状态（State 2 使用）
+    center_line_k: Optional[RawBar]         = None   # 确认K（中枢线K）
+    center_line_k_index: int                = -1     # 确认K 的绝对索引
+    center_direction: Optional[Direction]   = None   # 当前中枢方向
+    center_upper_rail: float                = 0.0    # 结界上轨（实时可更新）
+    center_lower_rail: float                = 0.0    # 结界下轨（实时可更新）
+    center_start_dt: Optional[datetime]     = None   # 结界起始时间
+    center_end_dt: Optional[datetime]       = None   # 结界当前右端（实时居新）
+    center_is_visible: bool                 = False  # 是否已升级为肉眼中枢
+    center_flip_done: bool                  = False  # MA5 折返升级只做一次
+    center_prev_ma5: Optional[float]        = None   # 上一根 K 的 MA5（用于斜率计算）
+    center_prev_ma5_slope: Optional[float]  = None   # 上一个斜率差（用于检测山峰谷底）
+    center_end_k_index: int                 = -1     # 当前窗口最后一根在结界内K的绝对索引
+    center_is_double_gap: bool              = False  # confirm_k 与 k0 是否双跳空（式一自动成立）
+
 
     # -------------------------------------------------------------------------
     # 趋势穿透层状态
