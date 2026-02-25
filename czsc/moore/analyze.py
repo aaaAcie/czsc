@@ -47,6 +47,9 @@ class MooreCZSC:
         self.refreshed_segments = []
         self.potential_centers = []   
         self.all_centers = []         
+        # 幽灵分叉事件列表：每项 = (fork_tk, [consumed_same, consumed_opposite])
+        # fork_tk 是吸干吴转点后仍存活在 turning_ks 里的锊点，两个 consumed 是被破坏的枝楂
+        self.ghost_forks: List[tuple] = []
         
         # 中枢引擎内部状态
         self.center_state = 0
@@ -534,9 +537,16 @@ class MooreCZSC:
             if new_pivot.mark == Mark.D and new_pivot.price > last_same.price:
                 break
 
-            # 通过三重门 → 吞噬一层
-            self.turning_ks.pop()   # 吞噬异向中继
-            self.turning_ks.pop()   # 吞噬旧同向点
+            # 通过三重门 → 先存展1对，再 pop
+            consumed_opposite = self.turning_ks.pop()   # 异向中继（时间较晚）
+            consumed_same     = self.turning_ks.pop()   # 旧同向点（时间较早）
+            # 分叉锁点 = pop 完后 turning_ks 末端付存的锊点
+            fork_tk = self.turning_ks[-1] if self.turning_ks else consumed_same
+            # 按时间顺序存储：先小后大
+            self.ghost_forks.append((
+                fork_tk,
+                sorted([consumed_same, consumed_opposite], key=lambda t: t.k_index)
+            ))
             backtrack_count += 1
 
     def _update_trend_state(self, new_tk: TurningK):

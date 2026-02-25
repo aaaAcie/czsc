@@ -98,10 +98,9 @@ def plot_moore_structure(
             is_up = seg.direction == Direction.Up
             line_color = "#E91E63" if is_up else "#00A65A"
             
-            # 结构完美性决定线段虚实 (法则三：中枢拦截)
-            is_perfect = getattr(seg.end_k, 'is_perfect', True)
-            line_style = "solid" if is_perfect else "dash"
-            line_width = 3 if is_perfect else 1
+            # 结构完美性决定线段虚实（法则三：端点 TurningK 内部是否有中枢）
+            line_style = "solid" if seg.is_perfect else "dash"
+            line_width = 3 if seg.is_perfect else 1
 
             # 画线
             chart.fig.add_shape(
@@ -126,6 +125,39 @@ def plot_moore_structure(
             chart.fig.add_shape(
                 type="line", x0=x0, y0=y0, x1=x1, y1=y1, 
                 xref="x", yref="y", line=dict(color=line_color, width=1, dash="dash"), layer="below"
+            )
+
+    # 3b. 叠加幽灵分叉枝丫（被趋势穿透吞噬的陷阱化石）
+    # 每条幽灵枝丫从仍存活的实线锚点出发，画出被消灭的两个被砍点
+    ghost_forks = getattr(engine, 'ghost_forks', [])
+    if ghost_forks:
+        all_ghost_tks = []
+        for fork_tk, consumed in ghost_forks:
+            # 从 fork_tk → consumed[0]（旧同向点）→ consumed[1]（旧异向中继）画枝丫
+            path = [fork_tk] + consumed
+            for i in range(len(path) - 1):
+                ta, tb = path[i], path[i + 1]
+                chart.fig.add_shape(
+                    type="line",
+                    x0=ta.dt.strftime("%Y-%m-%d %H:%M"), y0=ta.price,
+                    x1=tb.dt.strftime("%Y-%m-%d %H:%M"), y1=tb.price,
+                    xref="x", yref="y",
+                    line=dict(color="rgba(160,160,160,0.45)", width=1, dash="dot"),
+                    layer="below"
+                )
+            all_ghost_tks.extend(consumed)  # 仅标记被消灭的点，不重复标 fork_tk
+
+        # 幽灵点标记（灰色小圆）
+        if all_ghost_tks:
+            ghost_df = pd.DataFrame([
+                {"dt": tk.dt.strftime("%Y-%m-%d %H:%M"), "fx": tk.price,
+                 "text": "👻顶" if tk.mark == Mark.G else "👻底"}
+                for tk in all_ghost_tks
+            ])
+            chart.add_scatter_indicator(
+                ghost_df["dt"], ghost_df["fx"], name="幽灵顶底", row=1,
+                text=ghost_df["text"], mode="markers",
+                marker=dict(size=5, color="rgba(150,150,150,0.55)", symbol="circle-open")
             )
 
     # 3. 叠加摩尔双轨中枢 (合并历史与当前潜在)

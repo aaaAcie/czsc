@@ -81,6 +81,11 @@ class MooreSegment:
     cache: dict = field(default_factory=dict)
 
     @property
+    def is_perfect(self) -> bool:
+        """结构完美性决定线段虚实（法则三：端点 TurningK 内部是否有中枢）"""
+        return self.end_k.is_perfect
+
+    @property
     def sdt(self) -> datetime:
         return self.start_k.dt
         
