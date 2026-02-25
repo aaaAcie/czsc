@@ -265,7 +265,8 @@ class FractalEngine:
         self._update_segments()
         s.candidate_tk = None
         self.center.rollback()
-        s.potential_centers = []  # 确立后清空暂存区，为下一轮寻找准备
+        s.all_centers.extend(s.potential_centers)  # 先持久化：让历史中枢存入 all_centers
+        s.potential_centers = []  # 再清空暂存区，为下一轮寻找准备
 
     def _can_refresh_candidate(self, new_extreme_bar: RawBar, new_price: float, new_mark: Mark) -> bool:
         """判断新找到的极值K能否刷新当前候选顶底（candidate_tk）

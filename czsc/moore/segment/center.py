@@ -16,7 +16,7 @@
   - 两类中枢（肉眼/隐式）不在入场时判断，在推进中动态升级
   - 一旦固化即不再修改，后续线段回溯不影响已确定中枢
 """
-from czsc.py.enum import Direction
+from czsc.py.enum import Direction, Mark
 from czsc.py.objects import RawBar
 from ..objects import MooreCenter
 
@@ -36,18 +36,31 @@ class CenterEngine:
         """逐 bar 推进中枢状态机"""
         s = self.s
 
-        # 确定当前线段方向
-        direction = self._get_direction(bar)
+        # 获取宏观的绝对锚点和方向
+        anchor_idx, direction = self._get_macro_anchor()
         if direction is None:
             return
 
         ma5 = bar.cache.get('ma5', 0)
 
         # =====================================================================
+        # 【新增】：全局方向/锚点拦截器 (The Global Reset)
+        # =====================================================================
+        if s.center_state > 0:
+            # 触发条件 1：宏观方向发生了翻转（如：候选底变成了候选顶）
+            # 触发条件 2：宏观方向没变，但锚点移动了（同向刷新，底变得更低了）
+            if direction != s.center_direction or anchor_idx != s.center_anchor_idx:
+                self.rollback()
+                # rollback 后 s.center_state 瞬间归 0，会立刻无缝流入下方的 State 0 逻辑！
+
+        # =====================================================================
         # State 0：找 K0（实体完全站在 MA5 正侧，且不与已有中枢重叠）
         # =====================================================================
         if s.center_state == 0:
-            is_pure = (bar.close > ma5) if direction == Direction.Up else (bar.close < ma5)
+            if direction == Direction.Up:
+                is_pure = min(bar.open, bar.close) > ma5
+            else:
+                is_pure = max(bar.open, bar.close) < ma5
 
             if is_pure:
                 has_overlap = False
@@ -58,20 +71,27 @@ class CenterEngine:
 
                 if not has_overlap:
                     s.current_k0 = bar
+                    s.center_direction = direction
+                    s.center_anchor_idx = anchor_idx  # 【新增】：死死锁定这个中枢的物理发源锚点
                     s.center_state = 1
 
         # =====================================================================
         # State 1：找确认K（第一根反穿 MA5 → 中枢线K）
         # =====================================================================
         elif s.center_state == 1:
-            # K0 滚动刷新：当前 bar 依然满足纯正侧
-            is_still_pure = (bar.close > ma5) if direction == Direction.Up else (bar.close < ma5)
+            # K0 滚动刷新：当前 bar 实体依然完全在正侧
+            if direction == Direction.Up:
+                is_still_pure = min(bar.open, bar.close) > ma5
+                is_break      = min(bar.open, bar.close) < ma5
+            else:
+                is_still_pure = max(bar.open, bar.close) < ma5
+                is_break      = max(bar.open, bar.close) > ma5
+
             if is_still_pure:
                 s.current_k0 = bar
                 return
 
-            # 确认K：实体反穿 MA5
-            is_break = (bar.close < ma5) if direction == Direction.Up else (bar.close > ma5)
+            # 确认K：实体的一边反穿了 MA5
             if is_break:
                 s.center_state = 2
                 # 步骤一：入场即定初始结界（向左看）
@@ -147,19 +167,27 @@ class CenterEngine:
     # 私有方法
     # =========================================================================
 
-    def _get_direction(self, bar: RawBar):
-        """确定当前正在形成的线段方向"""
+    def _get_macro_anchor(self) -> tuple:
+        """
+        获取当前宏观走势的绝对锚点与方向（降维同步法核心）
+        返回: (锚点 K 线的绝对索引, 物理延伸方向)
+        """
         s = self.s
+
+        # 1. 最高优先级：当前的候选极值（candidate_tk）
+        # 这是最贴近当下物理盘面的前沿阵地。
+        # 候选顶(G)意味着当前物理走势正在向下；候选底(D)意味着向上。
+        if s.candidate_tk:
+            direction = Direction.Down if s.candidate_tk.mark == Mark.G else Direction.Up
+            return s.candidate_tk.k_index, direction
+
+        # 2. 次优先级：上一个确立的极值（turning_ks[-1]）
         if s.turning_ks:
-            return Direction.Up if s.turning_ks[-1].mark.value == 'D' else Direction.Down
-        # 无已确立顶底时，根据 MA5 斜率判断
-        if s.last_ma5 is not None:
-            ma5 = bar.cache.get('ma5', 0)
-            if ma5 > s.last_ma5:
-                return Direction.Up
-            if ma5 < s.last_ma5:
-                return Direction.Down
-        return None
+            direction = Direction.Up if s.turning_ks[-1].mark == Mark.D else Direction.Down
+            return s.turning_ks[-1].k_index, direction
+
+        # 3. 混沌期：无极值，保持静默，不盲目建中枢
+        return -1, None
 
     def _enter_forming_state(self, direction: Direction, k0: RawBar,
                               confirm_k: RawBar, cf_index: int):
@@ -195,11 +223,32 @@ class CenterEngine:
             center_line = (min(confirm_k.open, confirm_k.close) if is_double_gap
                            else max(confirm_k.open, confirm_k.close))
 
+        # =========================================================
+        # 【新增】：唯一性（刷新法则）拦截
+        # 中枢线的产生必须正向持续新高/新低，否则直接不成立！
+        # =========================================================
+        if s.potential_centers:
+            prev_c = s.potential_centers[-1]
+            if direction == Direction.Up and center_line <= prev_c.center_line:
+                self.rollback()
+                return
+            if direction == Direction.Down and center_line >= prev_c.center_line:
+                self.rollback()
+                return
+
         # --- 向左找最左连续 2K 重叠，确定初始另一轨 ---
-        # 搜索范围：turning_ks[-1].k_index 到 confirm_k（不含）
+        # 基础搜索起点：整条线段的起点
         search_start = s.turning_ks[-1].k_index if s.turning_ks else 0
+
+        # 【新增的叹息之墙】：绝对不允许穿透上一个中枢的破窗点！（跨线段依然有效）
+        if s.last_center_end_idx != -1:
+            search_start = max(search_start, s.last_center_end_idx)
+
         upper_rail = center_line  # 兜底：退化为单线
         lower_rail = center_line
+
+        # 【新增】：默认兜底发生时间为确认K的时间
+        inception_dt = confirm_k.dt
 
         for i in range(search_start, cf_index - 1):
             k1 = s.bars_raw[i]
@@ -211,10 +260,14 @@ class CenterEngine:
                 if direction == Direction.Up and overlap_high >= center_line:
                     upper_rail = overlap_high  # 上涨：另一轨 = 最左2K重叠上沿
                     lower_rail = center_line
+                    # 【新增】：找到了真实阵地，把起始时间往前推到第一根重叠 K 线
+                    inception_dt = k1.dt
                     break
                 elif direction == Direction.Down and overlap_low <= center_line:
                     lower_rail = overlap_low   # 下跌：另一轨 = 最左2K重叠下沿
                     upper_rail = center_line
+                    # 【新增】：找到了真实阵地，把起始时间往前推到第一根重叠 K 线
+                    inception_dt = k1.dt
                     break
 
         # --- 初始化观测病房状态 ---
@@ -223,7 +276,9 @@ class CenterEngine:
         s.center_direction      = direction
         s.center_upper_rail     = upper_rail
         s.center_lower_rail     = lower_rail
-        s.center_start_dt       = confirm_k.dt
+
+        # 【修改】：使用我们刚刚锚定的物理发源时间
+        s.center_start_dt       = inception_dt
         s.center_end_dt         = confirm_k.dt
         s.center_is_visible     = False
         s.center_flip_done      = False
@@ -254,11 +309,25 @@ class CenterEngine:
             center_line = s.center_upper_rail   # 下跌线段：中枢线 = 上轨
 
         type_str = "VISIBLE" if s.center_is_visible else "INVISIBLE"
+
+        # 判定方式（用于图表标注）
+        if s.center_is_visible:
+            method = "肉眼"
+        elif self._check_fan_zheng_liang_chuan():
+            method = "反正两穿"
+        elif self._check_5k_overlap():
+            method = "5K重叠"
+        elif self._check_san_bi():
+            method = "三笔"
+        else:
+            method = "未知"   # 理论上不应到达此处
+
         center = MooreCenter(
             type_name=type_str,
             direction=s.center_direction,
             anchor_k0=s.current_k0,
             confirm_k=s.center_line_k,
+            method=method,
             center_line=center_line,
             upper_rail=s.center_upper_rail,
             lower_rail=s.center_lower_rail,
@@ -284,6 +353,10 @@ class CenterEngine:
                     return
 
         s.potential_centers.append(center)
+
+        # 【新增】：成功固化并挂载后，记录这个中枢的破窗点（共用 K 线）
+        # 这样下一个中枢往左回溯时，最多只能碰到这根 K 线！
+        s.last_center_end_idx = s.center_end_k_index
 
     def _check_hidden_center(self) -> bool:
         """起手三式：满足其一即视为隐式中枢成立（OR 关系）
@@ -386,13 +459,23 @@ class CenterEngine:
             return False
 
         search_start = s.turning_ks[-1].k_index if s.turning_ks else 0
+        # 【新增】：同步防穿透书签
+        if s.last_center_end_idx != -1:
+            search_start = max(search_start, s.last_center_end_idx)
+
         # 严格截断至确认K（不含后续右推窗口）
         window_bars  = s.bars_raw[search_start : s.center_line_k_index + 1]
 
-        return self._check_5k_pattern(s.center_direction, window_bars)
+        # 【新增】：提取当前中枢线，用于重叠区位置校验
+        if s.center_direction == Direction.Up:
+            center_line = s.center_lower_rail
+        else:
+            center_line = s.center_upper_rail
+
+        return self._check_5k_pattern(s.center_direction, window_bars, center_line)
 
 
-    def _check_5k_pattern(self, direction: Direction, bars: list) -> bool:
+    def _check_5k_pattern(self, direction: Direction, bars: list, center_line: float) -> bool:
         """5K重叠核心判断
 
         首K（K_a）：bars 中第一个比前邻更高（Up）或更低（Down）的局部极值点
@@ -438,6 +521,12 @@ class CenterEngine:
             if overlap_low > overlap_high:
                 continue  # 无真实重叠
 
+            # 【新增：核心校验】重叠区必须与中枢线价格逻辑契合，防止误触非本中枢的价格基底
+            if direction == Direction.Up and overlap_high < center_line:
+                continue
+            if direction == Direction.Down and overlap_low > center_line:
+                continue
+
             # 4. 清点 [首K, 窗口末端] 内摸到重叠区的 K 线数
             count = sum(
                 1 for k in bars[i:]
@@ -470,6 +559,9 @@ class CenterEngine:
             return False
 
         search_start    = s.turning_ks[-1].k_index if s.turning_ks else 0
+        # 【新增】：同步防穿透书签
+        if s.last_center_end_idx != -1:
+            search_start = max(search_start, s.last_center_end_idx)
         window_bars     = s.bars_raw[search_start : s.center_end_k_index + 1]
         # 确认K 在 window_bars 中的相对索引
         confirm_k_idx   = s.center_line_k_index - search_start

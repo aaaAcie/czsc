@@ -48,6 +48,7 @@ class MooreCenter:
     confirm_k: Optional[RawBar] = None    # 状态机：反穿 MA5 的确认 K
     
     # 轨道属性
+    method: str = ""                      # 判定方式：VISIBLE / 2C / 5K / 3BI
     center_line: float = 0.0              # 中枢线价格
     upper_rail: float = 0.0               # 上轨价格
     lower_rail: float = 0.0               # 下轨价格

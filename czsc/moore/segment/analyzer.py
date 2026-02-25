@@ -70,6 +70,7 @@ class SegmentState:
     # -------------------------------------------------------------------------
     # 中枢引擎游标
     # -------------------------------------------------------------------------
+    center_anchor_idx: int            = -1     # 记录当前中枢发源的宏观锚点索引
     center_state: int                 = 0
     current_k0: Optional[RawBar]      = None
 
@@ -87,6 +88,7 @@ class SegmentState:
     center_prev_ma5_slope: Optional[float]  = None   # 上一个斜率差（用于检测山峰谷底）
     center_end_k_index: int                 = -1     # 当前窗口最后一根在结界内K的绝对索引
     center_is_double_gap: bool              = False  # confirm_k 与 k0 是否双跳空（式一自动成立）
+    last_center_end_idx: int                = -1     # 记录上一个固化中枢的破窗 K 线索引
 
 
     # -------------------------------------------------------------------------

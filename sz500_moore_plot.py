@@ -171,24 +171,83 @@ def plot_moore_structure(
             if not ct.start_dt or not ct.end_dt: continue
             x0 = ct.start_dt.strftime("%Y-%m-%d %H:%M")
             x1 = ct.end_dt.strftime("%Y-%m-%d %H:%M")
-            y0 = ct.lower_rail
-            y1 = ct.upper_rail
-            fill_color = "rgba(233, 30, 99, 0.08)" if ct.is_visible else "rgba(46, 134, 222, 0.08)"
-            line_color = "#E91E63" if ct.is_visible else "#2E86DE"
-            
+            y_lower = ct.lower_rail
+            y_upper = ct.upper_rail
+            y_center = getattr(ct, 'center_line', (y_lower + y_upper) / 2)
+
+            # 颜色按判定方式区分
+            method = getattr(ct, 'method', '肉眼' if ct.is_visible else '?')
+            if ct.is_visible:
+                fill_color  = "rgba(233, 30, 99, 0.15)"
+                line_color  = "#E91E63"
+            elif method == "反正两穿":
+                fill_color  = "rgba(46, 204, 113, 0.15)"
+                line_color  = "#2ECC71"
+            elif method == "5K重叠":
+                fill_color  = "rgba(46, 134, 222, 0.15)"
+                line_color  = "#2E86DE"
+            elif method == "三笔":
+                fill_color  = "rgba(155, 89, 182, 0.15)"
+                line_color  = "#9B59B6"
+            else:
+                fill_color  = "rgba(150,150,150,0.15)"
+                line_color  = "#999999"
+
+            # ── 1. 中枢矩形框（淡色填充） ──
             chart.fig.add_shape(
-                type="rect", x0=x0, y0=y0, x1=x1, y1=y1, 
-                xref="x", yref="y", line=dict(color=line_color, width=1),
+                type="rect", x0=x0, y0=y_lower, x1=x1, y1=y_upper,
+                xref="x", yref="y", line=dict(color=line_color, width=2),
                 fillcolor=fill_color, layer="below"
             )
-            # 标注中枢编号
-            chart.fig.add_annotation(
-                x=x0, y=y1, xref="x", yref="y",
-                text=f"中枢{c_idx}({ '肉眼' if ct.is_visible else '非肉眼' })",
-                showarrow=False, font=dict(size=9, color="#90A4AE"),
-                xanchor="left", yanchor="bottom"
+
+            # ── 2. 上轨横线（实线，颜色同矩形） ──
+            chart.fig.add_shape(
+                type="line", x0=x0, y0=y_upper, x1=x1, y1=y_upper,
+                xref="x", yref="y",
+                line=dict(color=line_color, width=2, dash="solid"),
+                layer="above"
             )
+            # ── 3. 下轨横线（实线，颜色同矩形） ──
+            chart.fig.add_shape(
+                type="line", x0=x0, y0=y_lower, x1=x1, y1=y_lower,
+                xref="x", yref="y",
+                line=dict(color=line_color, width=2, dash="solid"),
+                layer="above"
+            )
+            # ── 4. 中枢线横线（虚线，半透明） ──
+            chart.fig.add_shape(
+                type="line", x0=x0, y0=y_center, x1=x1, y1=y_center,
+                xref="x", yref="y",
+                line=dict(color=line_color, width=1.2, dash="dot"),
+                layer="above"
+            )
+
+            # ── 6. 右端轨道价格标注（深度简化：合并编号/方法/中枢线） ──
+            method   = getattr(ct, 'method', '肉眼' if ct.is_visible else '?')
+            if ct.direction == Direction.Up:
+                # 上涨线段：中枢线 = 下轨
+                labels = [
+                    (y_upper, f"上轨 {y_upper:.2f}"),
+                    (y_lower, f"#{c_idx} {method}-中枢线下轨 {y_lower:.2f}")
+                ]
+            else:
+                # 下跌线段：中枢线 = 上轨
+                labels = [
+                    (y_upper, f"#{c_idx} {method}-中枢线上轨 {y_upper:.2f}"),
+                    (y_lower, f"下轨 {y_lower:.2f}")
+                ]
+
+            for y_val, label_text in labels:
+                chart.fig.add_annotation(
+                    x=x1, y=y_val, xref="x", yref="y",
+                    text=label_text,
+                    showarrow=False,
+                    font=dict(size=7, color=line_color),  # 字体缩小到 7
+                    xanchor="left", yanchor="middle", xshift=5,
+                    bgcolor="rgba(255,255,255,0.4)"
+                )
             c_idx += 1
+
 
     # 4. 叠加当前的“潜在中枢”（即还在寻找中的探测器结果）
     if hasattr(engine, 'potential_centers') and engine.potential_centers:
