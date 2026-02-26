@@ -73,6 +73,7 @@ class SegmentState:
     center_anchor_idx: int            = -1     # 记录当前中枢发源的宏观锚点索引
     center_state: int                 = 0
     current_k0: Optional[RawBar]      = None
+    latest_k0: Optional[RawBar]       = None   # 追踪最近的合规 K0，用于在旧中枢夭折时原地重建
 
     # 观测病房（Pending Center）状态（State 2 使用）
     center_line_k: Optional[RawBar]         = None   # 确认K（中枢线K）
@@ -82,10 +83,6 @@ class SegmentState:
     center_lower_rail: float                = 0.0    # 结界下轨（实时可更新）
     center_start_dt: Optional[datetime]     = None   # 结界起始时间
     center_end_dt: Optional[datetime]       = None   # 结界当前右端（实时居新）
-    center_is_visible: bool                 = False  # 是否已升级为肉眼中枢
-    center_flip_done: bool                  = False  # MA5 折返升级只做一次
-    center_prev_ma5: Optional[float]        = None   # 上一根 K 的 MA5（用于斜率计算）
-    center_prev_ma5_slope: Optional[float]  = None   # 上一个斜率差（用于检测山峰谷底）
     center_end_k_index: int                 = -1     # 当前窗口最后一根在结界内K的绝对索引
     center_is_double_gap: bool              = False  # confirm_k 与 k0 是否双跳空（式一自动成立）
     last_center_end_idx: int                = -1     # 记录上一个固化中枢的破窗 K 线索引
@@ -185,7 +182,7 @@ class SegmentAnalyzer:
 
     @property
     def all_centers(self) -> List[MooreCenter]:
-        return self.state.all_centers
+        return self.state.all_centers + self.state.potential_centers
 
     @property
     def potential_centers(self) -> List[MooreCenter]:

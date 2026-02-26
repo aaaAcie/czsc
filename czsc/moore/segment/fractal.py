@@ -264,7 +264,6 @@ class FractalEngine:
 
         self._update_segments()
         s.candidate_tk = None
-        self.center.rollback()
         s.all_centers.extend(s.potential_centers)  # 先持久化：让历史中枢存入 all_centers
         s.potential_centers = []  # 再清空暂存区，为下一轮寻找准备
 
@@ -382,6 +381,12 @@ class FractalEngine:
                 )
                 # 从历史仓库 all_centers 中提取符合该线段时间的中枢进行挂载
                 seg.centers = [c for c in s.all_centers if c.start_dt >= tk1.dt and c.end_dt <= tk2.dt]
+                
+                # 【修复核心】：动态纠偏。
+                # 即使确立瞬间中枢还没固化，只要现在库里有了，说明线段级别已保障，自动转为实线。
+                if seg.centers:
+                    tk2.is_perfect = True
+                
                 s.segments.append(seg)
 
         # 控制最大数量

@@ -175,46 +175,50 @@ def plot_moore_structure(
             y_upper = ct.upper_rail
             y_center = getattr(ct, 'center_line', (y_lower + y_upper) / 2)
 
-            # 颜色按判定方式区分
-            method = getattr(ct, 'method', '肉眼' if ct.is_visible else '?')
-            if ct.is_visible:
-                fill_color  = "rgba(233, 30, 99, 0.15)"
+            # 动态检测是否为“被宏观刷新遗弃的异类幽灵中枢”
+            is_ghost = False
+            for seg in getattr(engine, 'segments', []):
+                # 如果这个中枢的确认K发生在某条线段的时间范围内，但方向和这条闭环线段的方向相悖！
+                if seg.start_k.dt <= getattr(ct, 'confirm_k', ct.anchor_k0).dt <= seg.end_k.dt:
+                    if ct.direction != seg.direction:
+                        is_ghost = True
+                    break
+            
+            if is_ghost:
+                fill_color  = "rgba(150, 150, 150, 0.2)"  # 幽灵灰
+                line_color  = "#888888"                   # 灰线
+                line_dash   = "dash"                      # 虚线框
+            elif ct.is_visible:
+                fill_color  = "rgba(233, 30, 99, 0.15)"   # 粉润
                 line_color  = "#E91E63"
-            elif method == "反正两穿":
-                fill_color  = "rgba(46, 204, 113, 0.15)"
-                line_color  = "#2ECC71"
-            elif method == "5K重叠":
-                fill_color  = "rgba(46, 134, 222, 0.15)"
-                line_color  = "#2E86DE"
-            elif method == "三笔":
-                fill_color  = "rgba(155, 89, 182, 0.15)"
-                line_color  = "#9B59B6"
+                line_dash   = "solid"
             else:
-                fill_color  = "rgba(150,150,150,0.15)"
-                line_color  = "#999999"
+                fill_color  = "rgba(46, 204, 113, 0.15)"  # 翠绿
+                line_color  = "#2ECC71"
+                line_dash   = "solid"
 
             # ── 1. 中枢矩形框（淡色填充） ──
             chart.fig.add_shape(
                 type="rect", x0=x0, y0=y_lower, x1=x1, y1=y_upper,
-                xref="x", yref="y", line=dict(color=line_color, width=2),
+                xref="x", yref="y", line=dict(color=line_color, width=2, dash=line_dash),
                 fillcolor=fill_color, layer="below"
             )
 
-            # ── 2. 上轨横线（实线，颜色同矩形） ──
+            # ── 2. 上轨横线（颜色同矩形） ──
             chart.fig.add_shape(
                 type="line", x0=x0, y0=y_upper, x1=x1, y1=y_upper,
                 xref="x", yref="y",
-                line=dict(color=line_color, width=2, dash="solid"),
+                line=dict(color=line_color, width=2, dash=line_dash),
                 layer="above"
             )
-            # ── 3. 下轨横线（实线，颜色同矩形） ──
+            # ── 3. 下轨横线（颜色同矩形） ──
             chart.fig.add_shape(
                 type="line", x0=x0, y0=y_lower, x1=x1, y1=y_lower,
                 xref="x", yref="y",
-                line=dict(color=line_color, width=2, dash="solid"),
+                line=dict(color=line_color, width=2, dash=line_dash),
                 layer="above"
             )
-            # ── 4. 中枢线横线（虚线，半透明） ──
+            # ── 4. 中枢线横线（永远是虚线，半透明） ──
             chart.fig.add_shape(
                 type="line", x0=x0, y0=y_center, x1=x1, y1=y_center,
                 xref="x", yref="y",
@@ -223,28 +227,32 @@ def plot_moore_structure(
             )
 
             # ── 6. 右端轨道价格标注（深度简化：合并编号/方法/中枢线） ──
-            method   = getattr(ct, 'method', '肉眼' if ct.is_visible else '?')
+            c_type = "肉" if ct.is_visible else "非肉"
+            if is_ghost:
+                c_type = "👻-" + c_type
+                
+            method = getattr(ct, 'method', '未知')
+            
             if ct.direction == Direction.Up:
                 # 上涨线段：中枢线 = 下轨
                 labels = [
-                    (y_upper, f"上轨 {y_upper:.2f}"),
-                    (y_lower, f"#{c_idx} {method}-中枢线下轨 {y_lower:.2f}")
+                    (y_upper, f"上轨 {y_upper:.2f}", 5),
+                    (y_lower, f"#{c_idx} {c_type}-{method}-中枢线下轨 {y_lower:.2f}", -5)
                 ]
             else:
                 # 下跌线段：中枢线 = 上轨
                 labels = [
-                    (y_upper, f"#{c_idx} {method}-中枢线上轨 {y_upper:.2f}"),
-                    (y_lower, f"下轨 {y_lower:.2f}")
+                    (y_upper, f"#{c_idx} {c_type}-{method}-中枢线上轨 {y_upper:.2f}", 5),
+                    (y_lower, f"下轨 {y_lower:.2f}", -5)
                 ]
 
-            for y_val, label_text in labels:
+            for y_val, label_text, ys in labels:
                 chart.fig.add_annotation(
                     x=x1, y=y_val, xref="x", yref="y",
                     text=label_text,
                     showarrow=False,
-                    font=dict(size=7, color=line_color),  # 字体缩小到 7
-                    xanchor="left", yanchor="middle", xshift=5,
-                    bgcolor="rgba(255,255,255,0.4)"
+                    font=dict(size=8, color=line_color),  # 稍微将字体放大至8，由于背景透明提升可读性
+                    xanchor="left", yanchor="middle", xshift=5, yshift=ys
                 )
             c_idx += 1
 
