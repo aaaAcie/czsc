@@ -121,14 +121,37 @@ class CenterEngine:
                               and bar.low  <= s.center_upper_rail)
 
             if not bar_intersects:
-                # 步骤四：固化 → 存储 → 回 State 0
-                self._finalize_and_mount_center()
-                self.rollback()
-                return
-
-            # 步骤二：仍在结界内，更新右端时间和索引
-            s.center_end_dt      = bar.dt
-            s.center_end_k_index = k_index
+                # 将脱轨 K 线收入缓冲区
+                s.escape_bars.append((bar, k_index))
+                
+                # 如果是第一根脱轨 K 线，把它作为“临界点/破窗点”暂时纳入观测窗口的右边界
+                # 这样它仍然能参与内部合法性校验（如反正两穿的K2判定）
+                if len(s.escape_bars) == 1:
+                    s.center_end_dt = bar.dt
+                    s.center_end_k_index = k_index
+                    
+                # 满足连续三根脱轨，彻底宣告病房关闭
+                if len(s.escape_bars) >= 3:
+                    # 步骤四：固化 → 存储 → 回滚自身状态
+                    self._finalize_and_mount_center()
+                    self.rollback()
+                    
+                    # 【无缝衔接】：当前这根（第三次确立脱轨的）K 线本身可能就是完美的纯净点
+                    if is_pure and not has_overlap:
+                        s.current_k0 = bar
+                        s.center_direction = current_dir
+                        s.center_anchor_idx = anchor_idx
+                        s.center_state = 1
+                    return
+            else:
+                # 依然在结界内，或者之前只是假突破，现在又乖乖跌回了重叠结界！
+                if s.escape_bars:
+                    # 假动作识别，清空脱轨缓冲期！中枢继续贪婪地延伸
+                    s.escape_bars.clear()
+                    
+                # 更新真正的右端时间和索引
+                s.center_end_dt      = bar.dt
+                s.center_end_k_index = k_index
 
 
 
@@ -182,6 +205,7 @@ class CenterEngine:
         s.center_end_dt         = None
         s.center_end_k_index    = -1
         s.center_is_double_gap  = False
+        s.escape_bars.clear()
 
     # =========================================================================
     # 私有方法

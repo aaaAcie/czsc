@@ -86,6 +86,7 @@ class SegmentState:
     center_end_k_index: int                 = -1     # 当前窗口最后一根在结界内K的绝对索引
     center_is_double_gap: bool              = False  # confirm_k 与 k0 是否双跳空（式一自动成立）
     last_center_end_idx: int                = -1     # 记录上一个固化中枢的破窗 K 线索引
+    escape_bars: list                       = field(default_factory=list) # 记录连续脱离中枢结界的K线缓存（脱轨缓冲区）
 
 
     # -------------------------------------------------------------------------

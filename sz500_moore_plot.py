@@ -55,21 +55,39 @@ def plot_moore_structure(
             text=tk_df["text"], mode="markers", marker_size=7, marker_color="#E0E0E0"
         )
         
-        # 提取其中带出来的“触发K（转折K）”
-        trigger_data = []
+        # 叠加带有箭杆的指向性箭头（转折K）
         for tk in engine.turning_ks:
             if tk.trigger_k:
-                trigger_data.append({
-                    "dt": tk.trigger_k.dt.strftime("%Y-%m-%d %H:%M"), 
-                    "fx": tk.trigger_k.close, # 画在触发K的收盘价位置
-                    "text": "转折K"
-                })
-        if trigger_data:
-            tr_df = pd.DataFrame(trigger_data)
-            chart.add_scatter_indicator(
-                tr_df["dt"], tr_df["fx"], name="转折K", row=1, 
-                text=tr_df["text"], mode="markers", marker_size=8, marker_color="#FFF59D" # 淡黄色
-            )
+                if tk.mark == Mark.D:  # 底分型确立 -> 向上转折确立
+                    chart.fig.add_annotation(
+                        x=tk.trigger_k.dt.strftime("%Y-%m-%d %H:%M"),
+                        y=tk.trigger_k.low,
+                        showarrow=True,
+                        arrowhead=2,
+                        arrowsize=1.2,
+                        arrowwidth=2,
+                        arrowcolor="rgba(255, 255, 255, 0.7)", # 白色带透明度
+                        ax=0,
+                        ay=40,    # 箭柄长度
+                        standoff=10, # 箭头尖端离开 K 线的距离
+                        text="",
+                        xref="x", yref="y"
+                    )
+                else:  # 顶分型确立 -> 向下转折确立
+                    chart.fig.add_annotation(
+                        x=tk.trigger_k.dt.strftime("%Y-%m-%d %H:%M"),
+                        y=tk.trigger_k.high,
+                        showarrow=True,
+                        arrowhead=2,
+                        arrowsize=1.2,
+                        arrowwidth=2,
+                        arrowcolor="rgba(255, 255, 255, 0.7)", # 白色带透明度
+                        ax=0,
+                        ay=-40,   # 箭柄长度
+                        standoff=10, # 箭头尖端离开 K 线的距离
+                        text="",
+                        xref="x", yref="y"
+                    )
     
     # 1b. 标记所有中枢的 K0 锚点 (淡棕色)
     k0_data = []
@@ -291,14 +309,24 @@ def plot_moore_structure(
 
 if __name__ == '__main__':
     try:
-        symbols = research.get_symbols('中证500成分股')[:30]
+        # symbols = research.get_symbols('中证500成分股')[:30]
+        # symbols = ['sz002286']
+        symbols = ['sz002346'] # 柘中股份
+        # symbols = ['300371'] # 汇中股份
+
+
         if not symbols:
             raise ValueError("未能获取中证500成分股")
             
         symbol = symbols[0]
         # 获取真实的数据
         logger.info(f"拉取标的 {symbol} 真实 K 线...")
-        bars = research.get_raw_bars(symbol, freq='30分钟', sdt='20210101', edt='20210701')
+        # bars = research.get_raw_bars(symbol, freq='30分钟', sdt='20210101', edt='20210701')
+        # bars = research.get_raw_bars_30m(symbol, freq='30分钟', sdt='20200301', edt='20200901')
+        bars = research.get_raw_bars_origin(symbol, sdt='20180922', edt='20200908')
+        # bars = research.get_raw_bars_origin(symbol, sdt='20190122', edt='20200908')
+
+
         
         # 喂入引擎
         engine = MooreCZSC(bars)
@@ -313,7 +341,12 @@ if __name__ == '__main__':
         logger.info(f"[诊断] turning_ks 确立数量: {len(engine.turning_ks)} | 触发事件总次数: {engine._debug_trigger_count} | 实体推升拦截: {engine._debug_body_filter} | candidate_tk 当前: {engine.candidate_tk}")
         
         # 绘制输出
-        plot_moore_structure(bars, engine, output_file="moore_sz500_30f_plot.html", title=f"摩尔缠论 {symbol} 30分钟 结构测试")
+        output_dir = "moore_plots"
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+        output_file = os.path.join(output_dir, f"{symbol}_moore.html")
+        plot_moore_structure(bars, engine, output_file=output_file, title=f"摩尔缠论 {symbol} 结构测试")
     except Exception as e:
         import traceback
         traceback.print_exc()

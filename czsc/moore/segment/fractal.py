@@ -175,8 +175,8 @@ class FractalEngine:
 
                 if not prev_b or not next_b:
                     continue
-                if (new_mark == Mark.G and curr_b.high > prev_b.high and curr_b.high > next_b.high) or \
-                   (new_mark == Mark.D and curr_b.low  < prev_b.low  and curr_b.low  < next_b.low):
+                if (new_mark == Mark.G and curr_b.high >= prev_b.high and curr_b.high >= next_b.high) or \
+                   (new_mark == Mark.D and curr_b.low  <= prev_b.low  and curr_b.low  <= next_b.low):
                     extreme_bar, extreme_k_index = curr_b, search_start_idx + i
                     break
 
@@ -325,10 +325,10 @@ class FractalEngine:
 
             is_3k_ok = False
             if tk.mark == Mark.G:
-                if curr_b.high > prev_b.high and curr_b.high > next_b.high:
+                if curr_b.high >= prev_b.high and curr_b.high >= next_b.high:
                     is_3k_ok = True
             else:
-                if curr_b.low < prev_b.low and curr_b.low < next_b.low:
+                if curr_b.low <= prev_b.low and curr_b.low <= next_b.low:
                     is_3k_ok = True
 
             if not is_3k_ok:
@@ -355,12 +355,54 @@ class FractalEngine:
             s.debug_rule_fail[2] = s.debug_rule_fail.get(2, 0) + 1
             return False, False  # 没交叉，连基础确立都不算
 
-        # 3. 第三法则：结构完整性 (内部必须包含中枢)
-        # 不拦截线段生成，但真实写入 is_perfect 标记，供趋势穿透层使用
+        # 3. 第三法则：结构完整性 (内部必须包含中枢，且顶底至少有一端完全脱离中枢两根K线之上/下)
         is_perfect = True
-        if not s.potential_centers:
+        
+        center_rails = []
+        for c in s.potential_centers:
+            center_rails.append((c.lower_rail, c.upper_rail))
+            
+        if s.center_state == 2:
+            center_rails.append((s.center_lower_rail, s.center_upper_rail))
+
+        if not center_rails:
             s.debug_rule_fail[3] = s.debug_rule_fail.get(3, 0) + 1
             is_perfect = False  # 无中枢 → 微观结构不完美（虚线标记）
+        else:
+            seg_start_tk = ref_tk
+            seg_end_tk = tk
+            
+            top_tk = seg_end_tk if seg_end_tk.mark == Mark.G else seg_start_tk
+            bot_tk = seg_start_tk if seg_end_tk.mark == Mark.G else seg_end_tk
+            
+            max_upper = max(r[1] for r in center_rails)
+            min_lower = min(r[0] for r in center_rails)
+            
+            # --- 检测 Top 是否脱离 (连续2K最低价 > 所有中枢的上轨) ---
+            t_idx = top_tk.k_index
+            t_bars = [s.bars_raw[t_idx]]
+            if t_idx == seg_end_tk.k_index and t_idx - 1 >= seg_start_tk.k_index:
+                t_bars.append(s.bars_raw[t_idx - 1])
+            elif t_idx == seg_start_tk.k_index and t_idx + 1 <= seg_end_tk.k_index:
+                t_bars.append(s.bars_raw[t_idx + 1])
+                
+            top_indep = len(t_bars) >= 2 and all(b.low > max_upper for b in t_bars)
+            
+            # --- 检测 Bot 是否脱离 (连续2K最高价 < 所有中枢的下轨) ---
+            b_idx = bot_tk.k_index
+            b_bars = [s.bars_raw[b_idx]]
+            if b_idx == seg_end_tk.k_index and b_idx - 1 >= seg_start_tk.k_index:
+                b_bars.append(s.bars_raw[b_idx - 1])
+            elif b_idx == seg_start_tk.k_index and b_idx + 1 <= seg_end_tk.k_index:
+                b_bars.append(s.bars_raw[b_idx + 1])
+                
+            bot_indep = len(b_bars) >= 2 and all(b.high < min_lower for b in b_bars)
+            
+            if top_indep or bot_indep:
+                is_perfect = True
+            else:
+                is_perfect = False
+                s.debug_rule_fail[3] = s.debug_rule_fail.get(3, 0) + 1
 
         return True, is_perfect
 
@@ -379,13 +421,49 @@ class FractalEngine:
                     symbol=tk1.symbol, start_k=tk1, end_k=tk2,
                     direction=direction, bars=segment_bars
                 )
+                
+                # 必须汇总 all_centers 和当前尚未挂载的 potential_centers
+                # 否则新线段的确立瞬间，会误判其内部无中枢
+                all_available_centers = s.all_centers + s.potential_centers
+                
                 # 从历史仓库 all_centers 中提取符合该线段时间的中枢进行挂载
-                seg.centers = [c for c in s.all_centers if c.start_dt >= tk1.dt and c.end_dt <= tk2.dt]
+                seg.centers = [c for c in all_available_centers if c.start_dt >= tk1.dt and c.end_dt <= tk2.dt]
                 
                 # 【修复核心】：动态纠偏。
-                # 即使确立瞬间中枢还没固化，只要现在库里有了，说明线段级别已保障，自动转为实线。
+                # 即使确立瞬间中枢还没固化，只要现在库里有了，并且满足独立脱离两K法则，则自动转为实线。
                 if seg.centers:
-                    tk2.is_perfect = True
+                    max_upper = max(c.upper_rail for c in seg.centers)
+                    min_lower = min(c.lower_rail for c in seg.centers)
+                    
+                    top_tk = tk2 if tk2.mark == Mark.G else tk1
+                    bot_tk = tk1 if tk2.mark == Mark.G else tk2
+                    
+                    # Top bars
+                    t_idx = top_tk.k_index
+                    t_bars = [s.bars_raw[t_idx]]
+                    if t_idx == tk2.k_index and t_idx - 1 >= tk1.k_index:
+                        t_bars.append(s.bars_raw[t_idx - 1])
+                    elif t_idx == tk1.k_index and t_idx + 1 <= tk2.k_index:
+                        t_bars.append(s.bars_raw[t_idx + 1])
+                        
+                    top_indep = len(t_bars) >= 2 and all(b.low > max_upper for b in t_bars)
+                    
+                    # Bot bars
+                    b_idx = bot_tk.k_index
+                    b_bars = [s.bars_raw[b_idx]]
+                    if b_idx == tk2.k_index and b_idx - 1 >= tk1.k_index:
+                        b_bars.append(s.bars_raw[b_idx - 1])
+                    elif b_idx == tk1.k_index and b_idx + 1 <= tk2.k_index:
+                        b_bars.append(s.bars_raw[b_idx + 1])
+                        
+                    bot_indep = len(b_bars) >= 2 and all(b.high < min_lower for b in b_bars)
+                    
+                    if top_indep or bot_indep:
+                        tk2.is_perfect = True
+                    else:
+                        tk2.is_perfect = False
+                else:
+                    tk2.is_perfect = False
                 
                 s.segments.append(seg)
 
