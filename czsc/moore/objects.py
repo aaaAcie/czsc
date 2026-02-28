@@ -56,6 +56,11 @@ class MooreCenter:
     start_dt: Optional[datetime] = None   # 中枢确立的起始时间
     end_dt: Optional[datetime] = None     # 中枢确立的终点时间
 
+    start_k_index: int = -1               # 中枢起始 K 线索引
+    end_k_index: int = -1                 # 中枢结束 K 线索引
+    
+    is_ghost: bool = False                # 标记该中枢是否为洗盘期遗留的“逆势幽灵中枢”
+
     cache: dict = field(default_factory=dict)
 
     @property

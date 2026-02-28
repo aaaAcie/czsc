@@ -427,7 +427,14 @@ class FractalEngine:
                 all_available_centers = s.all_centers + s.potential_centers
                 
                 # 从历史仓库 all_centers 中提取符合该线段时间的中枢进行挂载
-                seg.centers = [c for c in all_available_centers if c.start_dt >= tk1.dt and c.end_dt <= tk2.dt]
+                seg.centers = []
+                for c in all_available_centers:
+                    start_val = c.start_dt
+                    # 如果 confirm_k 缺失（极端情况），回退到 start_dt
+                    confirm_val = c.confirm_k.dt if c.confirm_k else c.start_dt
+                    
+                    if start_val >= tk1.dt and confirm_val <= tk2.dt:
+                        seg.centers.append(c)
                 
                 # 【修复核心】：动态纠偏。
                 # 即使确立瞬间中枢还没固化，只要现在库里有了，并且满足独立脱离两K法则，则自动转为实线。

@@ -311,8 +311,8 @@ if __name__ == '__main__':
     try:
         # symbols = research.get_symbols('中证500成分股')[:30]
         # symbols = ['sz002286']
-        symbols = ['sz002346'] # 柘中股份
-        # symbols = ['300371'] # 汇中股份
+        # symbols = ['sz002346'] # 柘中股份
+        symbols = ['300371'] # 汇中股份
 
 
         if not symbols:
@@ -323,8 +323,8 @@ if __name__ == '__main__':
         logger.info(f"拉取标的 {symbol} 真实 K 线...")
         # bars = research.get_raw_bars(symbol, freq='30分钟', sdt='20210101', edt='20210701')
         # bars = research.get_raw_bars_30m(symbol, freq='30分钟', sdt='20200301', edt='20200901')
-        bars = research.get_raw_bars_origin(symbol, sdt='20180922', edt='20200908')
-        # bars = research.get_raw_bars_origin(symbol, sdt='20190122', edt='20200908')
+        # bars = research.get_raw_bars_origin(symbol, sdt='20180922', edt='20200908')
+        bars = research.get_raw_bars_origin(symbol, sdt='20190122', edt='20200908')
 
 
         

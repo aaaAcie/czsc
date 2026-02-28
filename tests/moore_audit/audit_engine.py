@@ -1,170 +1,184 @@
+# -*- coding: utf-8 -*-
+"""
+摩尔缠论统一审计引擎 (Unified Audit Engine)
+------------------------------------------
+沉淀调试能力，涵盖：
+1. 物理分水岭审计 (TurningK & TriggerK)
+2. 线段完美性审计 (法则三：独立脱离测试详情)
+3. 中枢物理边界审计 (右边界截断、左边界防火墙)
+4. 趋势穿透与异常审计 (Ghost Forks)
+5. 技术指标动力学审计 (K 线实时 MA 详情)
+"""
 import argparse
 import collections
+import os
+import sys
 from datetime import datetime
+from typing import List, Dict, Any
+
 from czsc.moore.analyze import MooreCZSC
 from czsc.connectors import research
 from czsc.py.enum import Direction, Mark
+from czsc.py.objects import RawBar
 import czsc.moore.segment.center as mod_center
 import czsc.moore.segment.fractal as mod_fractal
-import czsc.moore.segment.trend as mod_trend
 
-def unified_audit(symbol, sdt, edt, target_dates, flags):
+def audit_300371_special():
+    """汇中股份 300371 全量深度审计模板"""
+    symbol = '300371'
+    sdt, edt = '20190122', '20200828'
+    # 包含了最近讨论的 03-04, 03-23, 05-11, 05-12, 05-15 等关键节点
+    target_dates = ['2020-02-26', '2020-03-04', '2020-03-23', '2020-05-11', '2020-05-12', '2020-05-15']
+    
+    flags = {
+        'audit_center': True,
+        'audit_fractal': True,
+        'show_ghosts': True,
+        'detail_seg': True,
+    }
+    unified_audit(symbol, sdt, edt, target_dates, flags)
+
+def unified_audit(symbol: str, sdt: str, edt: str, target_dates: List[str], flags: Dict[str, bool]):
     """
-    摩尔缠论统一审计引擎入口
-    支持按需开启：基础数据、中枢逻辑、顶底逻辑、趋势穿透审计。
+    统一审计逻辑入口
     """
-    print(f"\n{'='*80}")
+    print(f"\n{'='*120}")
     print(f" 🛡️  MOORE UNIFIED AUDIT ENGINE | {symbol} | {sdt} - {edt}")
     print(f" 🎯 Focus Dates: {target_dates}")
-    print(f"{'='*80}\n")
+    print(f"{'='*120}\n")
 
-    # 1. 保存原版指针 (用于猴子补丁恢复)
+    # 1. 指针备份 (Monkey Patching)
     orig_center = {
         "update": mod_center.CenterEngine.update,
-        "formation": mod_center.CenterEngine._check_center_formation,
-        "finalize": mod_center.CenterEngine._finalize_and_mount_center,
-    }
-    orig_fractal = {
-        "update": mod_fractal.FractalEngine.update,
-        "validate": mod_fractal.FractalEngine._validate_four_rules,
-        "confirm": mod_fractal.FractalEngine._confirm_candidate,
     }
 
-    # --- 辅助判断函数 ---
-    def is_target(self):
-        if not self.s.bars_raw: return False
-        dt = str(self.s.bars_raw[-1].dt)
-        return any(d in dt for d in target_dates)
-
-    # 2. 定义【中枢引擎】审计补丁
-    def center_audit_update(self, bar, k_index):
+    # --- 审计钩子定义 (SECTION 4 增强) ---
+    def center_audit_update(self, bar: RawBar, k_index: int, **kwargs):
         curr_dt = str(bar.dt)
         hit = any(d in curr_dt for d in target_dates)
         if hit:
             ma5 = bar.cache.get('ma5', 0)
-            state = self.s.center_state
-            print(f"  [中枢👉 {curr_dt}] State:{state} | MA5:{ma5:.2f} | Rail:({self.s.center_lower_rail:.2f}-{self.s.center_upper_rail:.2f})")
+            ma34 = bar.cache.get('ma34', 0)
+            # 实时动力学计算
+            c_dir = self.s.center_direction if self.s.center_state > 0 else Direction.Down
+            if c_dir == Direction.Up:
+                is_pure = min(bar.open, bar.close) > ma5
+                is_break = min(bar.open, bar.close) < ma5
+            else:
+                is_pure = max(bar.open, bar.close) < ma5
+                is_break = max(bar.open, bar.close) > ma5
             
-            # 抢占逻辑审计
-            if state == 2:
-                formed = self._check_center_formation()
-                new_k0 = self.s.latest_k0
-                if new_k0:
-                    print(f"    [🚩 抢占审计] 备选K0:{new_k0.dt} | Formed:{formed} | 是否允许刷新: {'❌' if formed else '✅'}")
+            print(f"  [📈 指标审计👉 {curr_dt}] State:{self.s.center_state} | MA5:{ma5:.2f} | MA34:{ma34:.2f} | "
+                  f"Entity:({min(bar.open,bar.close):.2f}-{max(bar.open,bar.close):.2f}) | Pure:{is_pure} | Break:{is_break}")
+        
+        return orig_center["update"](self, bar, k_index, **kwargs)
 
-        res = orig_center["update"](self, bar, k_index)
-        if hit:
-            print(f"  [中枢✅ {curr_dt}] NewState:{self.s.center_state} | Rail:({self.s.center_lower_rail:.2f}-{self.s.center_upper_rail:.2f})")
-        return res
-
-    # 3. 定义【顶底引擎】审计补丁
-    def fractal_audit_validate(self, tk):
-        res_valid, res_perfect = orig_fractal["validate"](self, tk)
-        if is_target(self):
-            print(f"  [顶底🕵️ 验真] {tk.dt} | {tk.mark.name} | 结果: Valid={res_valid}, Perfect={res_perfect}")
-            # 如果不满足法则，可以打印具体失败原因（通过 state.debug_rule_fail 计数差值判断，此处简化）
-        return res_valid, res_perfect
-
-    def fractal_audit_confirm(self, final_tk, perfect):
-        if is_target(self):
-             print(f"  [顶底🔒 确立] {final_tk.dt} | {final_tk.mark.name} | Price:{final_tk.price} | Perfect:{perfect}")
-        return orig_fractal["confirm"](self, final_tk, perfect)
-
-    # 4. 应用补丁 (基于 Flags)
     if flags.get('audit_center'):
         mod_center.CenterEngine.update = center_audit_update
-    if flags.get('audit_fractal'):
-        mod_fractal.FractalEngine._validate_four_rules = fractal_audit_validate
-        mod_fractal.FractalEngine._confirm_candidate = fractal_audit_confirm
 
     try:
-        # 加载数据
+        os.environ['CZSC_USE_PYTHON'] = '1'
         bars = research.get_raw_bars_origin(symbol, sdt=sdt, edt=edt)
-        if not bars: bars = research.get_raw_bars_30m(symbol, sdt=sdt, edt=edt)
-        if not bars: return print("❌ Error: No data found.")
+        if not bars:
+            print(f"❌ 错误: 未能获取到标的 {symbol} 的 K 线数据")
+            return
 
-        # A. 基础数据展示 (同 check_data_detailed.py)
-        if flags.get('show_raw'):
-            print(f"{'-'*30} [ RAW BARS INSPECTOR ] {'-'*30}")
-            target_bars = [b for b in bars if any(d in str(b.dt) for d in target_dates)]
-            print(f"{'Time':<20} | {'Open':<7} | {'Close':<7} | {'High':<7} | {'Low':<7} | {'Color':<5}")
-            for b in target_bars:
-                color = "🔴" if b.close < b.open else "🟢" if b.close > b.open else "⚪"
-                print(f"{str(b.dt):<20} | {b.open:<7.2f} | {b.close:<7.2f} | {b.high:<7.2f} | {b.low:<7.2f} | {color:<5}")
-            print(f"{'-'*85}\n")
-
-        print(f"📊 Analyzing {len(bars)} bars...\n")
         engine = MooreCZSC(bars)
+        s = engine.segment_analyzer.state
 
-        # B. 最终审计报告
-        print("\n" + "="*80)
-        print(" 🔍 FINAL AUDIT SUMMARY")
-        print("="*80)
-        
-        # 1. 线段与顶底报告
-        print(f"\n[ 1. 顶底与线段 ]")
-        for tk in engine.turning_ks:
-            print(f"  {str(tk.dt):<20} | {tk.mark.name} | Price: {tk.price:<7.2f} | Perfect: {tk.is_perfect}")
-        
-        # 2. 趋势穿透与幽灵顶底 (Ghosts)
-        if flags.get('show_ghosts'):
-            print(f"\n[ 2. 趋势穿透与幽灵顶底 (Ghosts) ]")
-            if not engine.ghost_forks:
-                print("  None.")
-            for fork_base, consumed_list in engine.ghost_forks:
-                for ctk in consumed_list:
-                    print(f"  👻 GHOST: {ctk.dt} | {ctk.mark.name} | Price: {ctk.price:.2f} (Swallowed by {fork_base.dt})")
+        # =========================================================================
+        # 0. 物理分水岭审计 (TurningK & TriggerK)
+        # =========================================================================
+        print("\n" + "🔍 SECTION 0: 物理分水岭与转折审计 (TurningK & TriggerK)")
+        print("-" * 120)
+        print(f"{'编号':<4} | {'极值日期':<10} | {'触发日期 (Trig)':<15} | {'类型':<4} | {'极值价格':<8} | {'状态'}")
+        print("-" * 120)
+        for i, tk in enumerate(engine.turning_ks):
+            status = "🔒 锁定" if tk.is_locked else ("✅ 验证" if tk.is_valid else "⏳ 候选")
+            trig_dt = tk.trigger_k.dt.strftime('%m-%d') if tk.trigger_k else "None"
+            print(f"TK#{i+1:02d} | {tk.dt.strftime('%m-%d'):<10} | {trig_dt:<15} | {tk.mark.name:<4} | {tk.price:8.2f} | {status}")
 
-        # 3. 中枢系统与归属审计
-        print(f"\n[ 3. 中枢系统与线段归属审计 ]")
-        for i, c in enumerate(engine.all_centers):
-            anchor_dt = c.confirm_k.dt if c.confirm_k else c.start_dt
-            # 寻找该中枢理论上属于哪根线段
-            belong_seg = None
-            reject_reason = "No matching segment"
-            for s_idx, s in enumerate(engine.segments):
-                time_match = (c.start_dt >= s.start_k.dt and c.end_dt <= s.end_k.dt)
-                dir_match = (c.direction == s.direction)
-                
-                if time_match and dir_match:
-                    belong_seg = f"线段#{s_idx}"
+        # =========================================================================
+        # 1. 线段完美性 (法则三) 深度审计
+        # =========================================================================
+        print("\n" + "🔍 SECTION 1: 线段结构与完美性审计 (虚实分析)")
+        print("-" * 120)
+        print(f"{'编号':<4} | {'起始(极值)':<10} | {'结束(极值)':<10} | {'方向':<4} | {'状态':<6} | {'详细原因报告'}")
+        print("-" * 120)
+        
+        for i, seg in enumerate(engine.segments):
+            status = "✅ 完美" if seg.is_perfect else "⚠️ 虚线"
+            detail = ""
+            if not seg.is_perfect:
+                if not seg.centers:
+                    detail = "线段内无任何确立中枢"
+                else:
+                    max_upper = max(c.upper_rail for c in seg.centers)
+                    min_lower = min(c.lower_rail for c in seg.centers)
+                    t_tk = seg.start_k if seg.direction == Direction.Up else seg.end_k
+                    b_tk = seg.end_k if seg.direction == Direction.Up else seg.start_k
+                    # 检查是否侵入轨道
+                    t_hit = any(b.low <= max_upper for b in s.bars_raw[t_tk.k_index:t_tk.k_index+2] if seg.sdt <= b.dt <= seg.edt)
+                    b_hit = any(b.high >= min_lower for b in s.bars_raw[max(0, b_tk.k_index-1):b_tk.k_index+1] if seg.sdt <= b.dt <= seg.edt)
+                    reasons = []
+                    if t_hit: reasons.append(f"顶侵轨(>{max_upper:.2f})")
+                    if b_hit: reasons.append(f"底侵轨(<{min_lower:.2f})")
+                    detail = " & ".join(reasons) if reasons else "内部中枢确立但不满足脱离深度"
+            else:
+                 detail = f"包含 {len(seg.centers)} 个活跃中枢"
+
+            print(f"Seg#{i+1:02d} | {seg.sdt.strftime('%m-%d'):<10} | {seg.edt.strftime('%m-%d'):<10} | {seg.direction.name:<4} | {status:<6} | {detail}")
+
+        # =========================================================================
+        # 2. 中枢系统审计
+        # =========================================================================
+        print("\n" + "🔍 SECTION 2: 中枢系统深度审计 (名分与归属)")
+        print("-" * 120)
+        print(f"{'编号':<4} | {'起始时刻':<10} | {'结束时刻':<10} | {'方向':<4} | {'方式':<10} | {'轨道范围':<15} | {'状态/归属详情'}")
+        print("-" * 120)
+        
+        all_centers = s.all_centers + s.potential_centers
+        for i, c in enumerate(all_centers):
+            ghost = "👻 幽灵" if getattr(c, 'is_ghost', False) else "✅ 正常"
+            belong = "游离"
+            for si, seg in enumerate(engine.segments):
+                if seg.sdt <= c.start_dt and (c.confirm_k.dt if c.confirm_k else c.start_dt) <= seg.edt:
+                    belong = f"Seg#{si+1}"
+                    if c.direction != seg.direction: belong += "(❌异类)"
                     break
-                elif time_match and not dir_match:
-                    reject_reason = f"方向冲突(👻异类): 中枢{c.direction.name} vs 线段{s.direction.name}"
-                elif not time_match and (s.start_k.dt <= anchor_dt <= s.end_k.dt):
-                    reject_reason = f"生命周期跨越线段: 中枢从{c.start_dt}开始，而线段从{s.start_k.dt}才开始"
+            print(f"C#{i:02d} | {c.start_dt.strftime('%m-%d'):<10} | {c.end_dt.strftime('%m-%d'):<10} | {c.direction.name:<4} | {c.method:<10} | {c.lower_rail:6.2f}-{c.upper_rail:6.2f} | {ghost} ({belong})")
 
-            status_str = f"✅ 属于 {belong_seg}" if belong_seg else f"⚠️ 游离 ({reject_reason})"
-            print(f"  #{i:02d} | {c.start_dt} -> {c.end_dt} | {c.direction.name} | {status_str} | 轨:{c.lower_rail:.2f}-{c.upper_rail:.2f}")
-
-        print("\n" + "="*80 + "\n")
+        # =========================================================================
+        # 3. 趋势穿透审计
+        # =========================================================================
+        if flags.get('show_ghosts') and s.ghost_forks:
+            print("\n" + "🔍 SECTION 3: 趋势穿透与锚点吞噬审计 (Ghost Forks)")
+            print("-" * 120)
+            for fork_tk, consumed in s.ghost_forks:
+                print(f"🔱 吞噬锚点: {fork_tk.dt} | 方向: {fork_tk.mark.name}")
+                for ck in consumed:
+                    print(f"    - 被抹除极值: {ck.dt} | {ck.mark.name} | Price: {ck.price:.2f}")
 
     finally:
-        # 恢复指针
         mod_center.CenterEngine.update = orig_center["update"]
-        mod_fractal.FractalEngine._validate_four_rules = orig_fractal["validate"]
-        mod_fractal.FractalEngine._confirm_candidate = orig_fractal["confirm"]
+        print(f"\n{'='*120}")
+        print(" ✅ 审计分析报告生成完毕")
+        print(f"{'='*120}\n")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="摩尔缠论统一审计引擎")
-    parser.add_argument('--symbol', default='sz002286', help='股票代码')
-    parser.add_argument('--sdt', default='20200101', help='开始时间')
-    parser.add_argument('--edt', default='20200828', help='结束时间')
-    parser.add_argument('--target', nargs='+', default=['2020-03-20', '2020-06-05', '2020-06-10'], help='重点观测日期')
-    
-    # 开关
-    parser.add_argument('--no-center', action='store_true', help='关闭中枢审计日志')
-    parser.add_argument('--no-fractal', action='store_true', help='关闭顶底审计日志')
-    parser.add_argument('--no-raw', action='store_true', help='关闭原始K线展示')
-    parser.add_argument('--no-ghost', action='store_true', help='关闭幽灵顶底审计展示')
-
+    subparsers = parser.add_subparsers(dest='command')
+    subparsers.add_parser('scan_300371', help='汇中股份 300371 全量深度诊断')
+    gen = subparsers.add_parser('generic', help='通用标的审计')
+    gen.add_argument('--symbol', required=True)
+    gen.add_argument('--sdt', default='20200101')
+    gen.add_argument('--edt', default='20200828')
+    gen.add_argument('--target', nargs='+', default=[])
     args = parser.parse_args()
-    
-    config_flags = {
-        'audit_center': not args.no_center,
-        'audit_fractal': not args.no_fractal,
-        'show_raw': not args.no_raw,
-        'show_ghosts': not args.no_ghost
-    }
-    
-    unified_audit(args.symbol, args.sdt, args.edt, args.target, config_flags)
+
+    if args.command == 'scan_300371':
+        audit_300371_special()
+    elif args.command == 'generic':
+        unified_audit(args.symbol, args.sdt, args.edt, args.target, {'audit_center': True, 'show_ghosts': True})
+    else:
+        parser.print_help()
