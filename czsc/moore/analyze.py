@@ -55,7 +55,8 @@ class MooreCZSC:
 
     @property
     def all_centers(self) -> List[MooreCenter]:
-        return self.segment_analyzer.all_centers
+        """包含历史、潜在、以及当前正在生长的所有活性中枢"""
+        return self.segment_analyzer.all_available_centers
 
     @property
     def potential_centers(self) -> List[MooreCenter]:

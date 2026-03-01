@@ -7,6 +7,7 @@ import os
 import pandas as pd
 import plotly.graph_objects as go
 from loguru import logger
+from dataclasses import dataclass
 from czsc.connectors import research
 from czsc.moore.analyze import MooreCZSC
 from czsc.core import format_standard_kline, Freq
@@ -259,24 +260,27 @@ def plot_moore_structure(
                 ), row=1, col=1)
             else:
                 # ── 非幽灵中枢：中枢矩形框（淡色填充） ──
-                chart.fig.add_shape(
-                    type="rect", x0=x0, y0=y_lower, x1=x1, y1=y_upper,
-                    xref="x", yref="y", line=dict(color=line_color, width=2, dash=line_dash),
-                    fillcolor=fill_color, layer="below"
-                )
-                # 轨道/中枢线用 shape 保持轻量
-                for y_val, dash, width in [(y_upper, line_dash, 2), (y_lower, line_dash, 2), (y_center, "dot", 1.2)]:
-                    chart.fig.add_shape(
-                        type="line", x0=x0, y0=y_val, x1=x1, y1=y_val,
-                        xref="x", yref="y", line=dict(color=line_color, width=width, dash=dash), layer="above"
-                    )
+                rect_x = [x0, x1, x1, x0, x0]
+                rect_y = [y_lower, y_lower, y_upper, y_upper, y_lower]
+                chart.fig.add_trace(go.Scatter(
+                    x=rect_x, y=rect_y, fill="toself", fillcolor=fill_color,
+                    line=dict(color=line_color, width=2, dash=line_dash),
+                    name="常规中枢", legendgroup="常规中枢", showlegend=(c_idx == 0), hoverinfo='skip'
+                ), row=1, col=1)
+                
+                # 轨道/中枢线
+                chart.fig.add_trace(go.Scatter(
+                    x=[x0, x1], y=[y_center, y_center],
+                    line=dict(color=line_color, width=1, dash="dot"),
+                    name="常规中枢", legendgroup="常规中枢", showlegend=False, hoverinfo='skip'
+                ), row=1, col=1)
 
-                for y_val, label_text, ys in [(y_upper, label_upper, ys_upper), (y_lower, label_lower, ys_lower)]:
-                    chart.fig.add_annotation(
-                        x=x1, y=y_val, xref="x", yref="y", text=label_text,
-                        showarrow=False, font=dict(size=8, color=line_color),
-                        xanchor="left", yanchor="middle", xshift=5, yshift=ys
-                    )
+                # 文字标签
+                chart.fig.add_trace(go.Scatter(
+                    x=[x1, x1], y=[y_upper, y_lower], text=[label_upper, label_lower],
+                    mode="text", name="中枢标注", legendgroup="常规中枢", showlegend=(c_idx == 0),
+                    textposition="middle right", textfont=dict(size=8, color=line_color)
+                ), row=1, col=1)
             c_idx += 1
 
 
@@ -299,46 +303,69 @@ def plot_moore_structure(
         )
 
     # --- 增加交互控制按钮 ---
+    # 定义中枢相关 trace 组
+    center_names = ["常规中枢", "中枢标注", "幽灵中枢", "K0锚点", "确认K"]
+    center_indices = [i for i, t in enumerate(chart.fig.data) if t.name in center_names]
+    
     ghost_names = ["幽灵枝丫", "幽灵顶底", "幽灵中枢"]
     ghost_indices = [i for i, t in enumerate(chart.fig.data) if t.name in ghost_names]
 
-    if ghost_indices:
-        chart.fig.update_layout(
-            margin=dict(t=80), # 增加顶部边距
-            updatemenus=[
-                dict(
-                    type="buttons", direction="left", showactive=True,
-                    x=0.01, xanchor="left", y=1.1, yanchor="top",
-                    buttons=[
-                        dict(label="显示所有幽灵", method="restyle", args=[{"visible": True}, ghost_indices]),
-                        dict(label="一键清洗幽灵", method="restyle", args=[{"visible": ["legendonly"] * len(ghost_indices)}, ghost_indices]),
-                    ]
-                )
+    updatemenus = []
+    
+    # 按钮组1：中枢总控
+    if center_indices:
+        updatemenus.append(dict(
+            type="buttons", direction="left", showactive=True,
+            x=0.01, xanchor="left", y=1.1, yanchor="top",
+            buttons=[
+                dict(label="显示中枢及标注", method="restyle", args=[{"visible": True}, center_indices]),
+                dict(label="隐藏中枢及标注", method="restyle", args=[{"visible": ["legendonly"] * len(center_indices)}, center_indices]),
             ]
+        ))
+
+    # 按钮组2：幽灵控制（保持原有逻辑）
+    if ghost_indices:
+        updatemenus.append(dict(
+            type="buttons", direction="left", showactive=True,
+            x=0.4, xanchor="left", y=1.1, yanchor="top",
+            buttons=[
+                dict(label="显示所有幽灵", method="restyle", args=[{"visible": True}, ghost_indices]),
+                dict(label="一键清洗幽灵", method="restyle", args=[{"visible": ["legendonly"] * len(ghost_indices)}, ghost_indices]),
+            ]
+        ))
+
+    if updatemenus:
+        chart.fig.update_layout(
+            margin=dict(t=80), 
+            updatemenus=updatemenus
         )
 
     chart.fig.write_html(output_file)
     logger.success(f"成功！摩尔结构图表已保存至: {os.path.abspath(output_file)}")
     return chart
 
+@dataclass
+class AnalyzeTask:
+    symbol: str
+    sdt: str
+    edt: str
+    desc: str = ""
+
 if __name__ == '__main__':
+    # 定义测试任务列表，可以在这里添加更多想测试的标的和时间段
+    tasks = [
+        AnalyzeTask("300371", sdt="20180822", edt="20200901", desc="汇中股份"),
+        AnalyzeTask("sz002346", sdt="20180901", edt="20200908", desc="柘中股份"),
+        AnalyzeTask("sz002286", sdt="20210101", edt="20210701", desc="保利发展"),
+    ]
+    
+    # 🎯 切换这里即可同时切换股票和时间范围 (例如改为 tasks[1] 或 tasks[2])
+    task = tasks[0]
+
     try:
-        # symbols = research.get_symbols('中证500成分股')[:30]
-        # symbols = ['sz002286']
-        # symbols = ['sz002346'] # 柘中股份
-        symbols = ['300371'] # 汇中股份
-
-
-        if not symbols:
-            raise ValueError("未能获取中证500成分股")
-            
-        symbol = symbols[0]
-        # 获取真实的数据
-        logger.info(f"拉取标的 {symbol} 真实 K 线...")
-        # bars = research.get_raw_bars(symbol, freq='30分钟', sdt='20210101', edt='20210701')
-        # bars = research.get_raw_bars_30m(symbol, freq='30分钟', sdt='20200301', edt='20200901')
-        # bars = research.get_raw_bars_origin(symbol, sdt='20180922', edt='20200908')
-        bars = research.get_raw_bars_origin(symbol, sdt='20190122', edt='20201228')
+        symbol = task.symbol
+        logger.info(f"正在拉取标的 {symbol} ({task.desc}) | 时间: {task.sdt} ~ {task.edt}")
+        bars = research.get_raw_bars_origin(symbol, sdt=task.sdt, edt=task.edt)
 
 
         
@@ -360,7 +387,7 @@ if __name__ == '__main__':
             os.makedirs(output_dir)
         
         output_file = os.path.join(output_dir, f"{symbol}_moore.html")
-        plot_moore_structure(bars, engine, output_file=output_file, title=f"摩尔缠论 {symbol} 结构测试")
+        plot_moore_structure(bars, engine, output_file=output_file, title=f"摩尔缠论 {symbol} ({task.desc})结构测试")
     except Exception as e:
         import traceback
         traceback.print_exc()

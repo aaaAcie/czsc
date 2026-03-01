@@ -16,6 +16,7 @@
   - 两类中枢（肉眼/隐式）不在入场时判断，在推进中动态升级
   - 一旦固化即不再修改，后续线段回溯不影响已确定中枢
 """
+from loguru import logger
 from typing import Optional
 from czsc.py.enum import Direction, Mark
 from czsc.py.objects import RawBar
@@ -58,6 +59,15 @@ class CenterEngine:
 
         # 【同步确认保护】：如果正在孵化的中枢其锚点被更高质量的极值跨越
         if s.center_state > 0 and s.center_anchor_idx < ext_idx:
+            # 【核心策略】：在清场前，强制进行最后一次名分与质检探测
+            # 许多中枢在极值出现的最后一根 K 线才满足 5K 重叠或黑K通过
+            self._check_center_formation()
+
+            # 【提前结业法则】：若已有名分且过质检，抢在清场前正式固化入库
+            if s.center_state >= 2 and s.center_method_found is not None and s.center_black_k_pass:
+                logger.debug(f"  [Early Graduation] Force finalize center {s.center_start_dt} due to anchor shift {s.center_anchor_idx} < {ext_idx}")
+                self._finalize_and_mount_center()
+                
             self.rollback()
 
         # 2. 确定当前参考方向（物理隔离法则）
@@ -237,6 +247,71 @@ class CenterEngine:
         # 无论是否固化成功，必须归位，新线段开启新篇章
         self.rollback()
 
+    def get_active_center(self) -> Optional[MooreCenter]:
+        """获取当前正在生长的（且已名分+黑K通过）活跃中枢作为虚拟对象。"""
+        s = self.s
+        if s.center_state < 2:
+            return None
+        
+        # 实时探测一次（确保当前 bar 的名分/黑K状态是最新的）
+        self._check_center_formation()
+        
+        if s.center_method_found is None or not s.center_black_k_pass:
+            return None
+            
+        return self._create_center_object()
+
+    def _create_center_object(self) -> MooreCenter:
+        """从当前 state 构建一个 MooreCenter 对象（不涉及挂载与合并）"""
+        s = self.s
+        
+        # 边界校正：固化时需保证右边界不越界。活跃预览时则根据当前 bar 对齐。
+        end_idx = s.center_end_k_index
+        end_dt = s.center_end_dt
+        if end_idx > (len(s.bars_raw) - 1):
+            end_idx = len(s.bars_raw) - 1
+            end_dt = s.bars_raw[-1].dt
+
+        # 左边界对合（基于 5K 真实起点回溯）
+        final_start_dt = s.center_start_dt
+        final_start_idx = s.center_start_k_index
+        
+        if s.center_method_found == "5K重叠":
+            ok, f5k_relative_idx = self._check_5k_overlap_with_idx()
+            if ok and f5k_relative_idx != -1:
+                search_start_global = max(0, s.center_anchor_idx)
+                if s.last_center_end_idx != -1:
+                    search_start_global = max(search_start_global, s.last_center_end_idx)
+                
+                absolute_f5k_idx = search_start_global + f5k_relative_idx
+                if absolute_f5k_idx < final_start_idx:
+                    final_start_idx = absolute_f5k_idx
+                    final_start_dt = s.bars_raw[final_start_idx].dt
+
+        # 中枢定性（肉眼 vs 非肉眼）
+        window_bars = s.bars_raw[s.center_line_k_index : end_idx + 1]
+        type_str = self._classify_center_type(s.center_direction, 0, window_bars)
+
+        if s.center_direction == Direction.Up:
+            center_line = s.center_lower_rail
+        else:
+            center_line = s.center_upper_rail
+
+        return MooreCenter(
+            type_name=type_str,
+            direction=s.center_direction,
+            anchor_k0=s.current_k0,
+            confirm_k=s.center_line_k,
+            method=s.center_method_found,
+            center_line=center_line,
+            upper_rail=s.center_upper_rail,
+            lower_rail=s.center_lower_rail,
+            start_dt=final_start_dt,
+            end_dt=end_dt,
+            start_k_index=final_start_idx,
+            end_k_index=end_idx,
+        )
+
     # =========================================================================
     # 私有方法
     # =========================================================================
@@ -359,76 +434,13 @@ class CenterEngine:
         self._check_center_formation()
 
     def _finalize_and_mount_center(self):
-        """固化病房，进行排他性比对后，挂载到 potential_centers 暂存区
-        
-        验证门（必须满足其一）：
-          - 起手三式满足其一，且包含黑K保障
-          - 且满足唯一性、排他延伸法则
-        """
+        """固化病房，进行排他性比对后，挂载到 potential_centers 暂存区"""
         s = self.s
         
-        # 【右边界物理隔离保护】
-        # 确保中枢的右边界绝对不会超越当前的 K 索引（防止在 Replay 中由于缓冲区残留导致的越界）
-        if s.center_end_k_index > (len(s.bars_raw) - 1):
-            s.center_end_k_index = len(s.bars_raw) - 1
-            s.center_end_dt = s.bars_raw[-1].dt
-            
-        # 最终确权审计 (入场时可能已判定，但固化前必须做终极审计)
-        self._check_center_formation() # 重新检查一次，确保最终状态
-        
-        if s.center_direction is None:
-            return
-
-        # ====== 验证门（起手三式 + 黑K保障） ======
-        # 【终极确权】如果之前没成型，这里做最后一次确认。
-        # 必须名分和黑K均通过，才能固化挂载。
-        self._check_center_formation()
-
-        if s.center_method_found is None or not s.center_black_k_pass:
-            return  # 最终也没成型，放弃
-
-        # ====== 【核心修复】：左边界对合（基于 5K 真实起点回溯） ======
-        final_start_dt = s.center_start_dt
-        final_start_idx = s.center_start_k_index
-        
-        if s.center_method_found == "5K重叠":
-            ok, f5k_relative_idx = self._check_5k_overlap_with_idx()
-            if ok and f5k_relative_idx != -1:
-                # 重新计算相对于 bars_raw 的全局索引
-                # 【核心修复】：必须使用与探测器一致的全局物理锚点
-                search_start_global = max(0, s.center_anchor_idx)
-                if s.last_center_end_idx != -1:
-                    search_start_global = max(search_start_global, s.last_center_end_idx)
-                
-                absolute_f5k_idx = search_start_global + f5k_relative_idx
-                # 【对合逻辑】：取更早的那个点作为逻辑起点（5K 只能帮助起始点前移，绝不允许后移）
-                if absolute_f5k_idx < final_start_idx:
-                    final_start_idx = absolute_f5k_idx
-                    final_start_dt = s.bars_raw[final_start_idx].dt
-
-        # ====== 中枢定性（肉眼 vs 非肉眼） ======
-        window_bars = s.bars_raw[s.center_line_k_index : s.center_end_k_index + 1]
-        type_str = self._classify_center_type(s.center_direction, 0, window_bars)
-
-        if s.center_direction == Direction.Up:
-            center_line = s.center_lower_rail
-        else:
-            center_line = s.center_upper_rail
-
-        center = MooreCenter(
-            type_name=type_str,
-            direction=s.center_direction,
-            anchor_k0=s.current_k0,
-            confirm_k=s.center_line_k,
-            method=s.center_method_found,
-            center_line=center_line,
-            upper_rail=s.center_upper_rail,
-            lower_rail=s.center_lower_rail,
-            start_dt=final_start_dt,
-            end_dt=s.center_end_dt,
-            start_k_index=final_start_idx,
-            end_k_index=s.center_end_k_index,
-        )
+        # 1. 终极确权审计
+        center = self.get_active_center()
+        if not center:
+            return  # 未能成型，放弃
 
         # =====================================================================
         # --- 空间审判与三大延伸法则（终极一刀切版） ---

@@ -57,7 +57,9 @@ class SegmentState:
     """
 
     # 可配置参数
-    max_segments: int = 500
+    max_segments: int           = 500
+    audit_cooling_period: int   = 2     # 审计冷静期：Vx 后至少确立的新点数
+    audit_backtrack_rounds: int = 4     # 审计回溯深度：最大尝试往回走的锚点轮数
 
     # -------------------------------------------------------------------------
     # 基础数据容器
@@ -201,11 +203,12 @@ class SegmentAnalyzer:
 
         # 宏观审判：仅在"新 TurningK 固化"时触发，四点模型至少需要 4 个转折点
         # 同向刷新时不审判：此时 N+1 段的终点尚未锁定，拿不确定性否定物理事实是错误的
+        # todo: 临时关闭以观察基础生长和微观刷新情况
         leap_happened = False
-        if is_new_tk and len(s.turning_ks) >= 4:
-            leap_happened = self._macro_audit_and_replay(k_index)
+        # if is_new_tk and len(s.turning_ks) >= 4:
+        #     leap_happened = self._macro_audit_and_replay(k_index)
         
-
+        
         # --- 5. 中枢重播（线段结构发生变化时触发，包含同向刷新）---
         if (leap_happened or is_changed) and len(s.turning_ks) >= 2:
             # turning_ks[-2] 是当前最新完整线段的起点锚。
@@ -219,7 +222,13 @@ class SegmentAnalyzer:
                 else tk_replay_start.k_index
             )
             correct_direction = Direction.Up if s.turning_ks[-1].mark == Mark.G else Direction.Down
-            self._replay_center_engine_for_segment(real_start_idx, real_trig_idx, k_index, correct_direction)
+
+            # 【核心策略】：只有在发生宏观跃迁（Leap）时，才允许保留并显示逆势幽灵中枢；
+            # 仅发生微观同向刷新（Refresh）时，直接丢弃与新方向不一致的中枢，保持图表纯净。
+            self._replay_center_engine_for_segment(
+                real_start_idx, real_trig_idx, k_index, correct_direction, 
+                allow_ghost=leap_happened
+            )
             
             # 【核心同步】：重播找回中枢后，必须立即同步到线段对象中，否则绘图层看到的 centers 为空
             self._fractal_engine._update_segments()
@@ -248,117 +257,103 @@ class SegmentAnalyzer:
         返回：True=发生了跃迁并重建结构，False=未触发
         """
     def _macro_audit_and_replay(self, k_index: int) -> bool:
-        """【宏观主动审判】
+        """【宏观深度审判引擎】
         
-        策略：扫描 turning_ks 列表中的疑似虚假点 (maybe_is_fake)，
-        从脆弱点出发，搜索可用的异向终点执行物理坍塌。
+        策略：全局扫描带有疑似标签的点 (Vx)，
+        当冷静期满足（Vx 后已确认 4 个点）时，启动 4 轮锚点回溯审计。
         """
         s = self.state
-        n = len(s.turning_ks)
+        n = len(s.turning_ks) - 1 # 最新点索引
         if n < 4: return False
 
-        # 扫描范围：最近确立的三个段落末端
-        scan_indices = [n-2, n-3, n-4] 
+        # 1. 寻找所有带有疑似标签的点
+        target_indices = [i for i, tk in enumerate(s.turning_ks) if tk.maybe_is_fake]
         
-        for idx in scan_indices:
-            if idx < 2: continue
-            tk_target = s.turning_ks[idx]
-            
-            # --- 命中标签，开始审判 ---
-            if not tk_target.maybe_is_fake:
+        for idx in target_indices:
+            # 物理限制：冷静期（V_x 出现后必须至少确立了所要求的冷静点数）
+            if n < idx + s.audit_cooling_period:
                 continue
 
-            # -----------------------------------------------------------------
-            # 搜索异向终点进行吞噬：
-            # -----------------------------------------------------------------
-            tk_start = s.turning_ks[idx-2]
-            mid_same = s.turning_ks[idx-1]
-            
-            # 候选终点：从最新的点往回数三个
-            potential_end_indices = [n-1, n-2, n-3]
-            
-            for end_idx in potential_end_indices:
-                if end_idx <= idx: continue 
+            # 2. 执行多轮锚点深度回溯 (S 从 idx-1 向左探测)
+            for r in range(1, s.audit_backtrack_rounds + 1):
+                start_idx = idx - r
+                if start_idx < 0: break
                 
-                tk_end = s.turning_ks[end_idx]
-                
-                # 物理前提：连线必须是顶底连接（异向）
-                if tk_start.mark != tk_end.mark:
-                    print(f"  [Audit] Testing Leap: {tk_start.dt}({tk_start.mark.name}) -> {tk_end.dt}({tk_end.mark.name}) swallow {mid_same.dt}/{tk_target.dt}")
-                    if self._check_leap_physics(tk_start, tk_end, mid_same, tk_target):
-                        print(f"  [Audit] SUCCESS! Leaping from {tk_start.dt} to {tk_end.dt}")
-                        self._execute_leap_collapse(idx-2, end_idx, (idx-1, idx))
+                tk_start = s.turning_ks[start_idx]
+
+                # 3. 动态搜索法官候选列表 (E 从 idx+1 探测到 n)
+                # 要求法官必须与起点异向。
+                for end_idx in range(idx + 1, n + 1):
+                    tk_end = s.turning_ks[end_idx]
+                    if tk_start.mark == tk_end.mark:
+                        continue
+                    
+                    # 4. 执行物理法则判定
+                    # 注意：在多点跃迁中，我们需要在 [start_idx, end_idx] 路径中
+                    # 自动寻找那个被挑战的同向原极值 (tk_mid_same)。
+                    if self._check_leap_physics(start_idx, end_idx):
+                        # 执行塌陷并重建
+                        self._execute_leap_collapse(start_idx, end_idx, (idx-1, idx))
                         return True
-                    else:
-                        print(f"  [Audit] FAILED Physics check.")
         return False
 
-        return False
-
-    def _check_leap_physics(self, tk_start: TurningK, tk_end: TurningK, 
-                           tk_mid_same: TurningK, tk_pullback: TurningK) -> bool:
-        """执行跃迁判定：法则一 (OR) 法则二
+    def _check_leap_physics(self, start_idx: int, end_idx: int) -> bool:
+        """执行跃迁判定：法则一 (实力生长) OR 法则二 (重心演化)
         
-        法则一：物理生长 (Price Growth) AND 锚点保护 (Price Gravity)
-        法则二：能量覆盖 (Energy 2A)   AND 引力锁定 (MA5 Gravity 2B)
+        对于深层回溯，tk_mid_same 被定义为 [start_idx+1, end_idx-1] 区间内
+        与 tk_end 方向一致的最强极值点（原主干锚点）。
         """
         s = self.state
+        tk_start = s.turning_ks[start_idx]
+        tk_end = s.turning_ks[end_idx]
 
-        # 准备全路径价格镜像（从起始点物理位置到当前）
+        # 1. 在路径中间寻找同向最强极值点 (mid_same)
+        mid_same_pool = [tk for tk in s.turning_ks[start_idx + 1 : end_idx] if tk.mark == tk_end.mark]
+        if not mid_same_pool: return False # 理论上路径中间必有同向点，除非是简单的三点模型
+        
+        # 寻找价格位置最极端的点作为对比标杆
+        if tk_end.mark == Mark.G:
+            tk_mid_same = max(mid_same_pool, key=lambda x: x.price)
+        else:
+            tk_mid_same = min(mid_same_pool, key=lambda x: x.price)
+
+        # 2. 准备物理参数
         bar_start = tk_start.k_index
         bar_end   = tk_end.k_index
         path_bars = s.bars_raw[bar_start : bar_end + 1]
+        path_ma5  = [b.cache.get('ma5') for b in path_bars if b.cache.get('ma5') is not None]
+        start_ma5 = tk_start.raw_bar.cache.get('ma5', None)
+        mid_ma5   = tk_mid_same.raw_bar.cache.get('ma5', None)
+        end_ma5   = tk_end.raw_bar.cache.get('ma5', None)
 
+        if start_ma5 is None or not path_ma5: return False
+
+        # --- 基础判定因子 ---
         tk_end_top = max(tk_end.raw_bar.open, tk_end.raw_bar.close)
         tk_end_bottom = min(tk_end.raw_bar.open, tk_end.raw_bar.close)
         tk_mid_top = max(tk_mid_same.raw_bar.open, tk_mid_same.raw_bar.close)
         tk_mid_bottom = min(tk_mid_same.raw_bar.open, tk_mid_same.raw_bar.close)
-        
-        # --- 准备物理参数 ---
-        start_ma5 = tk_start.raw_bar.cache.get('ma5', None)
-        mid_ma5   = tk_mid_same.raw_bar.cache.get('ma5', None)
-        end_ma5   = tk_end.raw_bar.cache.get('ma5', None)
-        path_ma5 = [b.cache.get('ma5') for b in path_bars if b.cache.get('ma5') is not None]
 
-        # 如果关键势能数据缺失，则无法执行宏观审判
-        if None in (start_ma5, path_ma5) or not path_ma5:
-            return False
-
-        # ---------------------------------------------------------------------
-        # 1. 物理生长判定 (Price Growth)
-        # ---------------------------------------------------------------------
+        # 增长判定
         if tk_end.mark == Mark.G:
             growth_ok = tk_end.price > tk_mid_same.price and tk_end_top > tk_mid_bottom
         else:
             growth_ok = tk_end.price < tk_mid_same.price and tk_end_bottom < tk_mid_top
 
-
-        # ---------------------------------------------------------------------
-        # 2. 势能覆盖判定 (Energy Coverage)
-        # 判断 MA5 值是否更为优胜（顺势新高/新低）
-        # ---------------------------------------------------------------------
+        # 势能优胜判定 (Discriminator)
         ma5_is_better = False
         if mid_ma5 is not None and end_ma5 is not None:
-            if tk_end.mark == Mark.G:
-                ma5_is_better = (end_ma5 > mid_ma5)
-            else:
-                ma5_is_better = (end_ma5 < mid_ma5)
+            ma5_is_better = (end_ma5 > mid_ma5) if tk_end.mark == Mark.G else (end_ma5 < mid_ma5)
 
+        # 引力锁定判定
+        ma5_gravity_ok = (min(path_ma5) >= start_ma5) if tk_end.mark == Mark.G else (max(path_ma5) <= start_ma5)
 
         # ---------------------------------------------------------------------
-        # 分支逻辑：更优就法则二（严格引力审判），否则法则一（物理边界审判）
+        # 分支逻辑：更优就法则二（重心优先），否则法则一（边界优先）
         # ---------------------------------------------------------------------
         if ma5_is_better:
-            # 【法则二：重心保护】势能优胜（顺势）时，必须满足生长且引力锁不坍塌
-            ma5_gravity_ok = False
-            if tk_end.mark == Mark.G:
-                if min(path_ma5) >= start_ma5: ma5_gravity_ok = True
-            else:
-                if max(path_ma5) <= start_ma5: ma5_gravity_ok = True
-            
             return growth_ok and ma5_gravity_ok
         else:
-            # 【法则一：实力生长】势能未覆盖（弱势或背离）时，仅查物理极值与穿透
             return growth_ok
 
     def _execute_leap_collapse(self, anchor_idx: int, new_end_idx: int,
@@ -423,8 +418,9 @@ class SegmentAnalyzer:
     # =========================================================================
 
     def _replay_center_engine_for_segment(self, start_ext_idx: int, start_trig_idx: int,
-                                           current_end_idx: int, correct_direction: Direction):
-        """发生线段结构变化时，回滚并重播正确的方向，找回被遗漏的中枢，冻结逆势幽灵中枢"""
+                                           current_end_idx: int, correct_direction: Direction,
+                                           allow_ghost: bool = True):
+        """发生线段结构变化时，回滚并重播正确的方向，找回被遗漏的中枢，(可选)冻结逆势幽灵中枢"""
         s = self.state
 
         # Step 1: 精准清理（拔根与留种）
@@ -432,7 +428,10 @@ class SegmentAnalyzer:
         for center in s.potential_centers:
             if center.start_k_index >= start_ext_idx:
                 if center.direction != correct_direction:
-                    center.is_ghost = True
+                    if allow_ghost:
+                        center.is_ghost = True
+                        new_potential.append(center)
+                else:
                     new_potential.append(center)
             else:
                 new_potential.append(center)
@@ -442,7 +441,10 @@ class SegmentAnalyzer:
         for center in s.all_centers:
             if center.start_k_index >= start_ext_idx:
                 if center.direction != correct_direction:
-                    center.is_ghost = True
+                    if allow_ghost:
+                        center.is_ghost = True
+                        new_all.append(center)
+                else:
                     new_all.append(center)
             else:
                 new_all.append(center)
@@ -474,6 +476,20 @@ class SegmentAnalyzer:
             else:
                 self._center_engine.update(bar, i)
             
+
+    @property
+    def all_available_centers(self) -> List[MooreCenter]:
+        """获取所有可用的中枢仓库（包含历史固化、本段潜在、以及正在生长的活跃中枢）"""
+        s = self.state
+        centers = s.all_centers + s.potential_centers
+        
+        # 实时获取正在生长的活跃中枢（有名分且过质检即可视）
+        active = self._center_engine.get_active_center()
+        if active:
+            # 这里的 active 中枢 end_dt 是随 bar 实时移动的，符合“中枢在生长”的直观感觉
+            centers.append(active)
+            
+        return centers
 
     # =========================================================================
     # 属性代理
