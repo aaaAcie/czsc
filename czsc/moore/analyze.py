@@ -26,12 +26,11 @@ class MooreCZSC:
     组合各级别子分析器，对外暴露统一、稳定的访问接口。
     """
 
-    def __init__(self, bars: List[RawBar], max_segments: int = 500, penetration_level: int = 2):
+    def __init__(self, bars: List[RawBar], max_segments: int = 500):
         # --- 30分钟线段级 ---
         self.segment_analyzer = SegmentAnalyzer(
             bars=bars,
             max_segments=max_segments,
-            penetration_level=penetration_level,
         )
 
         # --- 高级别（未来）---
@@ -85,14 +84,6 @@ class MooreCZSC:
     @property
     def trend_low(self) -> Optional[float]:
         return self.segment_analyzer.trend_low
-
-    @property
-    def penetration_level(self) -> int:
-        return self.segment_analyzer.penetration_level
-
-    @penetration_level.setter
-    def penetration_level(self, value: int):
-        self.segment_analyzer.penetration_level = value
 
     # -------------------------------------------------------------------------
     # 调试属性（与旧 MooreCZSC 保持向后兼容）

@@ -89,7 +89,12 @@ class CenterEngine:
         # =====================================================================
         has_overlap = False
         if s.potential_centers:
-            prev_c = next((c for c in reversed(s.potential_centers) if c.direction == current_dir), None)
+            # 【核心修复】：物理隔离扫描仅对“同一个宏观结构内”的老中枢有效
+            # 绝对不允许跨越物理极值点（ext_idx）去产生历史重叠感应
+            prev_c = next((c for c in reversed(s.potential_centers) 
+                           if c.direction == current_dir 
+                           and c.end_k_index >= ext_idx  # 必须在本段起点之后
+                          ), None)
             if prev_c and not (bar.low > prev_c.upper_rail or bar.high < prev_c.lower_rail):
                 has_overlap = True
 
@@ -390,7 +395,8 @@ class CenterEngine:
             ok, f5k_relative_idx = self._check_5k_overlap_with_idx()
             if ok and f5k_relative_idx != -1:
                 # 重新计算相对于 bars_raw 的全局索引
-                search_start_global = s.turning_ks[-1].k_index if s.turning_ks else 0
+                # 【核心修复】：必须使用与探测器一致的全局物理锚点
+                search_start_global = max(0, s.center_anchor_idx)
                 if s.last_center_end_idx != -1:
                     search_start_global = max(search_start_global, s.last_center_end_idx)
                 
@@ -428,8 +434,12 @@ class CenterEngine:
         # --- 空间审判与三大延伸法则（终极一刀切版） ---
         # =====================================================================
         if s.potential_centers:
-            # 只比对当前线段生成的中枢（也就是当前线段还未固化前，挂载在 potential_centers 里的中枢）
-            last_c = next((c for c in reversed(s.potential_centers) if c.direction == s.center_direction and not getattr(c, 'is_ghost', False)), None)
+            # 只比对当前线段生成的中枢（不得跨越物理极值点合并）
+            last_c = next((c for c in reversed(s.potential_centers) 
+                           if c.direction == s.center_direction 
+                           and not getattr(c, 'is_ghost', False)
+                           and c.end_k_index >= s.center_anchor_idx # 核心约束：上一个中枢必须在本段起点的右侧
+                          ), None)
             if last_c:
                 
                 # 1. 终极空间分离判定（完美涵盖不重叠与中枢线新高/新低）
@@ -680,9 +690,12 @@ class CenterEngine:
 
         window_bars  = s.bars_raw[search_start : s.center_end_k_index + 1]
 
-        return self._check_5k_pattern(s.center_direction, window_bars, confirm_idx)
+        # 确定当前中枢线价格用于覆盖校验
+        center_line = s.center_lower_rail if s.center_direction == Direction.Up else s.center_upper_rail
 
-    def _check_5k_pattern(self, direction: Direction, bars: list, confirm_idx: int) -> tuple:
+        return self._check_5k_pattern(s.center_direction, window_bars, confirm_idx, center_line)
+
+    def _check_5k_pattern(self, direction: Direction, bars: list, confirm_idx: int, center_line: float) -> tuple:
         """
         物理逻辑：寻找是否有 5 根 K 线在同一价格带重叠。
         核心逻辑升级：不再死板遵循线段方向，而是通过双向搜索寻找“最强物理摩擦锚点”。
@@ -728,19 +741,26 @@ class CenterEngine:
             if ov_low > ov_high:
                 return False, -1, 0
 
-            # 4. 统计重叠
+            # 4. 统计重叠（回归价格触碰标准）
             ov_indices = [i for i, k in enumerate(bars) if k.high >= ov_low and k.low <= ov_high]
             cnt = len(ov_indices)
             
-            # 判断逻辑 (5K 或 4K+跳空)
+            # 5. 终极确权：重叠区间必须覆盖当前中枢线
+            is_cl_covered = (ov_low <= center_line <= ov_high)
+
+            # 判断逻辑：5K 或 4K+跳空（反向或破位跳空坐实力量），且必须覆盖中枢线
             is_ok = False
             if cnt >= 5:
                 is_ok = True
             elif cnt == 4:
                 last_ov_idx = ov_indices[-1]
                 if len(bars) > last_ov_idx + 1:
-                    is_ok = bars[last_ov_idx+1].low > bars[last_ov_idx].high or \
-                            bars[last_ov_idx+1].high < bars[last_ov_idx].low
+                    next_b = bars[last_ov_idx + 1]
+                    prev_b = bars[last_ov_idx]
+                    # 只要发生物理跳空，即视为中枢力量的爆发确认
+                    is_ok = (next_b.low > prev_b.high or next_b.high < prev_b.low)
+
+            is_ok = is_ok and is_cl_covered
 
             if is_ok:
                 return True, ov_indices[0], cnt

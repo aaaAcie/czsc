@@ -27,9 +27,11 @@ class TurningK:
     trigger_k_index: Optional[int] = None  # 转折信号发生时的绝对索引位置
 
     # 状态标记
-    is_valid: bool = False    # 是否已经通过了基础验证（法则1,2）成立
-    is_perfect: bool = False  # 内政：内部是否包含线段中枢（微观几何成立）
-    is_locked: bool = False   # 外交：是否被趋势正式锁定为不可更改的历史锚点（宏观锁定，不可被趋势穿透吞噬）
+    is_valid: bool = False       # 是否已经通过了基础验证（法则1,2）成立
+    is_perfect: bool = False     # 内政：内部是否包含线段中枢（微观几何成立）
+    is_locked: bool = False      # 外交：是否被趋势正式锁定为不可更改的历史锚点（宏观锁定，不可被趋势穿透吞噬）
+    maybe_is_fake: bool = False  # 宏观审判层标记：该点所在的线段结构不完美，疑似虚假端点，等待三级跃迁回溯
+    has_visible_center: bool = False # 线段内部是否包含肉眼中枢（高能级结构保障）
     cache: dict = field(default_factory=dict)
 
     def __repr__(self):

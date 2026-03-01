@@ -5,6 +5,7 @@ describe: 验证摩尔状态机并生成带有中枢/线段展示的 HTML 图表
 """
 import os
 import pandas as pd
+import plotly.graph_objects as go
 from loguru import logger
 from czsc.connectors import research
 from czsc.moore.analyze import MooreCZSC
@@ -47,12 +48,21 @@ def plot_moore_structure(
     if engine.turning_ks:
         # 画出真正的顶底极值
         tk_df = pd.DataFrame([
-            {"dt": tk.dt.strftime("%Y-%m-%d %H:%M"), "fx": tk.price, "text": "顶" if tk.mark == Mark.G else "底"} 
-            for tk in engine.turning_ks
+            {
+                "dt": tk.dt.strftime("%Y-%m-%d %H:%M"), 
+                "fx": tk.price, 
+                "text": f"V{i}{'顶' if tk.mark == Mark.G else '底'}"
+            } 
+            for i, tk in enumerate(engine.turning_ks)
         ])
+        # 为顶底增加动态文字位置，避免遮挡
+        tk_df["pos"] = ["top center" if tk.mark == Mark.G else "bottom center" for tk in engine.turning_ks]
+        
         chart.add_scatter_indicator(
             tk_df["dt"], tk_df["fx"], name="顶底极值", row=1, 
-            text=tk_df["text"], mode="markers", marker_size=7, marker_color="#E0E0E0"
+            text=tk_df["text"], mode="markers+text", 
+            textposition=tk_df["pos"],
+            marker_size=8, marker_color="#E0E0E0"
         )
         
         # 叠加带有箭杆的指向性箭头（转折K）
@@ -109,7 +119,7 @@ def plot_moore_structure(
     # 2. 叠加摩尔本质线段
     if engine.segments:
         logger.info(f"本次生成的摩尔线段数量: {len(engine.segments)}")
-        for i, seg in enumerate(engine.segments, start=1):
+        for i, seg in enumerate(engine.segments):
             x0, y0 = seg.start_k.dt.strftime("%Y-%m-%d %H:%M"), seg.start_k.price
             x1, y1 = seg.end_k.dt.strftime("%Y-%m-%d %H:%M"), seg.end_k.price
 
@@ -127,11 +137,11 @@ def plot_moore_structure(
                 layer="above"
             )
             # 打标签
-            chart.fig.add_annotation(
-                x=x1, y=y1, xref="x", yref="y", text=f"线段{i}",
-                showarrow=False, font=dict(size=10, color=line_color),
-                xanchor="left", yanchor="middle"
-            )
+            # chart.fig.add_annotation(
+            #     x=x1, y=y1, xref="x", yref="y", text=f"线段{i}",
+            #     showarrow=False, font=dict(size=10, color=line_color),
+            #     xanchor="left", yanchor="middle"
+            # )
 
     # 3. 叠加被刷新掉的“演变路径”（虚线）
     if hasattr(engine, 'refreshed_segments') and engine.refreshed_segments:
@@ -146,26 +156,28 @@ def plot_moore_structure(
             )
 
     # 3b. 叠加幽灵分叉枝丫（被趋势穿透吞噬的陷阱化石）
-    # 每条幽灵枝丫从仍存活的实线锚点出发，画出被消灭的两个被砍点
     ghost_forks = getattr(engine, 'ghost_forks', [])
     if ghost_forks:
         all_ghost_tks = []
+        is_first_trace = True
         for fork_tk, consumed in ghost_forks:
-            # 从 fork_tk → consumed[0]（旧同向点）→ consumed[1]（旧异向中继）画枝丫
             path = [fork_tk] + consumed
             for i in range(len(path) - 1):
                 ta, tb = path[i], path[i + 1]
-                chart.fig.add_shape(
-                    type="line",
-                    x0=ta.dt.strftime("%Y-%m-%d %H:%M"), y0=ta.price,
-                    x1=tb.dt.strftime("%Y-%m-%d %H:%M"), y1=tb.price,
-                    xref="x", yref="y",
-                    line=dict(color="rgba(160,160,160,0.45)", width=1, dash="dot"),
-                    layer="below"
-                )
-            all_ghost_tks.extend(consumed)  # 仅标记被消灭的点，不重复标 fork_tk
+                # 根据终点状态恢复幽灵线原始的虚实
+                style = "solid" if tb.is_perfect else "dash"
+                
+                chart.fig.add_trace(go.Scatter(
+                    x=[ta.dt.strftime("%Y-%m-%d %H:%M"), tb.dt.strftime("%Y-%m-%d %H:%M")],
+                    y=[ta.price, tb.price],
+                    line=dict(color="rgba(160,160,160,0.6)", width=1.5, dash=style),
+                    mode="lines", name="幽灵枝丫线", legendgroup="幽灵元素",
+                    showlegend=is_first_trace, hoverinfo='skip'
+                ), row=1, col=1)
+                is_first_trace = False
+            all_ghost_tks.extend(consumed)
 
-        # 幽灵点标记（灰色小圆）
+        # 幽灵点标记（虚线圆圈）
         if all_ghost_tks:
             ghost_df = pd.DataFrame([
                 {"dt": tk.dt.strftime("%Y-%m-%d %H:%M"), "fx": tk.price,
@@ -174,16 +186,16 @@ def plot_moore_structure(
             ])
             chart.add_scatter_indicator(
                 ghost_df["dt"], ghost_df["fx"], name="幽灵顶底", row=1,
-                text=ghost_df["text"], mode="markers",
-                marker=dict(size=5, color="rgba(150,150,150,0.55)", symbol="circle-open")
+                text=ghost_df["text"], mode="markers", 
+                marker=dict(size=6, color="rgba(150,150,150,0.55)", symbol="circle-open")
             )
 
-    # 3. 叠加摩尔双轨中枢 (合并历史与当前潜在)
-    display_centers = getattr(engine, 'all_centers', []) + getattr(engine, 'potential_centers', [])
+    # 3. 叠加摩尔双轨中枢 (engine.all_centers 已包含历史固化与当前潜在)
+    display_centers = getattr(engine, 'all_centers', [])
     total_centers = len(display_centers)
     if total_centers > 0:
-        logger.info(f"本次生成的中枢数量: {total_centers}")
-        c_idx = 1
+        logger.info(f"本次展示的中枢总分（含幽灵）: {total_centers}")
+        c_idx = 0
         for ct in display_centers:
             # 取得时间跨度和上下轨
             if not ct.start_dt or not ct.end_dt: continue
@@ -193,14 +205,8 @@ def plot_moore_structure(
             y_upper = ct.upper_rail
             y_center = getattr(ct, 'center_line', (y_lower + y_upper) / 2)
 
-            # 动态检测是否为“被宏观刷新遗弃的异类幽灵中枢”
-            is_ghost = False
-            for seg in getattr(engine, 'segments', []):
-                # 如果这个中枢的确认K发生在某条线段的时间范围内，但方向和这条闭环线段的方向相悖！
-                if seg.start_k.dt <= getattr(ct, 'confirm_k', ct.anchor_k0).dt <= seg.end_k.dt:
-                    if ct.direction != seg.direction:
-                        is_ghost = True
-                    break
+            # 彻底信赖引擎内部的幽灵打标状态
+            is_ghost = getattr(ct, 'is_ghost', False)
             
             if is_ghost:
                 fill_color  = "rgba(150, 150, 150, 0.2)"  # 幽灵灰
@@ -215,36 +221,7 @@ def plot_moore_structure(
                 line_color  = "#2ECC71"
                 line_dash   = "solid"
 
-            # ── 1. 中枢矩形框（淡色填充） ──
-            chart.fig.add_shape(
-                type="rect", x0=x0, y0=y_lower, x1=x1, y1=y_upper,
-                xref="x", yref="y", line=dict(color=line_color, width=2, dash=line_dash),
-                fillcolor=fill_color, layer="below"
-            )
-
-            # ── 2. 上轨横线（颜色同矩形） ──
-            chart.fig.add_shape(
-                type="line", x0=x0, y0=y_upper, x1=x1, y1=y_upper,
-                xref="x", yref="y",
-                line=dict(color=line_color, width=2, dash=line_dash),
-                layer="above"
-            )
-            # ── 3. 下轨横线（颜色同矩形） ──
-            chart.fig.add_shape(
-                type="line", x0=x0, y0=y_lower, x1=x1, y1=y_lower,
-                xref="x", yref="y",
-                line=dict(color=line_color, width=2, dash=line_dash),
-                layer="above"
-            )
-            # ── 4. 中枢线横线（永远是虚线，半透明） ──
-            chart.fig.add_shape(
-                type="line", x0=x0, y0=y_center, x1=x1, y1=y_center,
-                xref="x", yref="y",
-                line=dict(color=line_color, width=1.2, dash="dot"),
-                layer="above"
-            )
-
-            # ── 6. 右端轨道价格标注（深度简化：合并编号/方法/中枢线） ──
+            # ── 6. 右端轨道价格标注 ──
             c_type = "肉" if ct.is_visible else "非肉"
             if is_ghost:
                 c_type = "👻-" + c_type
@@ -252,39 +229,57 @@ def plot_moore_structure(
             method = getattr(ct, 'method', '未知')
             
             if ct.direction == Direction.Up:
-                # 上涨线段：中枢线 = 下轨
-                labels = [
-                    (y_upper, f"上轨 {y_upper:.2f}", 5),
-                    (y_lower, f"#{c_idx} {c_type}-{method}-中枢线下轨 {y_lower:.2f}", -5)
-                ]
+                label_upper, label_lower = f"上轨 {y_upper:.2f}", f"#{c_idx} {c_type}-{method}-下轨 {y_lower:.2f}"
+                ys_upper, ys_lower = 5, -5
             else:
-                # 下跌线段：中枢线 = 上轨
-                labels = [
-                    (y_upper, f"#{c_idx} {c_type}-{method}-中枢线上轨 {y_upper:.2f}", 5),
-                    (y_lower, f"下轨 {y_lower:.2f}", -5)
-                ]
+                label_upper, label_lower = f"#{c_idx} {c_type}-{method}-上轨 {y_upper:.2f}", f"下轨 {y_lower:.2f}"
+                ys_upper, ys_lower = 5, -5
 
-            for y_val, label_text, ys in labels:
-                chart.fig.add_annotation(
-                    x=x1, y=y_val, xref="x", yref="y",
-                    text=label_text,
-                    showarrow=False,
-                    font=dict(size=8, color=line_color),  # 稍微将字体放大至8，由于背景透明提升可读性
-                    xanchor="left", yanchor="middle", xshift=5, yshift=ys
+            if is_ghost:
+                # 幽灵中枢改用 Trace 绘制，以便支持按钮交互
+                rect_x = [x0, x1, x1, x0, x0]
+                rect_y = [y_lower, y_lower, y_upper, y_upper, y_lower]
+                # 矩形框
+                chart.fig.add_trace(go.Scatter(
+                    x=rect_x, y=rect_y, fill="toself", fillcolor=fill_color,
+                    line=dict(color=line_color, width=2, dash=line_dash),
+                    name="幽灵中枢", legendgroup="幽灵元素", showlegend=True, hoverinfo='skip'
+                ), row=1, col=1)
+                # 轨道线（中枢线）
+                chart.fig.add_trace(go.Scatter(
+                    x=[x0, x1], y=[y_center, y_center],
+                    line=dict(color=line_color, width=1, dash="dot"),
+                    name="幽灵中枢", legendgroup="幽灵元素", showlegend=False, hoverinfo='skip'
+                ), row=1, col=1)
+                # 文字标签
+                chart.fig.add_trace(go.Scatter(
+                    x=[x1, x1], y=[y_upper, y_lower], text=[label_upper, label_lower],
+                    mode="text", name="幽灵中枢", legendgroup="幽灵元素", showlegend=False,
+                    textposition="middle right", textfont=dict(size=8, color=line_color)
+                ), row=1, col=1)
+            else:
+                # ── 非幽灵中枢：中枢矩形框（淡色填充） ──
+                chart.fig.add_shape(
+                    type="rect", x0=x0, y0=y_lower, x1=x1, y1=y_upper,
+                    xref="x", yref="y", line=dict(color=line_color, width=2, dash=line_dash),
+                    fillcolor=fill_color, layer="below"
                 )
+                # 轨道/中枢线用 shape 保持轻量
+                for y_val, dash, width in [(y_upper, line_dash, 2), (y_lower, line_dash, 2), (y_center, "dot", 1.2)]:
+                    chart.fig.add_shape(
+                        type="line", x0=x0, y0=y_val, x1=x1, y1=y_val,
+                        xref="x", yref="y", line=dict(color=line_color, width=width, dash=dash), layer="above"
+                    )
+
+                for y_val, label_text, ys in [(y_upper, label_upper, ys_upper), (y_lower, label_lower, ys_lower)]:
+                    chart.fig.add_annotation(
+                        x=x1, y=y_val, xref="x", yref="y", text=label_text,
+                        showarrow=False, font=dict(size=8, color=line_color),
+                        xanchor="left", yanchor="middle", xshift=5, yshift=ys
+                    )
             c_idx += 1
 
 
-    # 4. 叠加当前的“潜在中枢”（即还在寻找中的探测器结果）
-    if hasattr(engine, 'potential_centers') and engine.potential_centers:
-        for ct in engine.potential_centers:
-            x0 = ct.start_dt.strftime("%Y-%m-%d %H:%M")
-            x1 = ct.end_dt.strftime("%Y-%m-%d %H:%M")
-            chart.fig.add_shape(
-                type="rect", x0=x0, y0=ct.lower_rail, x1=x1, y1=ct.upper_rail,
-                xref="x", yref="y", line_width=1, line_dash="dot",
-                fillcolor="rgba(144, 164, 174, 0.05)", line_color="#90A4AE"
-            )
 
     # 4. 叠加中枢的确认K标记 (包含肉眼与非肉眼)
     confirm_ks = []
@@ -301,6 +296,25 @@ def plot_moore_structure(
         chart.add_scatter_indicator(
             ck_df["dt"], ck_df["fx"], name="确认K", row=1, 
             text=ck_df["text"], mode="markers", marker_size=7, marker_color="#CE93D8" # 淡紫色
+        )
+
+    # --- 增加交互控制按钮 ---
+    ghost_names = ["幽灵枝丫", "幽灵顶底", "幽灵中枢"]
+    ghost_indices = [i for i, t in enumerate(chart.fig.data) if t.name in ghost_names]
+
+    if ghost_indices:
+        chart.fig.update_layout(
+            margin=dict(t=80), # 增加顶部边距
+            updatemenus=[
+                dict(
+                    type="buttons", direction="left", showactive=True,
+                    x=0.01, xanchor="left", y=1.1, yanchor="top",
+                    buttons=[
+                        dict(label="显示所有幽灵", method="restyle", args=[{"visible": True}, ghost_indices]),
+                        dict(label="一键清洗幽灵", method="restyle", args=[{"visible": ["legendonly"] * len(ghost_indices)}, ghost_indices]),
+                    ]
+                )
+            ]
         )
 
     chart.fig.write_html(output_file)
@@ -324,7 +338,7 @@ if __name__ == '__main__':
         # bars = research.get_raw_bars(symbol, freq='30分钟', sdt='20210101', edt='20210701')
         # bars = research.get_raw_bars_30m(symbol, freq='30分钟', sdt='20200301', edt='20200901')
         # bars = research.get_raw_bars_origin(symbol, sdt='20180922', edt='20200908')
-        bars = research.get_raw_bars_origin(symbol, sdt='20190122', edt='20200908')
+        bars = research.get_raw_bars_origin(symbol, sdt='20190122', edt='20201228')
 
 
         
