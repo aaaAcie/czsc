@@ -7,6 +7,7 @@ import os
 import pandas as pd
 import plotly.graph_objects as go
 from loguru import logger
+from dataclasses import dataclass
 from czsc.connectors import research
 from czsc.moore.analyze import MooreCZSC
 from czsc.core import format_standard_kline, Freq
@@ -351,7 +352,6 @@ class AnalyzeTask:
     desc: str = ""
 
 if __name__ == '__main__':
-    from dataclasses import dataclass
     # 定义测试任务列表，可以在这里添加更多想测试的标的和时间段
     tasks = [
         AnalyzeTask("300371", sdt="20180822", edt="20200901", desc="汇中股份"),
