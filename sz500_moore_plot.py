@@ -37,12 +37,37 @@ def plot_moore_structure(
 
     logger.info("正在绘制基础图表，包括 K 线与 MA...")
     chart = KlineChart(n_rows=3, row_heights=[0.75, 0.001, 0.249], title=title)
+    chart.fig.update_layout(
+        hoverlabel=dict(
+            bgcolor="rgba(20,20,20,0.8)",
+            bordercolor="rgba(220,220,220,0.35)",
+        )
+    )
     
     # 彻底去掉 type="date" 的强制转换。底层 Plotly 使用默认的 category 分类轴，会天然跳过非交易数据。
     chart.fig.update_xaxes(rangeslider_visible=False)
     
     chart.add_kline(df, name="K线蜡烛")
+    k_hover = [
+        f"开/收: {o:.2f} / {c:.2f}<br>高/低: {h:.2f} / {l:.2f}"
+        for x, o, c, h, l in zip(df["dt"], df["open"], df["close"], df["high"], df["low"])
+    ]
+    chart.fig.update_traces(
+        hovertext=k_hover,
+        hoverinfo="text",
+        selector=dict(type="candlestick"),
+    )
     chart.add_sma(df, ma_seq=(5, 34), row=1, visible=True, line_width=1.2)
+    ma34_vals = df["close"].rolling(34).mean()
+    chart.fig.update_traces(
+        customdata=ma34_vals,
+        hovertemplate="MA5/MA34: %{y:.2f} / %{customdata:.2f}<extra></extra>",
+        selector=dict(name="MA5"),
+    )
+    chart.fig.update_traces(
+        hoverinfo="skip",
+        selector=dict(name="MA34"),
+    )
     chart.add_macd(df, row=3, visible=False)
 
     # 1. 叠加微观世界顶底极值与转折K（来源层）
@@ -101,21 +126,37 @@ def plot_moore_structure(
                         xref="x", yref="y"
                     )
     
+    segment_centers = [ct for seg in engine.segments for ct in seg.centers]
+
     # 1b. 标记所有中枢的 K0 锚点 (淡棕色)
     k0_data = []
-    for seg in engine.segments:
-        for ct in seg.centers:
-            if ct.anchor_k0:
-                k0_data.append({
-                    "dt": ct.anchor_k0.dt.strftime("%Y-%m-%d %H:%M"),
-                    "fx": ct.anchor_k0.close,
-                    "text": "K0"
-                })
+    for ct in segment_centers:
+        if ct.anchor_k0:
+            k0_data.append({
+                "dt": ct.anchor_k0.dt.strftime("%Y-%m-%d %H:%M"),
+                "fx": ct.anchor_k0.close,
+                "text": "K0"
+            })
+    confirm_ks = [ct.confirm_k for ct in segment_centers if ct.confirm_k]
+    confirm_map = {ck.dt.strftime("%Y-%m-%d %H:%M"): ck.close for ck in confirm_ks}
+    k0_map = {}
+    for item in k0_data:
+        k0_map[item["dt"]] = item["fx"]
     if k0_data:
         k0_df = pd.DataFrame(k0_data)
         chart.add_scatter_indicator(
             k0_df["dt"], k0_df["fx"], name="K0锚点", row=1,
             text=k0_df["text"], mode="markers", marker_size=7, marker_color="#A1887F" # 淡棕色
+        )
+        k0_pair_hover = [
+            f"K0/确认K: {k0_v:.2f} / "
+            f"{confirm_map[dt]:.2f}" if dt in confirm_map else f"K0/确认K: {k0_v:.2f} / --"
+            for dt, k0_v in zip(k0_df["dt"], k0_df["fx"])
+        ]
+        chart.fig.update_traces(
+            hovertext=k0_pair_hover,
+            hoverinfo="text",
+            selector=dict(name="K0锚点"),
         )
 
     macro_segments = getattr(engine, "segments", [])
@@ -158,14 +199,7 @@ def plot_moore_structure(
             x1, y1 = seg.end_k.dt.strftime("%Y-%m-%d %H:%M"), seg.end_k.price
             is_up = seg.direction == Direction.Up
             line_color = "#FF5A5F" if is_up else "#00A65A"
-            internal_ids = seg.cache.get("swallow_internal_micro_ids", [])
-            ids_text = ",".join(str(x) for x in internal_ids) if internal_ids else "无"
             is_macro_swallow = seg.cache.get("is_macro_swallow", False)
-            hover_text = (
-                f"宏观线段#{i}<br>{x0} -> {x1}<br>"
-                f"吞噬段: {'是' if is_macro_swallow else '否'}<br>"
-                f"内部微观ID: {ids_text}"
-            )
             chart.fig.add_trace(go.Scatter(
                 x=[x0, x1],
                 y=[y0, y1],
@@ -178,7 +212,7 @@ def plot_moore_structure(
                 name="宏观吞噬线段" if is_macro_swallow else "宏观线段",
                 legendgroup="宏观吞噬" if is_macro_swallow else "宏观线段",
                 showlegend=(first_swallow if is_macro_swallow else first_macro),
-                hovertemplate=hover_text + "<extra></extra>",
+                hoverinfo="skip",
             ), row=1, col=1)
             if is_macro_swallow:
                 first_swallow = False
@@ -321,7 +355,7 @@ def plot_moore_structure(
                 # 文字标签
                 chart.fig.add_trace(go.Scatter(
                     x=[x1, x1], y=[y_upper, y_lower], text=[label_upper, label_lower],
-                    mode="text", name="中枢标注", legendgroup="常规中枢", showlegend=(c_idx == 0),
+                    mode="text", name="中枢", legendgroup="常规中枢", showlegend=(c_idx == 0),
                     textposition="middle right", textfont=dict(size=8, color=line_color)
                 ), row=1, col=1)
             c_idx += 1
@@ -329,12 +363,6 @@ def plot_moore_structure(
 
 
     # 4. 叠加中枢的确认K标记 (包含肉眼与非肉眼)
-    confirm_ks = []
-    for seg in engine.segments:
-        for ct in seg.centers:
-            if ct.confirm_k:
-                confirm_ks.append(ct.confirm_k)
-                
     if confirm_ks:
         ck_df = pd.DataFrame([
             {"dt": ck.dt.strftime("%Y-%m-%d %H:%M"), "fx": ck.close, "text": "确认K"} 
@@ -344,10 +372,19 @@ def plot_moore_structure(
             ck_df["dt"], ck_df["fx"], name="确认K", row=1, 
             text=ck_df["text"], mode="markers", marker_size=7, marker_color="#CE93D8" # 淡紫色
         )
+        ck_pair_hover = [
+            f"K0/确认K: {k0_map[dt]:.2f} / {ck_v:.2f}" if dt in k0_map else f"K0/确认K: -- / {ck_v:.2f}"
+            for dt, ck_v in zip(ck_df["dt"], ck_df["fx"])
+        ]
+        chart.fig.update_traces(
+            hovertext=ck_pair_hover,
+            hoverinfo="text",
+            selector=dict(name="确认K"),
+        )
 
     # --- 增加交互控制按钮 ---
     # 定义中枢相关 trace 组
-    center_names = ["常规中枢", "中枢标注", "幽灵中枢", "K0锚点", "确认K"]
+    center_names = ["常规中枢", "中枢", "幽灵中枢", "K0锚点", "确认K"]
     center_indices = [i for i, t in enumerate(chart.fig.data) if t.name in center_names]
     
     ghost_names = ["幽灵枝丫", "幽灵顶底", "幽灵中枢"]
@@ -403,7 +440,7 @@ if __name__ == '__main__':
     ]
     
     # 🎯 切换这里即可同时切换股票 and 时间范围 (例如改为 tasks[1] 或 tasks[2])
-    task = tasks[0]
+    task = tasks[1]
 
     try:
         symbol = task.symbol
