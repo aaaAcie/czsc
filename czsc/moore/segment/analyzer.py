@@ -257,8 +257,8 @@ class SegmentAnalyzer:
         n = len(s.turning_ks)
         if n < 4: return False
 
-        # 扫描范围：最近确立的三个段落末端
-        scan_indices = [n-2, n-3, n-4] 
+        # 扫描范围：最近确立的三个段落末端，按时间正序扫描（从左到右），优先解决最深远的历史遗留问题
+        scan_indices = [n-4, n-3, n-2] 
         
         for idx in scan_indices:
             if idx < 2: continue
@@ -274,8 +274,8 @@ class SegmentAnalyzer:
             tk_start = s.turning_ks[idx-2]
             mid_same = s.turning_ks[idx-1]
             
-            # 候选终点：从最新的点往回数三个
-            potential_end_indices = [n-1, n-2, n-3]
+            # 候选终点：从当前虚假点往后，按时间顺序 (idx+1 开始) 发射探知网
+            potential_end_indices = range(idx + 1, n)
             
             for end_idx in potential_end_indices:
                 if end_idx <= idx: continue 
@@ -297,68 +297,50 @@ class SegmentAnalyzer:
 
     def _check_leap_physics(self, tk_start: TurningK, tk_end: TurningK, 
                            tk_mid_same: TurningK, tk_pullback: TurningK) -> bool:
-        """执行跃迁判定：法则一 (OR) 法则二
+        """执行跃迁判定：法则一 (实力生长) OR 法则二 (重心演化)
         
-        法则一：物理生长 (Price Growth) AND 锚点保护 (Price Gravity)
+        法则一：物理生长 (Price Growth)
         法则二：能量覆盖 (Energy 2A)   AND 引力锁定 (MA5 Gravity 2B)
         """
         s = self.state
 
-        # 准备全路径价格镜像（从起始点物理位置到当前）
+        # 1. 准备物理参数
         bar_start = tk_start.k_index
         bar_end   = tk_end.k_index
         path_bars = s.bars_raw[bar_start : bar_end + 1]
+        path_ma5  = [b.cache.get('ma5') for b in path_bars if b.cache.get('ma5') is not None]
+        start_ma5 = tk_start.raw_bar.cache.get('ma5', None)
+        mid_ma5   = tk_mid_same.raw_bar.cache.get('ma5', None)
+        end_ma5   = tk_end.raw_bar.cache.get('ma5', None)
 
+        if start_ma5 is None or not path_ma5: return False
+
+        # --- 基础判定因子 ---
         tk_end_top = max(tk_end.raw_bar.open, tk_end.raw_bar.close)
         tk_end_bottom = min(tk_end.raw_bar.open, tk_end.raw_bar.close)
         tk_mid_top = max(tk_mid_same.raw_bar.open, tk_mid_same.raw_bar.close)
         tk_mid_bottom = min(tk_mid_same.raw_bar.open, tk_mid_same.raw_bar.close)
-        
-        # --- 准备物理参数 ---
-        start_ma5 = tk_start.raw_bar.cache.get('ma5', None)
-        mid_ma5   = tk_mid_same.raw_bar.cache.get('ma5', None)
-        end_ma5   = tk_end.raw_bar.cache.get('ma5', None)
-        path_ma5 = [b.cache.get('ma5') for b in path_bars if b.cache.get('ma5') is not None]
 
-        # 如果关键势能数据缺失，则无法执行宏观审判
-        if None in (start_ma5, path_ma5) or not path_ma5:
-            return False
-
-        # ---------------------------------------------------------------------
-        # 1. 物理生长判定 (Price Growth)
-        # ---------------------------------------------------------------------
+        # 增长判定
         if tk_end.mark == Mark.G:
             growth_ok = tk_end.price > tk_mid_same.price and tk_end_top > tk_mid_bottom
         else:
             growth_ok = tk_end.price < tk_mid_same.price and tk_end_bottom < tk_mid_top
 
-
-        # ---------------------------------------------------------------------
-        # 2. 势能覆盖判定 (Energy Coverage)
-        # 判断 MA5 值是否更为优胜（顺势新高/新低）
-        # ---------------------------------------------------------------------
+        # 势能优胜判定 (Discriminator)
         ma5_is_better = False
         if mid_ma5 is not None and end_ma5 is not None:
-            if tk_end.mark == Mark.G:
-                ma5_is_better = (end_ma5 > mid_ma5)
-            else:
-                ma5_is_better = (end_ma5 < mid_ma5)
+            ma5_is_better = (end_ma5 > mid_ma5) if tk_end.mark == Mark.G else (end_ma5 < mid_ma5)
 
+        # 引力锁定判定
+        ma5_gravity_ok = (min(path_ma5) >= start_ma5) if tk_end.mark == Mark.G else (max(path_ma5) <= start_ma5)
 
         # ---------------------------------------------------------------------
-        # 分支逻辑：更优就法则二（严格引力审判），否则法则一（物理边界审判）
+        # 分支逻辑：更优就法则二（重心优先），否则法则一（边界优先）
         # ---------------------------------------------------------------------
         if ma5_is_better:
-            # 【法则二：重心保护】势能优胜（顺势）时，必须满足生长且引力锁不坍塌
-            ma5_gravity_ok = False
-            if tk_end.mark == Mark.G:
-                if min(path_ma5) >= start_ma5: ma5_gravity_ok = True
-            else:
-                if max(path_ma5) <= start_ma5: ma5_gravity_ok = True
-            
             return growth_ok and ma5_gravity_ok
         else:
-            # 【法则一：实力生长】势能未覆盖（弱势或背离）时，仅查物理极值与穿透
             return growth_ok
 
     def _execute_leap_collapse(self, anchor_idx: int, new_end_idx: int,
