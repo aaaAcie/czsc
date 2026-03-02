@@ -8,7 +8,6 @@ describe: 策略持仓权重管理
 import os
 import time
 import json
-import redis
 import threading
 import pandas as pd
 from loguru import logger
@@ -62,10 +61,12 @@ class RedisWeightsClient:
             logger.info(f"{strategy_name} {self.key_prefix}: 使用传入的 redis 连接池")
 
         else:
+            import redis
             self.redis_url = redis_url if redis_url else os.getenv("RWC_REDIS_URL")
             thread_safe_pool = redis.BlockingConnectionPool.from_url(self.redis_url, decode_responses=True)
             logger.info(f"{strategy_name} {self.key_prefix}: 使用环境变量 RWC_REDIS_URL 创建 redis 连接池")
 
+        import redis
         assert isinstance(thread_safe_pool, redis.BlockingConnectionPool), "redis连接池创建失败"
 
         self.r = redis.Redis(connection_pool=thread_safe_pool)
@@ -526,6 +527,8 @@ def get_strategy_mates(redis_url=None, connection_pool=None, key_pattern="Weight
     """
     heartbeat_prefix = kwargs.get("heartbeat_prefix", "heartbeat")
 
+    import redis
+
     if connection_pool:
         r = redis.Redis(connection_pool=connection_pool)
     else:
@@ -568,6 +571,8 @@ def get_heartbeat_time(strategy_name=None, redis_url=None, connection_pool=None,
 
     :return: str, 最近一次心跳时间
     """
+    import redis
+
     if connection_pool:
         r = redis.Redis(connection_pool=connection_pool)
     else:
@@ -606,6 +611,7 @@ def get_strategy_names(redis_url=None, connection_pool=None, key_prefix="Weights
     :param key_prefix: str, redis中key的前缀，默认为 Weights
     :return: list, 所有策略名
     """
+    import redis
 
     if connection_pool:
         r = redis.Redis(connection_pool=connection_pool)
@@ -625,6 +631,8 @@ def get_strategy_latest(redis_url=None, connection_pool=None, key_prefix="Weight
     :param key_prefix: str, redis中key的前缀，默认为 Weights
     :return: pd.DataFrame, 最新持仓数据
     """
+    import redis
+
     if connection_pool:
         r = redis.Redis(connection_pool=connection_pool)
     else:
