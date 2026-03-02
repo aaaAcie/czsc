@@ -45,29 +45,30 @@ def plot_moore_structure(
     chart.add_sma(df, ma_seq=(5, 34), row=1, visible=True, line_width=1.2)
     chart.add_macd(df, row=3, visible=False)
 
-    # 1. 叠加顶底极值与转折K (信号游标)
-    if engine.turning_ks:
+    # 1. 叠加微观世界顶底极值与转折K（来源层）
+    display_tks = getattr(engine, "micro_turning_ks", engine.turning_ks)
+    if display_tks:
         # 画出真正的顶底极值
         tk_df = pd.DataFrame([
             {
                 "dt": tk.dt.strftime("%Y-%m-%d %H:%M"), 
                 "fx": tk.price, 
-                "text": f"V{i}{'顶' if tk.mark == Mark.G else '底'}"
+                "text": f"mV{i}{'顶' if tk.mark == Mark.G else '底'}"
             } 
-            for i, tk in enumerate(engine.turning_ks)
+            for i, tk in enumerate(display_tks)
         ])
         # 为顶底增加动态文字位置，避免遮挡
-        tk_df["pos"] = ["top center" if tk.mark == Mark.G else "bottom center" for tk in engine.turning_ks]
+        tk_df["pos"] = ["top center" if tk.mark == Mark.G else "bottom center" for tk in display_tks]
         
         chart.add_scatter_indicator(
-            tk_df["dt"], tk_df["fx"], name="顶底极值", row=1, 
+            tk_df["dt"], tk_df["fx"], name="微观顶底极值", row=1, 
             text=tk_df["text"], mode="markers+text", 
             textposition=tk_df["pos"],
             marker_size=8, marker_color="#E0E0E0"
         )
         
         # 叠加带有箭杆的指向性箭头（转折K）
-        for tk in engine.turning_ks:
+        for tk in display_tks:
             if tk.trigger_k:
                 if tk.mark == Mark.D:  # 底分型确立 -> 向上转折确立
                     chart.fig.add_annotation(
@@ -117,32 +118,72 @@ def plot_moore_structure(
             text=k0_df["text"], mode="markers", marker_size=7, marker_color="#A1887F" # 淡棕色
         )
 
-    # 2. 叠加摩尔本质线段
-    if engine.segments:
-        logger.info(f"本次生成的摩尔线段数量: {len(engine.segments)}")
-        for i, seg in enumerate(engine.segments):
+    macro_segments = getattr(engine, "segments", [])
+    swallowed_micro_ids = set()
+    for mseg in macro_segments:
+        swallowed_micro_ids.update(mseg.cache.get("swallow_internal_micro_ids", []))
+
+    # 2. 叠加微观线段（来源层）
+    micro_segments = getattr(engine, "micro_segments", [])
+    if micro_segments:
+        logger.info(f"本次生成的微观线段数量: {len(micro_segments)}")
+        for seg in micro_segments:
             x0, y0 = seg.start_k.dt.strftime("%Y-%m-%d %H:%M"), seg.start_k.price
             x1, y1 = seg.end_k.dt.strftime("%Y-%m-%d %H:%M"), seg.end_k.price
 
-            is_up = seg.direction == Direction.Up
-            line_color = "#E91E63" if is_up else "#00A65A"
-            
-            # 结构完美性决定线段虚实（法则三：端点 TurningK 内部是否有中枢）
+            start_mid = seg.start_k.cache.get("micro_id")
+            end_mid = seg.end_k.cache.get("micro_id")
+            is_swallowed_micro = (start_mid in swallowed_micro_ids) or (end_mid in swallowed_micro_ids)
             line_style = "solid" if seg.is_perfect else "dash"
-            line_width = 3 if seg.is_perfect else 1
-
-            # 画线
+            if is_swallowed_micro:
+                line_color = "rgba(160,160,160,0.75)"
+                line_width = 1
+            else:
+                line_color = "rgba(233,30,99,0.45)" if seg.direction == Direction.Up else "rgba(0,166,90,0.45)"
+                line_width = 1.2
             chart.fig.add_shape(
                 type="line", x0=x0, y0=y0, x1=x1, y1=y1, 
-                xref="x", yref="y", line=dict(color=line_color, width=line_width, dash=line_style), 
-                layer="above"
+                xref="x", yref="y",
+                line=dict(color=line_color, width=line_width, dash=line_style),
+                layer="below"
             )
-            # 打标签
-            # chart.fig.add_annotation(
-            #     x=x1, y=y1, xref="x", yref="y", text=f"线段{i}",
-            #     showarrow=False, font=dict(size=10, color=line_color),
-            #     xanchor="left", yanchor="middle"
-            # )
+
+    # 2b. 叠加宏观线段（结果层，全部展示；吞噬段高亮）
+    if macro_segments:
+        logger.info(f"本次展示的宏观线段数量: {len(macro_segments)}")
+        first_macro = True
+        first_swallow = True
+        for i, seg in enumerate(macro_segments):
+            x0, y0 = seg.start_k.dt.strftime("%Y-%m-%d %H:%M"), seg.start_k.price
+            x1, y1 = seg.end_k.dt.strftime("%Y-%m-%d %H:%M"), seg.end_k.price
+            is_up = seg.direction == Direction.Up
+            line_color = "#FF5A5F" if is_up else "#00A65A"
+            internal_ids = seg.cache.get("swallow_internal_micro_ids", [])
+            ids_text = ",".join(str(x) for x in internal_ids) if internal_ids else "无"
+            is_macro_swallow = seg.cache.get("is_macro_swallow", False)
+            hover_text = (
+                f"宏观线段#{i}<br>{x0} -> {x1}<br>"
+                f"吞噬段: {'是' if is_macro_swallow else '否'}<br>"
+                f"内部微观ID: {ids_text}"
+            )
+            chart.fig.add_trace(go.Scatter(
+                x=[x0, x1],
+                y=[y0, y1],
+                mode="lines",
+                line=dict(
+                    color=line_color,
+                    width=4 if is_macro_swallow else (3 if seg.is_perfect else 2),
+                    dash="solid" if seg.is_perfect else "dash",
+                ),
+                name="宏观吞噬线段" if is_macro_swallow else "宏观线段",
+                legendgroup="宏观吞噬" if is_macro_swallow else "宏观线段",
+                showlegend=(first_swallow if is_macro_swallow else first_macro),
+                hovertemplate=hover_text + "<extra></extra>",
+            ), row=1, col=1)
+            if is_macro_swallow:
+                first_swallow = False
+            else:
+                first_macro = False
 
     # 3. 叠加被刷新掉的“演变路径”（虚线）
     if hasattr(engine, 'refreshed_segments') and engine.refreshed_segments:
@@ -157,8 +198,10 @@ def plot_moore_structure(
             )
 
     # 3b. 叠加幽灵分叉枝丫（被趋势穿透吞噬的陷阱化石）
+    # 双世界绘图中，被吞噬微观段已在上文用灰色画出，避免与幽灵枝丫重复描线
+    show_ghost_overlay = not (micro_segments and swallowed_micro_ids)
     ghost_forks = getattr(engine, 'ghost_forks', [])
-    if ghost_forks:
+    if ghost_forks and show_ghost_overlay:
         all_ghost_tks = []
         is_first_trace = True
         for fork_tk, consumed in ghost_forks:
@@ -354,7 +397,7 @@ class AnalyzeTask:
 if __name__ == '__main__':
     # 定义测试任务列表，可以在这里添加更多想测试的标的和时间段
     tasks = [
-        AnalyzeTask("300371", sdt="20180822", edt="20200901", desc="汇中股份"),
+        AnalyzeTask("300371", sdt="20181220", edt="20201030", desc="汇中股份"),
         AnalyzeTask("sz002346", sdt="20180901", edt="20200908", desc="柘中股份"),
         AnalyzeTask("sz002286", sdt="20210101", edt="20210701", desc="保利发展"),
     ]

@@ -22,7 +22,7 @@
   - TrendEngine：仅维护趋势状态（极值 / 方向 / 翻转），不处理任何穿透逻辑。
   - SegmentAnalyzer（宏观审判层）：在每根 K 线的 fractal_engine.update() 之后，
     执行 _macro_audit_and_replay() —— 检查被审判线段 N（n2→n3）是否"不完美"，
-    若通过冷静期检验，则尝试三级同向跃迁回溯，将中间的噪音幻影塌陷为幽灵，
+    若通过审计成熟度检验，则尝试三级同向跃迁回溯，将中间的噪音幻影塌陷为幽灵，
     重建正确的线段结构。
 
 【四点模型索引定义】（以上涨趋势为例：1=底, 2=顶, 3=底, 4=顶）
@@ -35,6 +35,7 @@
   nm1= turning_ks[-6]：P3 跃迁锚点
 """
 import collections
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Optional
@@ -43,9 +44,10 @@ from czsc.py.objects import RawBar
 from czsc.py.enum import Mark, Direction
 
 from ..objects import TurningK, MooreCenter, MooreSegment
-from .fractal import FractalEngine
+from .micro_engine import MicroStructureEngine
 from .center import CenterEngine
 from .trend import TrendEngine
+from .macro_engine import MacroAuditEngine
 
 
 @dataclass
@@ -67,11 +69,19 @@ class SegmentState:
     # -------------------------------------------------------------------------
     # 结果输出容器
     # -------------------------------------------------------------------------
+    # 微观世界（原始顶底与线段，供宏观世界消费）
     turning_ks: List[TurningK]        = field(default_factory=list)
     segments:   List[MooreSegment]    = field(default_factory=list)
+    # 宏观世界（吞噬/审计后的顶底与线段，默认对外展示）
+    macro_turning_ks: List[TurningK]  = field(default_factory=list)
+    macro_segments: List[MooreSegment] = field(default_factory=list)
     all_centers: List[MooreCenter]    = field(default_factory=list)
     refreshed_segments: list          = field(default_factory=list)
-    ghost_forks: List[tuple]          = field(default_factory=list)
+    ghost_forks: List[tuple]          = field(default_factory=list)   # 微观幽灵（兼容）
+    macro_ghost_forks: List[tuple]    = field(default_factory=list)
+    macro_excluded_micro_ids: set     = field(default_factory=set)
+    macro_swallow_map: dict           = field(default_factory=dict)   # {(start_id, end_id): [internal_micro_ids]}
+    macro_last_synced_micro_id: Optional[int] = None
 
     # -------------------------------------------------------------------------
     # 顶底引擎游标
@@ -80,11 +90,11 @@ class SegmentState:
     candidate_tk: Optional[TurningK]  = None
     potential_centers: List[MooreCenter] = field(default_factory=list)
 
-    # 蓝框后移状态机
-    waiting_next_as_tk: bool          = False
-    signal_bar_cache: Optional[RawBar]  = None
-    signal_index_cache: Optional[int]   = None
-    waiting_mark: Optional[Mark]        = None
+    # 特殊法则状态机（转折K无效则后移一根）
+    waiting_special_rule: bool          = False
+    special_waiting_mark: Optional[Mark] = None
+    special_ext_idx_cache: Optional[int] = None
+    micro_id_seed: int                  = 0
 
     # -------------------------------------------------------------------------
     # 中枢引擎游标
@@ -121,6 +131,13 @@ class SegmentState:
     segment_start_extreme: Optional[float]  = None
 
     # -------------------------------------------------------------------------
+    # 宏观审计引擎配置
+    # -------------------------------------------------------------------------
+    enable_macro_audit: bool            = True  # False 时关闭吞噬/跃迁
+    audit_maturity_period: int          = 1      # 审计成熟度：目标疑点右侧需积累的新点数
+    audit_backtrack_rounds: int         = 5      # 左向搜寻更深层起跳锚点的最大轮回次数
+
+    # -------------------------------------------------------------------------
     # 调试计数器
     # -------------------------------------------------------------------------
     debug_rule_fail: dict  = field(default_factory=lambda: {1: 0, 1.1: 0, 2: 0, 3: 0})
@@ -147,7 +164,8 @@ class SegmentAnalyzer:
         # 3. 实例化子引擎（此时它们持有了空的 state 引用）
         self._trend_engine   = TrendEngine(self.state)
         self._center_engine  = CenterEngine(self.state)
-        self._fractal_engine = FractalEngine(self.state, self._trend_engine, self._center_engine)
+        self._fractal_engine = MicroStructureEngine(self.state, self._trend_engine, self._center_engine)
+        self._macro_engine   = MacroAuditEngine(self.state, self._fractal_engine, self._trend_engine)
 
         # 4. 历史状态推演：执行全量 update，物理化重建所有转折点与中枢
         for bar in bars:
@@ -168,14 +186,17 @@ class SegmentAnalyzer:
         self._ma5_q.append(bar.close)
         self._ma34_q.append(bar.close)
 
+        # MA5 不应受 MA34 冷启动门限制：满 5 根后立即写入缓存
+        if len(self._ma5_q) == 5:
+            bar.cache['ma5'] = sum(self._ma5_q) / 5
+
         if len(self._ma34_q) < 34:
             return
 
-        current_ma5  = sum(self._ma5_q)  / 5
         current_ma34 = sum(self._ma34_q) / 34
 
-        bar.cache['ma5']  = current_ma5
         bar.cache['ma34'] = current_ma34
+        current_ma5 = bar.cache.get('ma5')
 
         # --- 2. 中枢引擎（先于顶底引擎）---
         self._center_engine.update(bar, k_index)
@@ -189,7 +210,7 @@ class SegmentAnalyzer:
         new_tk_len     = len(s.turning_ks)
         new_last_tk_dt = s.turning_ks[-1].dt if s.turning_ks else None
 
-        # --- 4. 宏观审判层：三级同向跃迁回溯 ---
+        # --- 4. 宏观世界同步 + 宏观审计 ---
         # 变化分类：
         #   is_new_tk    = 新的反向 TurningK 被确立（turning_ks 数量真正增加）
         #                  → N+1 段的终点（点4）已固化，这是审判的"黄金时机"
@@ -199,15 +220,13 @@ class SegmentAnalyzer:
         is_refreshed = (not is_new_tk) and (old_tk_len > 0 and old_last_tk_dt != new_last_tk_dt)
         is_changed   = is_new_tk or is_refreshed
 
-        # 宏观审判：仅在"新 TurningK 固化"时触发，四点模型至少需要 4 个转折点
-        # 同向刷新时不审判：此时 N+1 段的终点尚未锁定，拿不确定性否定物理事实是错误的
-        leap_happened = False
-        if is_new_tk and len(s.turning_ks) >= 4:
-            leap_happened = self._macro_audit_and_replay(k_index)
-        
+        # 先将“已提交的微观快照”增量同步到宏观世界，再决定是否发起宏观审计
+        macro_changed = self._sync_macro_world_from_micro()
+        if s.enable_macro_audit and macro_changed and len(s.macro_turning_ks) > 4:
+            macro_changed = self._macro_engine.audit_and_replay(k_index) or macro_changed
 
-        # --- 5. 中枢重播（线段结构发生变化时触发，包含同向刷新）---
-        if (leap_happened or is_changed) and len(s.turning_ks) >= 2:
+        # --- 5. 微观中枢重播（仅由微观结构变化触发）---
+        if is_changed and len(s.turning_ks) >= 2:
             # turning_ks[-2] 是当前最新完整线段的起点锚。
             # 若发生跃迁，_execute_leap_collapse 已重建 turning_ks，
             # 此时 turning_ks[-2] 正是跃迁锚点（n1/n0/nm1），k_index 即其物理 bar 位置。
@@ -224,6 +243,10 @@ class SegmentAnalyzer:
             # 【核心同步】：重播找回中枢后，必须立即同步到线段对象中，否则绘图层看到的 centers 为空
             self._fractal_engine._update_segments()
 
+        # 宏观线段基于当前宏观顶底与中枢快照独立重建
+        if macro_changed:
+            self._update_macro_segments()
+
         # 游标步进
         s.last_ma5 = current_ma5
 
@@ -231,174 +254,134 @@ class SegmentAnalyzer:
     # 宏观审判层：三级同向跃迁回溯
     # =========================================================================
 
-    # 宏观审计无需“K 线数”冷静期，只要 N+1 段的终点 n4 确立即可触发
+    def _clone_micro_tk_to_macro(self, tk: TurningK) -> TurningK:
+        """将微观点克隆到宏观世界，并写入来源映射。"""
+        ctk = deepcopy(tk)
+        ctk.cache = dict(getattr(tk, "cache", {}))
+        ctk.cache["source_micro_id"] = tk.cache.get("micro_id")
+        return ctk
 
-    def _macro_audit_and_replay(self, current_k_idx: int) -> bool:
-        """宏观滞后审判 —— 三级同向跃迁回溯引擎
+    def _get_committed_micro_turning_ks(self) -> List[TurningK]:
+        """获取可用于宏观同步的“已提交”微观点（不含最后一个可刷新端点）。"""
+        micro = self.state.turning_ks
+        if len(micro) <= 1:
+            return []
+        return micro[:-1]
 
-        四点模型（以上涨方向为例：1=底, 2=顶, 3=底, 4=顶）：
-          - N 段（被审判的不完美段）= n2 → n3  （n3.is_perfect 反映 N 段完整性）
-          - N+1 段（冷静期观测窗口）= n3 → n4
-
-        三级优先级（一旦通过即停止）：
-          P1: n1 → n4，吞噬 n2/n3（同向大跃迁）
-          P2: n0 → n3，吞噬 n1/n2（历史前溯）
-          P3: nm1 → n2，吞噬 n0/n1（深层回补）
-
-        返回：True=发生了跃迁并重建结构，False=未触发
-        """
-    def _macro_audit_and_replay(self, k_index: int) -> bool:
-        """【宏观主动审判】
-        
-        策略：扫描 turning_ks 列表中的疑似虚假点 (maybe_is_fake)，
-        从脆弱点出发，搜索可用的异向终点执行物理坍塌。
-        """
+    def _sync_macro_world_from_micro(self) -> bool:
+        """把“已提交微观快照”增量同步到宏观世界（仅追加，不回退不替换）。"""
         s = self.state
-        n = len(s.turning_ks)
-        if n < 4: return False
+        micro = s.turning_ks
+        if not micro:
+            return False
 
-        # 扫描范围：最近确立的三个段落末端，按时间正序扫描（从左到右），优先解决最深远的历史遗留问题
-        scan_indices = [n-4, n-3, n-2] 
-        
-        for idx in scan_indices:
-            if idx < 2: continue
-            tk_target = s.turning_ks[idx]
-            
-            # --- 命中标签，开始审判 ---
-            if not tk_target.maybe_is_fake:
+        changed = False
+        micro_id_to_idx = {}
+        for i, tk in enumerate(micro):
+            mid = tk.cache.get("micro_id")
+            if mid is None:
+                s.micro_id_seed += 1
+                mid = s.micro_id_seed
+                tk.cache["micro_id"] = mid
+            else:
+                s.micro_id_seed = max(s.micro_id_seed, int(mid))
+            micro_id_to_idx[mid] = i
+
+        committed = self._get_committed_micro_turning_ks()
+        if not committed:
+            return False
+
+        committed_ids = [tk.cache.get("micro_id") for tk in committed]
+        if not committed_ids:
+            return False
+
+        # 首次冷启动：宏观仅导入已提交微观点，天然避开“末端同向刷新回写”。
+        if not s.macro_turning_ks:
+            for tk in committed:
+                if tk.cache.get("micro_id") in s.macro_excluded_micro_ids:
+                    continue
+                s.macro_turning_ks.append(self._clone_micro_tk_to_macro(tk))
+                changed = True
+            s.macro_last_synced_micro_id = committed_ids[-1]
+            return changed
+
+        # 宏观同步是 append-only：历史端点由宏观自己负责吞噬塌陷，不能被微观回写替换。
+        last_synced_id = s.macro_last_synced_micro_id
+        if last_synced_id is None and s.macro_turning_ks:
+            last_synced_id = s.macro_turning_ks[-1].cache.get("source_micro_id")
+
+        start_pos = -1
+        if last_synced_id in micro_id_to_idx:
+            start_pos = micro_id_to_idx[last_synced_id]
+        elif s.macro_turning_ks:
+            # 正常情况下不会出现；若发生，宁可冻结宏观也不做危险回退。
+            return False
+
+        for tk in committed[start_pos + 1 :]:
+            if tk.cache.get("micro_id") in s.macro_excluded_micro_ids:
                 continue
+            s.macro_turning_ks.append(self._clone_micro_tk_to_macro(tk))
+            changed = True
 
-            # -----------------------------------------------------------------
-            # 搜索异向终点进行吞噬：
-            # -----------------------------------------------------------------
-            tk_start = s.turning_ks[idx-2]
-            mid_same = s.turning_ks[idx-1]
-            
-            # 候选终点：从当前虚假点往后，按时间顺序 (idx+1 开始) 发射探知网
-            potential_end_indices = range(idx + 1, n)
-            
-            for end_idx in potential_end_indices:
-                if end_idx <= idx: continue 
-                
-                tk_end = s.turning_ks[end_idx]
-                
-                # 物理前提：连线必须是顶底连接（异向）
-                if tk_start.mark != tk_end.mark:
-                    print(f"  [Audit] Testing Leap: {tk_start.dt}({tk_start.mark.name}) -> {tk_end.dt}({tk_end.mark.name}) swallow {mid_same.dt}/{tk_target.dt}")
-                    if self._check_leap_physics(tk_start, tk_end, mid_same, tk_target):
-                        print(f"  [Audit] SUCCESS! Leaping from {tk_start.dt} to {tk_end.dt}")
-                        self._execute_leap_collapse(idx-2, end_idx, (idx-1, idx))
-                        return True
-                    else:
-                        print(f"  [Audit] FAILED Physics check.")
-        return False
+        s.macro_last_synced_micro_id = committed_ids[-1]
 
-        return False
+        return changed
 
-    def _check_leap_physics(self, tk_start: TurningK, tk_end: TurningK, 
-                           tk_mid_same: TurningK, tk_pullback: TurningK) -> bool:
-        """执行跃迁判定：法则一 (实力生长) OR 法则二 (重心演化)
-        
-        法则一：物理生长 (Price Growth)
-        法则二：能量覆盖 (Energy 2A)   AND 引力锁定 (MA5 Gravity 2B)
-        """
+    def _update_macro_segments(self):
+        """根据宏观顶底重建宏观线段，并挂载现有中枢快照。"""
         s = self.state
-
-        # 1. 准备物理参数
-        bar_start = tk_start.k_index
-        bar_end   = tk_end.k_index
-        path_bars = s.bars_raw[bar_start : bar_end + 1]
-        path_ma5  = [b.cache.get('ma5') for b in path_bars if b.cache.get('ma5') is not None]
-        start_ma5 = tk_start.raw_bar.cache.get('ma5', None)
-        mid_ma5   = tk_mid_same.raw_bar.cache.get('ma5', None)
-        end_ma5   = tk_end.raw_bar.cache.get('ma5', None)
-
-        if start_ma5 is None or not path_ma5: return False
-
-        # --- 基础判定因子 ---
-        tk_end_top = max(tk_end.raw_bar.open, tk_end.raw_bar.close)
-        tk_end_bottom = min(tk_end.raw_bar.open, tk_end.raw_bar.close)
-        tk_mid_top = max(tk_mid_same.raw_bar.open, tk_mid_same.raw_bar.close)
-        tk_mid_bottom = min(tk_mid_same.raw_bar.open, tk_mid_same.raw_bar.close)
-
-        # 增长判定
-        if tk_end.mark == Mark.G:
-            growth_ok = tk_end.price > tk_mid_same.price and tk_end_top > tk_mid_bottom
-        else:
-            growth_ok = tk_end.price < tk_mid_same.price and tk_end_bottom < tk_mid_top
-
-        # 势能优胜判定 (Discriminator)
-        ma5_is_better = False
-        if mid_ma5 is not None and end_ma5 is not None:
-            ma5_is_better = (end_ma5 > mid_ma5) if tk_end.mark == Mark.G else (end_ma5 < mid_ma5)
-
-        # 引力锁定判定
-        ma5_gravity_ok = (min(path_ma5) >= start_ma5) if tk_end.mark == Mark.G else (max(path_ma5) <= start_ma5)
-
-        # ---------------------------------------------------------------------
-        # 分支逻辑：更优就法则二（重心优先），否则法则一（边界优先）
-        # ---------------------------------------------------------------------
-        if ma5_is_better:
-            return growth_ok and ma5_gravity_ok
-        else:
-            return growth_ok
-
-    def _execute_leap_collapse(self, anchor_idx: int, new_end_idx: int,
-                                ghost_range: tuple):
-        """执行时空塌陷：将幽灵节点写入 ghost_forks，重建 turning_ks
-
-        重建规则（以保留 new_end 之后节点为核心）：
-          P1 (n1→n4): [..., n0, n1, n2, n3, n4] → [..., n0, n1, n4]
-          P2 (n0→n3): [..., nm1, n0, n1, n2, n3, n4] → [..., nm1, n0, n3, n4]
-          P3 (nm1→n2):turning_ks [..., nm1, n0, n1, n2, n3, n4] → [..., nm1, n2, n3, n4]
-
-        Args:
-            anchor_idx:  跃迁起点锚点在 turning_ks 中的列表索引
-            new_end_idx: 新终点在 turning_ks 中的列表索引
-            ghost_range: 被塌陷节点的列表索引范围 (start, end)，含两端
-        """
-        s = self.state
-
-        tk_anchor  = s.turning_ks[anchor_idx]
-        tk_new_end = s.turning_ks[new_end_idx]
-
-        # 收集幽灵节点
-        g_start, g_end = ghost_range
-        ghost_nodes = [
-            s.turning_ks[i] for i in range(g_start, g_end + 1)
-            if 0 <= i < len(s.turning_ks)
-        ]
-        if not ghost_nodes:
+        tks = s.macro_turning_ks
+        s.macro_segments = []
+        if len(tks) < 2:
             return
 
-        # 写入 ghost_forks
-        s.ghost_forks.append((
-            tk_anchor,
-            sorted(ghost_nodes, key=lambda t: t.k_index)
-        ))
+        micro_id_seq = [tk.cache.get("micro_id") for tk in s.turning_ks if tk.cache.get("micro_id") is not None]
+        micro_id_to_pos = {mid: i for i, mid in enumerate(micro_id_seq)}
 
-        # 重建 turning_ks：保留锚点之前（含锚点），追加新终点，再保留新终点之后的节点
-        new_turning_ks = s.turning_ks[:anchor_idx + 1]
-        new_turning_ks.append(tk_new_end)
-        # 保留 new_end_idx 之后的节点（P2/P3 时 n4 等后续节点仍然有效）
-        for i in range(new_end_idx + 1, len(s.turning_ks)):
-            new_turning_ks.append(s.turning_ks[i])
-        s.turning_ks = new_turning_ks
+        all_avail_centers = s.all_centers + s.potential_centers
+        for i in range(len(tks) - 1):
+            tk1 = tks[i]
+            tk2 = tks[i + 1]
+            direction = Direction.Up if tk2.mark == Mark.G else Direction.Down
+            seg = MooreSegment(symbol=tk1.symbol, start_k=tk1, end_k=tk2, direction=direction)
+            seg.centers = []
+            for c in all_avail_centers:
+                c_confirm_dt = c.confirm_k.dt if c.confirm_k else c.start_dt
+                if not c_confirm_dt:
+                    continue
+                if tk1.dt <= c_confirm_dt <= tk2.dt:
+                    seg.centers.append(c)
+            if seg.centers:
+                tk2.is_perfect = True
+                tk2.maybe_is_fake = False
+            start_src = tk1.cache.get("source_micro_id")
+            end_src = tk2.cache.get("source_micro_id")
+            swallow_ids = []
+            if (
+                start_src is not None and end_src is not None
+                and start_src in micro_id_to_pos and end_src in micro_id_to_pos
+            ):
+                a = micro_id_to_pos[start_src]
+                b = micro_id_to_pos[end_src]
+                lo, hi = sorted((a, b))
+                between_ids = micro_id_seq[lo + 1 : hi]
+                swallow_ids = [mid for mid in between_ids if mid in s.macro_excluded_micro_ids]
+                if not swallow_ids:
+                    swallow_ids = s.macro_swallow_map.get((start_src, end_src), [])
+            seg.cache["is_macro_swallow"] = bool(swallow_ids)
+            seg.cache["swallow_internal_micro_ids"] = swallow_ids
+            s.macro_segments.append(seg)
 
-        # 清除新终点的疑假标记
-        tk_new_end.maybe_is_fake = False
+    # 为兼容旧的外部调试脚本，保留同名代理方法
+    def _macro_audit_and_replay(self, current_k_idx: int) -> bool:
+        return self._macro_engine.audit_and_replay(current_k_idx)
 
-        # 重新打 is_locked
-        if len(s.turning_ks) >= 3:
-            s.turning_ks[-3].is_locked = True
-            s.turning_ks[-2].is_locked = True  # 即 tk_anchor
+    def _check_leap_physics(self, tk_start: TurningK, tk_end: TurningK,
+                           tk_mid_same: TurningK, tk_pullback: TurningK) -> bool:
+        return self._macro_engine._check_leap_physics(tk_start, tk_end, tk_mid_same, tk_pullback)
 
-        # 更新线段起点极值
-        s.segment_start_extreme = tk_anchor.price
-
-        # 同步线段与趋势状态
-        self._fractal_engine._update_segments()
-        self._trend_engine.update_trend_state(tk_new_end)
+    def _execute_leap_collapse(self, anchor_idx: int, new_end_idx: int):
+        return self._macro_engine._execute_leap_collapse(anchor_idx, new_end_idx)
 
     # =========================================================================
     # 中枢重播引擎
@@ -463,10 +446,18 @@ class SegmentAnalyzer:
 
     @property
     def turning_ks(self) -> List[TurningK]:
-        return self.state.turning_ks
+        return self.state.macro_turning_ks if self.state.macro_turning_ks else self.state.turning_ks
 
     @property
     def segments(self) -> List[MooreSegment]:
+        return self.state.macro_segments if self.state.macro_segments else self.state.segments
+
+    @property
+    def micro_turning_ks(self) -> List[TurningK]:
+        return self.state.turning_ks
+
+    @property
+    def micro_segments(self) -> List[MooreSegment]:
         return self.state.segments
 
     @property
@@ -479,6 +470,10 @@ class SegmentAnalyzer:
 
     @property
     def ghost_forks(self) -> List[tuple]:
+        return self.state.macro_ghost_forks
+
+    @property
+    def micro_ghost_forks(self) -> List[tuple]:
         return self.state.ghost_forks
 
     @property

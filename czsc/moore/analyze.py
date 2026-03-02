@@ -54,6 +54,14 @@ class MooreCZSC:
         return self.segment_analyzer.segments
 
     @property
+    def micro_turning_ks(self) -> List[TurningK]:
+        return self.segment_analyzer.micro_turning_ks
+
+    @property
+    def micro_segments(self) -> List[MooreSegment]:
+        return self.segment_analyzer.micro_segments
+
+    @property
     def all_centers(self) -> List[MooreCenter]:
         return self.segment_analyzer.all_centers
 
@@ -64,6 +72,10 @@ class MooreCZSC:
     @property
     def ghost_forks(self) -> List[tuple]:
         return self.segment_analyzer.ghost_forks
+
+    @property
+    def micro_ghost_forks(self) -> List[tuple]:
+        return self.segment_analyzer.micro_ghost_forks
 
     @property
     def refreshed_segments(self) -> list:
