@@ -274,6 +274,7 @@ def plot_moore_structure(
     if total_centers > 0:
         logger.info(f"本次展示的中枢总分（含幽灵）: {total_centers}")
         c_idx = 0
+        first_ghost = True
         for ct in display_centers:
             # 取得时间跨度和上下轨
             if not ct.start_dt or not ct.end_dt: continue
@@ -321,7 +322,7 @@ def plot_moore_structure(
                 chart.fig.add_trace(go.Scatter(
                     x=rect_x, y=rect_y, fill="toself", fillcolor=fill_color,
                     line=dict(color=line_color, width=2, dash=line_dash),
-                    name="幽灵中枢", legendgroup="幽灵元素", showlegend=True, hoverinfo='skip'
+                    name="幽灵中枢", legendgroup="幽灵元素", showlegend=first_ghost, hoverinfo='skip'
                 ), row=1, col=1)
                 # 轨道线（中枢线）
                 chart.fig.add_trace(go.Scatter(
@@ -335,6 +336,7 @@ def plot_moore_structure(
                     mode="text", name="幽灵中枢", legendgroup="幽灵元素", showlegend=False,
                     textposition="middle right", textfont=dict(size=8, color=line_color)
                 ), row=1, col=1)
+                first_ghost = False
             else:
                 # ── 非幽灵中枢：中枢矩形框（淡色填充） ──
                 rect_x = [x0, x1, x1, x0, x0]
@@ -396,7 +398,7 @@ def plot_moore_structure(
     if center_indices:
         updatemenus.append(dict(
             type="buttons", direction="left", showactive=True,
-            x=0.01, xanchor="left", y=1.1, yanchor="top",
+            x=0.01, xanchor="left", y=1.16, yanchor="top",
             buttons=[
                 dict(label="显示中枢及标注", method="restyle", args=[{"visible": True}, center_indices]),
                 dict(label="隐藏中枢及标注", method="restyle", args=[{"visible": ["legendonly"] * len(center_indices)}, center_indices]),
@@ -407,7 +409,7 @@ def plot_moore_structure(
     if ghost_indices:
         updatemenus.append(dict(
             type="buttons", direction="left", showactive=True,
-            x=0.4, xanchor="left", y=1.1, yanchor="top",
+            x=0.7, xanchor="left", y=1.16, yanchor="top",
             buttons=[
                 dict(label="显示所有幽灵", method="restyle", args=[{"visible": True}, ghost_indices]),
                 dict(label="一键清洗幽灵", method="restyle", args=[{"visible": ["legendonly"] * len(ghost_indices)}, ghost_indices]),
@@ -416,7 +418,7 @@ def plot_moore_structure(
 
     if updatemenus:
         chart.fig.update_layout(
-            margin=dict(t=80), 
+            margin=dict(t=120), 
             updatemenus=updatemenus
         )
 
@@ -440,7 +442,7 @@ if __name__ == '__main__':
     ]
     
     # 🎯 切换这里即可同时切换股票 and 时间范围 (例如改为 tasks[1] 或 tasks[2])
-    task = tasks[1]
+    task = tasks[0]
 
     try:
         symbol = task.symbol

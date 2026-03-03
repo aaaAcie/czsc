@@ -3,6 +3,7 @@
 from czsc.py.enum import Mark
 
 from ..objects import TurningK
+from .scope_utils import build_scope_windows, evaluate_scope_refresh, get_trigger_index
 
 
 class MacroAuditEngine:
@@ -32,7 +33,7 @@ class MacroAuditEngine:
         for candidate_idx in target_indices:
             if candidate_idx < 2:
                 continue
-            if n - candidate_idx < s.audit_maturity_period:
+            if n - candidate_idx < s.audit_link_rounds:
                 break
             fake_idx = candidate_idx
             idx = candidate_idx
@@ -41,7 +42,7 @@ class MacroAuditEngine:
         if idx is None or fake_idx is None:
             return False
 
-        for round_no in range(1, s.audit_backtrack_rounds + 1):
+        for round_no in range(1, s.audit_link_rounds + 1):
             start_idx = idx - round_no
             if start_idx < 0:
                 break
@@ -51,6 +52,9 @@ class MacroAuditEngine:
             # 同一锚点下仍坚持从近到远找最小可行吞噬
             # 右侧法官列表从疑点本身开始（idx..n），优先尝试就地最小吞噬。
             for end_idx in range(idx, n + 1):
+                # 必须存在至少 1 个被吞噬中间点；相邻端点不算有效吞噬。
+                if end_idx <= start_idx + 1:
+                    continue
                 tk_end = tks[end_idx]
                 if tk_start.mark == tk_end.mark:
                     continue
@@ -83,15 +87,19 @@ class MacroAuditEngine:
         """执行跃迁判定：法则一 (实力生长) OR 法则二 (重心演化)。"""
         s = self.state
 
-        bar_end = tk_end.k_index
-        gravity_start = tk_mid_same.k_index
-        path_bars = s.bars_raw[gravity_start : bar_end + 1]
-        path_ma5 = [b.cache.get("ma5") for b in path_bars if b.cache.get("ma5") is not None]
-        start_ma5 = tk_start.raw_bar.cache.get("ma5", None)
-        mid_ma5 = tk_mid_same.raw_bar.cache.get("ma5", None)
-        end_ma5 = tk_end.raw_bar.cache.get("ma5", None)
+        seg_start = tk_start.k_index
+        old_trigger_idx = get_trigger_index(tk_pullback)
+        new_trigger_idx = get_trigger_index(tk_end)
+        scopes = build_scope_windows(s.bars_raw, seg_start, old_trigger_idx, new_trigger_idx)
+        if scopes is None:
+            return False
+        refresh = evaluate_scope_refresh(tk_end.mark, scopes.old_scope, scopes.new_scope)
 
-        if start_ma5 is None or not path_ma5:
+        path_bars = s.bars_raw[tk_mid_same.k_index : new_trigger_idx + 1]
+        if not path_bars:
+            return False
+        path_ma5 = [b.cache.get("ma5") for b in path_bars if b.cache.get("ma5") is not None]
+        if not path_ma5:
             return False
 
         tk_end_top = max(tk_end.raw_bar.open, tk_end.raw_bar.close)
@@ -100,16 +108,26 @@ class MacroAuditEngine:
         tk_mid_bottom = min(tk_mid_same.raw_bar.open, tk_mid_same.raw_bar.close)
 
         if tk_end.mark == Mark.G:
-            growth_ok = tk_end.price > tk_mid_same.price and tk_end_top > tk_mid_bottom
+            growth_price_ok = refresh.price_refreshed
+            growth_body_ok = tk_end_top > tk_mid_bottom
         else:
-            growth_ok = tk_end.price < tk_mid_same.price and tk_end_bottom < tk_mid_top
+            growth_price_ok = refresh.price_refreshed
+            growth_body_ok = tk_end_bottom < tk_mid_top
 
-        ma5_is_better = False
-        if mid_ma5 is not None and end_ma5 is not None:
-            ma5_is_better = (end_ma5 > mid_ma5) if tk_end.mark == Mark.G else (end_ma5 < mid_ma5)
+        growth_ok = growth_price_ok and growth_body_ok
+
+        # ma5_is_better 统一按 old_scope/new_scope 的趋势极值比较，避免单点 MA5 失真。
+        ma5_is_better = refresh.ma5_refreshed
+        start_ma5_ref = refresh.start_ma5_ref
+        if start_ma5_ref is None:
+            start_ma5_ref = tk_start.raw_bar.cache.get("ma5")
+        if start_ma5_ref is None:
+            return False
 
         ma5_gravity_ok = (
-            (min(path_ma5) >= start_ma5) if tk_end.mark == Mark.G else (max(path_ma5) <= start_ma5)
+            (min(path_ma5) >= start_ma5_ref)
+            if tk_end.mark == Mark.G
+            else (max(path_ma5) <= start_ma5_ref)
         )
 
         if ma5_is_better:

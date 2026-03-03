@@ -12,6 +12,7 @@ from datetime import datetime
 from czsc.py.enum import Mark, Direction
 from czsc.py.objects import RawBar
 from ..objects import TurningK, MooreSegment
+from .scope_utils import build_scope_windows, evaluate_scope_refresh, get_trigger_index
 
 
 class MicroStructureEngine:
@@ -58,8 +59,9 @@ class MicroStructureEngine:
                     bar, k_index, waiting_mark, preset_ext_idx=cached_ext_idx, from_special_rule=True
                 )
 
-        # --- 3. 新信号探测 ---
-        # 探测方向优先级：Refresh（同向刷新/微观生长） > Reversal（正常转折）
+        # --- 3. 转折K信号探测 ---
+        # 这里只判定“转折K”候选；K0 等非转折用途由中枢引擎单独处理，不在此分支内。
+        # 探测方向：同向刷新（微观生长）与反向转折在同一根 K 上并检
         reversal_mark = Mark.D
         refresh_mark  = None
         if s.turning_ks:
@@ -67,37 +69,60 @@ class MicroStructureEngine:
             reversal_mark = Mark.G if last_mark == Mark.D else Mark.D
             refresh_mark  = last_mark
 
-        tasks = []
-        if refresh_mark:
-            tasks.append((refresh_mark, True))
-        tasks.append((reversal_mark, False))
-
-        for target_mark, is_refresh in tasks:
-            triggered = False
-            refresh_ext_idx = None
+        def _is_turning_triggered(target_mark: Mark) -> bool:
             if target_mark == Mark.G:  # 找顶
-                if ma5 <= s.last_ma5 or is_solid_gap_down:
-                    if min(bar.open, bar.close) < ma5: triggered = True
-            else:  # 找底
-                if ma5 >= s.last_ma5 or is_solid_gap_up:
-                    if max(bar.open, bar.close) > ma5: triggered = True
+                return (ma5 <= s.last_ma5 or is_solid_gap_down) and (min(bar.open, bar.close) < ma5)
+            # 找底
+            return (ma5 >= s.last_ma5 or is_solid_gap_up) and (max(bar.open, bar.close) > ma5)
 
-            if triggered:
-                # 【微观生长法则准入】：同向刷新必须在物理实力上通过判定
-                if is_refresh:
-                    # 先由转折K按“绝对极值优先 + 左扫3K兜底”定位，再做刷新比较
-                    refresh_price, refresh_ext_idx = self._find_extreme_by_trigger(
-                        target_mark, s.turning_ks[-1].k_index + 1, k_index
-                    )
-                    if not self._is_physically_better(
-                        target_mark, refresh_price, bar, k_index, s.turning_ks[-1]
-                    ):
-                        continue
+        def _run_attempt(
+            target_mark: Mark,
+            preset_ext_idx: int = None,
+            allow_special_shift: bool = True,
+            invalidate_last_on_fail: bool = False,
+        ) -> bool:
+            old_len = len(s.turning_ks)
+            old_last = s.turning_ks[-1].dt if s.turning_ks else None
+            old_last_trigger = (
+                s.turning_ks[-1].trigger_k_index if s.turning_ks else None
+            )
+            s.debug_trigger_count += 1
 
-                s.debug_trigger_count += 1
-                
-                self._process_confirmed_trigger(bar, k_index, target_mark, preset_ext_idx=refresh_ext_idx)
-                break
+            self._process_confirmed_trigger(
+                bar,
+                k_index,
+                target_mark,
+                preset_ext_idx=preset_ext_idx,
+                allow_special_shift=allow_special_shift,
+                invalidate_last_on_fail=invalidate_last_on_fail,
+            )
+
+            # 若本根 K 已形成待后移特殊法则，或已经确认了一个新顶底，则视为本轮结束。
+            if s.waiting_special_rule:
+                return True
+            if len(s.turning_ks) != old_len or (s.turning_ks and s.turning_ks[-1].dt != old_last):
+                return True
+            if s.turning_ks and s.turning_ks[-1].trigger_k_index != old_last_trigger:
+                return True
+            return False
+
+        # 同一根 K 线先并检触发，再按“同向刷新 -> 反向转折”顺序裁决，
+        # 最终只会落地为：同向、反向、或都不成立。
+        refresh_attempt = None
+        if refresh_mark and _is_turning_triggered(refresh_mark):
+            refresh_attempt = self._prepare_refresh_attempt(refresh_mark, k_index)
+
+        reversal_ready = _is_turning_triggered(reversal_mark)
+
+        if refresh_attempt and _run_attempt(
+            refresh_mark,
+            preset_ext_idx=refresh_attempt["ext_idx"],
+            allow_special_shift=refresh_attempt["allow_special_shift"],
+            invalidate_last_on_fail=refresh_attempt["invalidate_last_on_fail"],
+        ):
+            return
+        if reversal_ready:
+            _run_attempt(reversal_mark, None)
 
     # =========================================================================
     # 物理法则：法则 A & 法则 B
@@ -106,43 +131,44 @@ class MicroStructureEngine:
     def _is_physically_better(
         self, mark: Mark, new_price: float, trigger_bar: RawBar, trigger_index: int, old_tk: TurningK
     ) -> bool:
-        """核心物理实力判定：价格取新极值，MA5取转折K（Rule 1 OR Rule 2A）"""
+        """核心物理实力判定：按 old/new 区间极值比较（Rule 1 OR Rule 2A）。"""
         s = self.s
         old_bar = old_tk.raw_bar
 
-        # --- 法则一 (Growth)：新顶底相对“原趋势极值”更优 + 实体穿透 ---
-        trend_start_idx = old_tk.k_index
+        # 统一使用 old_scope / new_scope 判定“是否对原趋势做出新区间极值”。
+        seg_start = old_tk.k_index
         if len(s.turning_ks) >= 2 and s.turning_ks[-1].mark == old_tk.mark:
-            trend_start_idx = s.turning_ks[-2].k_index
+            seg_start = s.turning_ks[-2].k_index + 1
 
-        trend_bars = s.bars_raw[trend_start_idx : trigger_index]
-        if mark == Mark.G:
-            trend_price_ref = max([b.high for b in trend_bars], default=old_tk.price)
-        else:
-            trend_price_ref = min([b.low for b in trend_bars], default=old_tk.price)
+        old_trigger_idx = get_trigger_index(old_tk)
+        scopes = build_scope_windows(s.bars_raw, seg_start, old_trigger_idx, trigger_index)
+        if scopes is None:
+            return False
+        refresh = evaluate_scope_refresh(mark, scopes.old_scope, scopes.new_scope)
 
-        rule1 = False
+        # --- 法则一 (Growth)：区间价格极值刷新 + 实体穿透 ---
         if mark == Mark.G:
             body_top = max(trigger_bar.open, trigger_bar.close)
             old_bottom = min(old_bar.open, old_bar.close)
-            rule1 = (new_price > trend_price_ref) and (body_top > old_bottom)
+            rule1 = refresh.price_refreshed and (body_top > old_bottom)
         else:
             body_bottom = min(trigger_bar.open, trigger_bar.close)
             old_top = max(old_bar.open, old_bar.close)
-            rule1 = (new_price < trend_price_ref) and (body_bottom < old_top)
+            rule1 = refresh.price_refreshed and (body_bottom < old_top)
 
-        # --- 法则二A (Energy)：仅要求新转折K MA5 比前转折K MA5 更优 ---
-        rule2a = False
-        trigger_ma5 = trigger_bar.cache.get('ma5')
-        old_trig_ma5 = old_tk.trigger_k.cache.get('ma5') if old_tk.trigger_k else None
-        if old_trig_ma5 is None:
-            old_trig_ma5 = old_bar.cache.get('ma5')
-
-        if trigger_ma5 is not None and old_trig_ma5 is not None:
-            if mark == Mark.G:
-                rule2a = trigger_ma5 > old_trig_ma5
-            else:
-                rule2a = trigger_ma5 < old_trig_ma5
+        # --- 法则二A (Energy)：区间 MA5 极值刷新（上攻看 max，下行看 min）---
+        rule2a = refresh.ma5_refreshed
+        if not refresh.ma5_ready:
+            # 容错回退：极端冷启动阶段若区间 MA5 缺失，则退回单点比较。
+            trigger_ma5 = trigger_bar.cache.get('ma5')
+            old_trig_ma5 = old_tk.trigger_k.cache.get('ma5') if old_tk.trigger_k else None
+            if old_trig_ma5 is None:
+                old_trig_ma5 = old_bar.cache.get('ma5')
+            if trigger_ma5 is not None and old_trig_ma5 is not None:
+                if mark == Mark.G:
+                    rule2a = trigger_ma5 > old_trig_ma5
+                else:
+                    rule2a = trigger_ma5 < old_trig_ma5
 
         return rule1 or rule2a
 
@@ -150,8 +176,91 @@ class MicroStructureEngine:
     # 私有方法
     # =========================================================================
 
+    def _locate_extreme_with_mode(
+        self,
+        mark: Mark,
+        start_idx: int,
+        end_idx_inclusive: int,
+    ) -> tuple:
+        """按配置选择顶底寻址策略：左侧3K优先 or 区间绝对极值。"""
+        s = self.s
+        if s.use_left_3k_locator:
+            return self._find_left_3k_extreme(mark, start_idx, end_idx_inclusive)
+        return self._find_extreme_in_range(mark, start_idx, end_idx_inclusive + 1)
+
+    def _prepare_refresh_attempt(self, mark: Mark, trigger_index: int) -> dict:
+        """为同向刷新构造候选：
+        - 条件 A：MA5 极值刷新（由开关控制：左侧3K or 区间绝对极值）
+        - 条件 B：仅在 A 不成立时检查。价格极值刷新 + 实体严格越界（同价不算）
+        - 刷新失败时仅废弃新候选，不回退旧端点；成功确立后再执行同向替换。
+        """
+        s = self.s
+        if not s.turning_ks:
+            return None
+
+        old_tk = s.turning_ks[-1]
+        old_trigger_idx = get_trigger_index(old_tk)
+
+        seg_start = s.turning_ks[-2].k_index + 1 if len(s.turning_ks) >= 2 else 0
+        bars = s.bars_raw
+
+        scopes = build_scope_windows(bars, seg_start, old_trigger_idx, trigger_index)
+        if scopes is None:
+            return None
+        old_scope = scopes.old_scope
+        new_scope = scopes.new_scope
+        refresh = evaluate_scope_refresh(mark, old_scope, new_scope)
+
+        right_scope = bars[old_trigger_idx + 1 : trigger_index + 1]  # (old_trigger, new_trigger]
+        if not right_scope:
+            return None
+
+        cond_a = refresh.ma5_refreshed
+
+        # 条件 A：MA5 刷新时，由开关控制寻址方式。
+        if cond_a:
+            left_end = max(old_trigger_idx + 1, trigger_index - 1)
+            # 本来是old_trigger_idx + 1 但我觉得转折k找到的三k可以是同一个 如果是同一个的话，就把原来的转折k替换掉
+            ext_price, ext_idx = self._locate_extreme_with_mode(mark, old_trigger_idx - 1, left_end)
+            return {
+                "ext_idx": ext_idx,
+                "allow_special_shift": False,
+                "invalidate_last_on_fail": False,
+            }
+
+        # 条件 B：仅在 MA5 未刷新时才检查。
+        if mark == Mark.G:
+            ext_bar = max(right_scope, key=lambda x: x.high)
+            ext_price = ext_bar.high
+            old_body_edge = min(old_tk.raw_bar.open, old_tk.raw_bar.close)  # 前顶实体下沿
+            body_ok = max(ext_bar.open, ext_bar.close) > old_body_edge
+            price_refreshed = ext_price > refresh.old_price_ext
+        else:
+            ext_bar = min(right_scope, key=lambda x: x.low)
+            ext_price = ext_bar.low
+            old_body_edge = max(old_tk.raw_bar.open, old_tk.raw_bar.close)  # 前底实体上沿
+            body_ok = min(ext_bar.open, ext_bar.close) < old_body_edge
+            price_refreshed = ext_price < refresh.old_price_ext
+
+        ext_idx = (old_trigger_idx + 1) + right_scope.index(ext_bar)
+        cond_b = price_refreshed and body_ok
+
+        if not cond_b:
+            return None
+
+        return {
+            "ext_idx": ext_idx,
+            "allow_special_shift": cond_b and ext_idx == trigger_index,
+            "invalidate_last_on_fail": False,
+        }
+
     def _find_extreme_in_range(self, mark: Mark, start_idx: int, end_idx: int) -> tuple:
-        """在 K 线区间 [start_idx, end_idx) 内定位绝对极值（不含转折K）。"""
+        """在 K 线区间 [start_idx, end_idx) 内定位绝对极值（不含转折K）。
+
+        参数约定：
+        - start_idx: 起始索引（含）
+        - end_idx:   结束索引（不含）
+        """
         s = self.s
         search_bars = s.bars_raw[start_idx : end_idx] # 不含触发K
         if not search_bars:
@@ -201,9 +310,17 @@ class MicroStructureEngine:
 
     def _process_confirmed_trigger(self, trigger_bar: RawBar, trigger_index: int, new_mark: Mark,
                                    preset_ext_idx: int = None,
-                                   from_special_rule: bool = False):
+                                   from_special_rule: bool = False,
+                                   allow_special_shift: bool = True,
+                                   invalidate_last_on_fail: bool = False):
         """处理已定位转折K后的极值寻址（内部私有）"""
         s = self.s
+        min_non_overlap_idx = None
+        if s.turning_ks and s.turning_ks[-1].mark != new_mark:
+            # 异向寻址约束：新分型3K不能与前一个转折K重叠
+            # => 新候选中间K索引 ext_idx 必须 >= last.k_index + 2
+            min_non_overlap_idx = s.turning_ks[-1].k_index + 2
+
         # 1. 寻找极值
         if preset_ext_idx is not None:
             ext_idx = preset_ext_idx
@@ -217,9 +334,25 @@ class MicroStructureEngine:
                 if last.mark == new_mark:
                     search_start = s.turning_ks[-2].k_index + 1 if len(s.turning_ks) >= 2 else 0
                 else:
-                    search_start = last.k_index + 1
-            
-            new_price, ext_idx = self._find_extreme_by_trigger(new_mark, search_start, trigger_index)
+                    # 异向寻址至少从 last.k_index + 2 开始，避免3K重叠
+                    search_start = last.k_index + 2
+
+            # 反向转折：由开关控制使用“左侧3K”或“区间绝对极值”
+            # 同向刷新：沿用“绝对极值优先，必要时回退左侧3K”的寻址策略
+            if s.turning_ks and s.turning_ks[-1].mark != new_mark:
+                new_price, ext_idx = self._locate_extreme_with_mode(new_mark, search_start, trigger_index)
+            else:
+                new_price, ext_idx = self._find_extreme_by_trigger(new_mark, search_start, trigger_index)
+
+        # 二次保险：即使容错回退，也不允许异向3K与前一转折K重叠
+        if min_non_overlap_idx is not None and ext_idx < min_non_overlap_idx:
+            return
+
+        # 同向刷新若命中与上一个完全相同的极值K，只更新时间触发锚点，不重建新候选
+        if s.turning_ks and s.turning_ks[-1].mark == new_mark and ext_idx == s.turning_ks[-1].k_index:
+            s.turning_ks[-1].trigger_k = trigger_bar
+            s.turning_ks[-1].trigger_k_index = trigger_index
+            return
         ext_bar = s.bars_raw[ext_idx]
 
         new_tk = TurningK(
@@ -241,7 +374,7 @@ class MicroStructureEngine:
             if valid:
                 # 特殊法则：当转折K本身就是本段极值K，且四法则通过时，
                 # 当前转折K无效，后移一根作为新生转折K（不改极值K）。
-                if (not from_special_rule) and ext_idx == trigger_index:
+                if (not from_special_rule) and allow_special_shift and ext_idx == trigger_index:
                     s.waiting_special_rule = True
                     s.special_waiting_mark = new_mark
                     s.special_ext_idx_cache = ext_idx
@@ -251,6 +384,11 @@ class MicroStructureEngine:
             else:
                 # 顶底确立是静态裁决：当前不通过即废弃，不跨K线等待
                 s.candidate_tk = None
+                if invalidate_last_on_fail and s.turning_ks and s.turning_ks[-1].mark == new_mark:
+                    s.turning_ks.pop()
+                    self._reset_locks()
+                    s.segment_start_extreme = s.turning_ks[-1].price if s.turning_ks else None
+                    self._update_segments()
 
     def _confirm_candidate(self, final_tk: TurningK, perfect_struct: bool, has_visible: bool):
         """确认转折点，更新系统状态"""
@@ -270,11 +408,7 @@ class MicroStructureEngine:
         s.turning_ks.append(final_tk)
 
         # 锁定点策略
-        for tk in s.turning_ks: tk.is_locked = False
-        if len(s.turning_ks) >= 2:
-            s.turning_ks[-2].is_locked = True
-        if len(s.turning_ks) >= 3:
-            s.turning_ks[-3].is_locked = True
+        self._reset_locks()
 
         s.segment_start_extreme = s.turning_ks[-1].price
         s.candidate_tk = None
@@ -282,12 +416,22 @@ class MicroStructureEngine:
         self._update_segments()
         self.trend.update_trend_state(final_tk)
 
+    def _reset_locks(self):
+        """重建锁定点状态：最新点不锁，倒数二/三锁定。"""
+        s = self.s
+        for tk in s.turning_ks:
+            tk.is_locked = False
+        if len(s.turning_ks) >= 2:
+            s.turning_ks[-2].is_locked = True
+        if len(s.turning_ks) >= 3:
+            s.turning_ks[-3].is_locked = True
+
     def _validate_four_rules(self, tk: TurningK) -> tuple:
         """确立顶底的核心四法则 (严格同步核心定义文档)
         
         返回值：(is_valid, is_perfect, has_visible)
-          - is_valid: 物理成立门槛（法则 1+2）。若为 False，则该顶底不建立。
-          - is_perfect: 结构完整性（法则 3）。决定线段虚实。
+          - is_valid: 顶底成立门槛（由 ma34_cross_as_valid_gate 控制是否要求法则2）。
+          - is_perfect: 结构完整性（法则 3，或在配置下叠加法则2）。决定线段虚实。
           - has_visible: 是否包含肉眼中枢。
         """
         s = self.s
@@ -304,9 +448,12 @@ class MicroStructureEngine:
         else:
             ref_tk = s.turning_ks[-1] if s.turning_ks else None
 
-        # 如果没有参考点（冷启动），法则 2 默认通过 (无法执行扫描)
+        # 扫描区间定义：
+        # - start_idx: 参考锚点 ref_tk 的“中间K”（3K 结构中心）索引，用于定义本段左边界
+        # - end_idx:   当前候选 tk 的“中间K”（3K 结构中心）索引，用于定义本段右边界
+        # 如果没有参考点（冷启动），左边界回退到 0。
         start_idx = ref_tk.k_index if ref_tk else 0
-        end_idx   = tk.k_index
+        end_idx = tk.k_index
 
         # ---------------------------------------------------------------------
         # 法则 1：局部 3K 极值判定 (刚性)
@@ -343,7 +490,9 @@ class MicroStructureEngine:
 
         # ---------------------------------------------------------------------
         # 法则 2：两侧大铡刀 (MA5/MA34 金死叉扫描) (刚性)
-        # 在 [ref_tk.k_pos, tk.k_pos] 之间必须发生过一次穿越
+        # 放松 1 根 K：扫描范围由“中间K到中间K”扩展到
+        # “起点3K的第一根K(start_idx-1) 到 终点3K的最后一根K(end_idx+1)”。
+        # 穿越检测在相邻两根之间进行，因此循环 i 表示右侧那根 K 的索引（左侧是 i-1）。
         # ---------------------------------------------------------------------
         rule2 = False
         if not ref_tk:
@@ -351,8 +500,10 @@ class MicroStructureEngine:
             if tk.mark == Mark.G: rule2 = bars[-1].close < ma5_val
             else: rule2 = bars[-1].close > ma5_val
         else:
-            # 扫描区间内的交叉
-            for i in range(start_idx + 1, end_idx + 1):
+            scan_left_idx = max(0, start_idx - 1)
+            scan_right_idx = min(len(bars) - 1, end_idx + 1)
+            # 扫描扩展区间内的交叉（比较 i-1 与 i）
+            for i in range(scan_left_idx + 1, scan_right_idx + 1):
                 b_prev = bars[i-1]
                 b_curr = bars[i]
                 m5_p, m34_p = b_prev.cache.get('ma5'), b_prev.cache.get('ma34')
@@ -392,8 +543,15 @@ class MicroStructureEngine:
                 if start_idx <= c_start <= end_idx:
                     rule3 = True
                     # has_v 故意不升级：is_visible 定性需等中枢固化后由 MooreCenter 决定
-        is_valid = rule1 and rule2
-        is_perfect = rule3
+        # 交叉规则开关：
+        # - True: MA5/MA34 交叉是顶底成立门槛（历史默认）
+        # - False: 交叉仅影响虚实，不阻断顶底确立
+        if s.ma34_cross_as_valid_gate:
+            is_valid = rule1 and rule2
+            is_perfect = rule3
+        else:
+            is_valid = rule1
+            is_perfect = rule3 and rule2
             
         return is_valid, is_perfect, has_v
 

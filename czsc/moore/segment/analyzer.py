@@ -60,6 +60,8 @@ class SegmentState:
 
     # 可配置参数
     max_segments: int = 500
+    use_left_3k_locator: bool = True  # True: 3K向左寻找优先, False: 区间绝对极值优先
+    ma34_cross_as_valid_gate: bool = True  # True: 交叉是顶底成立门槛; False: 仅影响线段虚实
 
     # -------------------------------------------------------------------------
     # 基础数据容器
@@ -134,8 +136,7 @@ class SegmentState:
     # 宏观审计引擎配置
     # -------------------------------------------------------------------------
     enable_macro_audit: bool            = True  # False 时关闭吞噬/跃迁
-    audit_maturity_period: int          = 1      # 审计成熟度：目标疑点右侧需积累的新点数
-    audit_backtrack_rounds: int         = 5      # 左向搜寻更深层起跳锚点的最大轮回次数
+    audit_link_rounds: int              = 5     # 左右连接机会统一：右侧成熟度 + 左侧回溯轮数
 
     # -------------------------------------------------------------------------
     # 调试计数器
@@ -152,9 +153,22 @@ class SegmentAnalyzer:
     维护 MA5/MA34 滑窗队列，驱动每根 K 线的状态机推进。
     """
 
-    def __init__(self, bars: List[RawBar], max_segments: int = 500):
+    def __init__(
+        self,
+        bars: List[RawBar],
+        max_segments: int = 500,
+        use_left_3k_locator: bool = True,
+        ma34_cross_as_valid_gate: bool = True,
+        audit_link_rounds: int = 5,
+    ):
         # 1. 准备共享状态容器（初始物理空间为空）
-        s = SegmentState(bars_raw=[], max_segments=max_segments)
+        s = SegmentState(
+            bars_raw=[],
+            max_segments=max_segments,
+            use_left_3k_locator=use_left_3k_locator,
+            ma34_cross_as_valid_gate=ma34_cross_as_valid_gate,
+            audit_link_rounds=audit_link_rounds,
+        )
         self.state = s
 
         # 2. 准备滑窗缓存

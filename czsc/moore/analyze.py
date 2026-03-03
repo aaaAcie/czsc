@@ -26,11 +26,21 @@ class MooreCZSC:
     组合各级别子分析器，对外暴露统一、稳定的访问接口。
     """
 
-    def __init__(self, bars: List[RawBar], max_segments: int = 500):
+    def __init__(
+        self,
+        bars: List[RawBar],
+        max_segments: int = 500,
+        use_left_3k_locator: bool = True,
+        ma34_cross_as_valid_gate: bool = True,
+        audit_link_rounds: int = 5,
+    ):
         # --- 30分钟线段级 ---
         self.segment_analyzer = SegmentAnalyzer(
             bars=bars,
             max_segments=max_segments,
+            use_left_3k_locator=use_left_3k_locator,
+            ma34_cross_as_valid_gate=ma34_cross_as_valid_gate,
+            audit_link_rounds=audit_link_rounds,
         )
 
         # --- 高级别（未来）---
