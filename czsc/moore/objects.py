@@ -22,9 +22,9 @@ class TurningK:
     price: float            # 价格：如果是顶则为 high，如果是底则为 low
     k_index: int            # 在原始 K 线序列中的绝对索引位置，用于追溯距离
 
-    # 触发K
-    trigger_k: Optional[RawBar] = None     # 发出跨越/跳空触发信号的“转折K”
-    trigger_k_index: Optional[int] = None  # 转折信号发生时的绝对索引位置
+    # 转折K（确立K）：默认等于触发信号K；若触发K本身即极值K，按特殊法则后移一根
+    trigger_k: Optional[RawBar] = None     # 兼容旧名：转折K
+    trigger_k_index: Optional[int] = None  # 兼容旧名：转折K索引
 
     # 状态标记
     is_valid: bool = False       # 是否已经通过了基础验证（法则1,2）成立
@@ -33,6 +33,24 @@ class TurningK:
     maybe_is_fake: bool = False  # 宏观审判层标记：该点所在的线段结构不完美，疑似虚假端点，等待三级跃迁回溯
     has_visible_center: bool = False # 线段内部是否包含肉眼中枢（高能级结构保障）
     cache: dict = field(default_factory=dict)
+
+    @property
+    def turning_k(self) -> Optional[RawBar]:
+        """转折K（正式命名，兼容映射到 trigger_k）。"""
+        return self.trigger_k
+
+    @turning_k.setter
+    def turning_k(self, value: Optional[RawBar]):
+        self.trigger_k = value
+
+    @property
+    def turning_k_index(self) -> Optional[int]:
+        """转折K索引（正式命名，兼容映射到 trigger_k_index）。"""
+        return self.trigger_k_index
+
+    @turning_k_index.setter
+    def turning_k_index(self, value: Optional[int]):
+        self.trigger_k_index = value
 
     def __repr__(self):
         return f"TurningK(dt={self.dt}, mark={self.mark.value}, price={self.price}, is_valid={self.is_valid})"

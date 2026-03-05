@@ -94,11 +94,11 @@ def plot_moore_structure(
         
         # 叠加带有箭杆的指向性箭头（转折K）
         for tk in display_tks:
-            if tk.trigger_k:
+            if tk.turning_k:
                 if tk.mark == Mark.D:  # 底分型确立 -> 向上转折确立
                     chart.fig.add_annotation(
-                        x=tk.trigger_k.dt.strftime("%Y-%m-%d %H:%M"),
-                        y=tk.trigger_k.low,
+                        x=tk.turning_k.dt.strftime("%Y-%m-%d %H:%M"),
+                        y=tk.turning_k.low,
                         showarrow=True,
                         arrowhead=2,
                         arrowsize=1.2,
@@ -112,8 +112,8 @@ def plot_moore_structure(
                     )
                 else:  # 顶分型确立 -> 向下转折确立
                     chart.fig.add_annotation(
-                        x=tk.trigger_k.dt.strftime("%Y-%m-%d %H:%M"),
-                        y=tk.trigger_k.high,
+                        x=tk.turning_k.dt.strftime("%Y-%m-%d %H:%M"),
+                        y=tk.turning_k.high,
                         showarrow=True,
                         arrowhead=2,
                         arrowsize=1.2,

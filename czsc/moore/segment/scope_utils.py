@@ -34,7 +34,11 @@ class ScopeRefreshMetrics:
 
 def get_trigger_index(tk) -> int:
     """统一获取转折K对应的触发索引。"""
-    return tk.trigger_k_index if tk.trigger_k_index is not None else tk.k_index
+    turning_idx = getattr(tk, "turning_k_index", None)
+    if turning_idx is not None:
+        return turning_idx
+    trigger_idx = getattr(tk, "trigger_k_index", None)
+    return trigger_idx if trigger_idx is not None else tk.k_index
 
 
 def build_scope_windows(
@@ -94,4 +98,3 @@ def evaluate_scope_refresh(
         ma5_refreshed=ma5_refreshed,
         start_ma5_ref=start_ma5_ref,
     )
-

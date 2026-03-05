@@ -128,27 +128,31 @@ def plot_moore_structure_echarts(
     def _tk_scatter(name, tk_list, label_pos):
         if not tk_list:
             return None
-        xs = [_dt_str(tk.dt) for (_, tk) in tk_list]
-        # y 只传价格
-        ys = [tk.price for (_, tk) in tk_list]
-        # 标签文字预编译为 JS 数组，用 dataIndex 索引取值
-        labels_js = str([f"mV{i}{'T' if tk.mark == Mark.G else 'B'}" for (i, tk) in tk_list])
-        formatter = JsCode(
-            "function(p){ var L=" + labels_js + "; return L[p.dataIndex] || ''; }"
-        )
+            
+        val_map = { _dt_str(tk.dt): {"price": tk.price, "idx": i, "mark": tk.mark} for i, tk in tk_list }
+        ys = []
+        labels_js_arr = []
+        for d in dates:
+            if d in val_map:
+                v = val_map[d]
+                ys.append(v["price"])
+                labels_js_arr.append(f"mV{v['idx']}{'T' if v['mark'] == Mark.G else 'B'}")
+            else:
+                ys.append(None)
+                labels_js_arr.append("")
+
+        labels_js = str(labels_js_arr)
+        formatter = JsCode("function(p){ var L=" + labels_js + "; return L[p.dataIndex] || ''; }")
+        
         return (
             Scatter()
-            .add_xaxis(xs)
+            .add_xaxis(dates)
             .add_yaxis(
                 name, ys,
                 symbol="circle", symbol_size=7,
                 label_opts=opts.LabelOpts(
-                    is_show=True,
-                    position=label_pos,
-                    color="#000000",
-                    font_size=14,
-                    font_weight="bold",
-                    formatter=formatter,
+                    is_show=True, position=label_pos, color="#000000",
+                    font_size=14, font_weight="bold", formatter=formatter,
                 ),
                 itemstyle_opts=opts.ItemStyleOpts(
                     color="#FFFFFF", border_color="#000000", border_width=2
@@ -158,6 +162,37 @@ def plot_moore_structure_echarts(
                 xaxis_opts=opts.AxisOpts(type_="category"),
                 legend_opts=opts.LegendOpts(is_show=False),
             )
+        )
+
+    def _arrow_series(name, tk_list, is_up):
+        if not tk_list:
+            return None
+            
+        mp_data = []
+        has_data = False
+        for _, tk in tk_list:
+            if tk.turning_k:
+                dt_str = _dt_str(tk.turning_k.dt)
+                y_val = tk.turning_k.low if is_up else tk.turning_k.high
+                mp_data.append({
+                    "coord": [dt_str, y_val],
+                    "symbol": "path://M46 0 L46 75 L20 49 L12 57 L50 95 L88 57 L80 49 L54 75 L54 0 Z",
+                    "symbolSize": [14, 35],
+                    "symbolRotate": 180 if is_up else 0,
+                    "symbolOffset": [0, "85%"] if is_up else [0, "-85%"],
+                    "itemStyle": {"color": "#D32F2F" if is_up else "#2E7D32"}
+                })
+                has_data = True
+                
+        if not has_data:
+            return None
+
+        return (
+            _dummy_line(dates, name, "#D32F2F" if is_up else "#2E7D32")
+            .set_series_opts(markpoint_opts=opts.MarkPointOpts(
+                data=mp_data,
+                label_opts=opts.LabelOpts(is_show=False),
+            ))
         )
 
     # ── 4. 线段数据分类 ───────────────────────────────────────────────
@@ -183,7 +218,7 @@ def plot_moore_structure_echarts(
                 tp = "solid" if tb.is_perfect else "dashed"
                 ghost_fork_data.append([
                     {"coord": [_dt_str(ta.dt), ta.price], "symbol": "none",
-                     "lineStyle": {"color": "#AAAAAA", "width": 1.5, "type": tp, "opacity": 0.6}},
+                     "lineStyle": {"color": "#555555", "width": 2, "type": tp, "opacity": 0.75}},
                     {"coord": [_dt_str(tb.dt), tb.price], "symbol": "none"},
                 ])
 
@@ -192,7 +227,7 @@ def plot_moore_structure_echarts(
     for seg in refreshed_segments:
         refresh_data.append([
             {"coord": [_dt_str(seg.start_k.dt), seg.start_k.price], "symbol": "none",
-             "lineStyle": {"color": "#999999", "width": 1, "type": "dashed", "opacity": 0.5}},
+             "lineStyle": {"color": "#666666", "width": 1.5, "type": "dashed", "opacity": 0.7}},
             {"coord": [_dt_str(seg.end_k.dt), seg.end_k.price], "symbol": "none"},
         ])
 
@@ -305,7 +340,7 @@ def plot_moore_structure_echarts(
     overlay_series.append(line_ma)
 
     # 微观线段（全部合并，统一灰色）
-    s = _seg_series("微观线段", micro_all, "#AAAAAA", 1.2, alpha=0.6)
+    s = _seg_series("微观线段", micro_all, "#555555", 1.5, alpha=0.75)
     if s:
         overlay_series.append(s)
 
@@ -352,6 +387,14 @@ def plot_moore_structure_echarts(
         overlay_series.append(sc_top)
     if sc_bot:
         overlay_series.append(sc_bot)
+
+    # 转折K箭头（指向触发K线的高低点）
+    arr_up = _arrow_series("向上转折确立", bot_tks, is_up=True)
+    arr_dn = _arrow_series("向下转折确立", top_tks, is_up=False)
+    if arr_up:
+        overlay_series.append(arr_up)
+    if arr_dn:
+        overlay_series.append(arr_dn)
 
     # ── 7. 主 K 线 ────────────────────────────────────────────────────
     kline = (
@@ -453,12 +496,12 @@ def plot_moore_structure_echarts(
                 opts.DataZoomOpts(
                     is_show=False, type_="inside",
                     xaxis_index=[0, 1],
-                    range_start=75, range_end=100,
+                    range_start=0, range_end=100,
                 ),
                 opts.DataZoomOpts(
                     is_show=True, type_="slider",
                     xaxis_index=[0, 1],
-                    range_start=75, range_end=100,
+                    range_start=0, range_end=100,
                     pos_bottom="55px",
                 ),
             ],
@@ -572,9 +615,10 @@ class AnalyzeTask:
 
 if __name__ == "__main__":
     tasks = [
-        AnalyzeTask("300371",   sdt="20181220", edt="20201030", desc="汇中股份"),
-        AnalyzeTask("sz002346", sdt="20180901", edt="20200908", desc="柘中股份"),
+        AnalyzeTask("300371", sdt="20181220", edt="20201030", desc="汇中股份"),
+        AnalyzeTask("002346", sdt="20180901", edt="20200908", desc="柘中股份"),
         AnalyzeTask("sz002286", sdt="20210101", edt="20210701", desc="保利发展"),
+        AnalyzeTask("300137", sdt="20190415", edt="20201130", desc="先河环保"),
     ]
 
     # 🎯 切换这里
@@ -585,7 +629,7 @@ if __name__ == "__main__":
         logger.info(f"正在拉取标的 {symbol} ({task.desc}) | 时间: {task.sdt} ~ {task.edt}")
         bars = research.get_raw_bars_origin(symbol, sdt=task.sdt, edt=task.edt)
 
-        engine = MooreCZSC(bars)
+        engine = MooreCZSC(bars, ma34_cross_as_valid_gate=False, audit_link_rounds=3)
 
         total_fail = sum(engine._debug_rule_fail.values())
         logger.info(

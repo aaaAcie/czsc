@@ -113,6 +113,7 @@ class CenterEngine:
                 s.current_k0 = bar
                 s.center_direction = current_dir
                 s.center_anchor_idx = ext_idx  # 轨道搜索回溯仍需看齐物理极值
+                s.center_trigger_k_index = trig_idx
                 s.center_state = 1
 
         # =====================================================================
@@ -143,34 +144,27 @@ class CenterEngine:
             direction = current_dir
 
             # 1. 基础物理延伸判定：价格是否仍在结界轨道内？
+            # "在轨道内"的定义：K线的价格区间与中枢结界有交集（high >= lower_rail 且 low <= upper_rail）
             in_rails = (bar.high >= s.center_lower_rail and bar.low <= s.center_upper_rail)
 
             if not in_rails:
-                # --- 脱轨处理流程 ---
-                s.escape_bars.append((bar, k_index))
-                
-                # 【右边界定格原则】：如果是第一根脱轨 K 线，把它作为潜在的固化右边界
-                if len(s.escape_bars) == 1:
-                    s.center_end_dt = bar.dt
-                    s.center_end_k_index = k_index
-                    
-                # 满足连续三根脱轨，彻底宣告病房关闭并固化
-                if len(s.escape_bars) >= 3:
-                    self._finalize_and_mount_center()
-                    self.rollback()
-                    
-                    # 固化后的无缝衔接判定
-                    if is_pure and not has_overlap:
-                        s.current_k0 = bar
-                        s.center_direction = current_dir
-                        s.center_anchor_idx = ext_idx
-                        s.center_state = 1
-                    return
+                # --- 脱轨（破窗）处理流程 ---
+                if not s.pending_close:
+                    # 第一次脱轨：进入"预备闭库"状态，冻结右边界为脱轨前一根K
+                    # 若当前K就是第一根（center_end_k_index == center_line_k_index），
+                    # 则预备边界退化为确认K本身，以防止越界。
+                    s.pending_close = True
+                    s.pending_close_end_dt = s.center_end_dt
+                    s.pending_close_end_k_index = s.center_end_k_index
+                # 已在预备状态：不更新边界，继续等待线段结束信号
             else:
                 # --- 轨道内延伸流程 ---
-                if s.escape_bars:
-                    s.escape_bars.clear()  # 假突破/假摔，清空缓冲池
-                    
+                if s.pending_close:
+                    # 破窗后价格重新回到中枢区域：取消预备闭库，边界继续延伸
+                    s.pending_close = False
+                    s.pending_close_end_dt = None
+                    s.pending_close_end_k_index = -1
+
                 # 【动态右移】：中枢跟随价格在轨道内的每一次探索而延伸
                 s.center_end_dt      = bar.dt
                 s.center_end_k_index = k_index
@@ -181,7 +175,7 @@ class CenterEngine:
             # 3. 物理防线（锁定锁）：只有当中枢彻底形成（名分且黑K通过）后，才禁止刷新 K0
             is_formed = (s.center_method_found is not None and s.center_black_k_pass)
             
-            # 4. 【内部抢占进化】：仅在名分未立或黑K未过（尚未真正成型）时，备选 K0 才具备篡位资格。
+            # 4. 【内部抢占进化】：仅在名分未立或黑K未过（尚未真正成型）时，且处于脱轨状态，备选 K0 才具备篡位资格。
             if not is_formed and not in_rails:
                 if s.latest_k0 is not None and s.latest_k0.id > s.current_k0.id:
                     new_k0 = s.latest_k0
@@ -203,9 +197,15 @@ class CenterEngine:
                         is_forward = (new_cl < old_center_line)
 
                     if is_forward:
+                        # 抢占进化时，重置预备闭库状态，重新开始
+                        s.pending_close = False
+                        s.pending_close_end_dt = None
+                        s.pending_close_end_k_index = -1
                         s.current_k0 = new_k0
                         self._enter_forming_state(current_dir, s.current_k0, bar, k_index)
                         return
+
+
 
     def rollback(self):
         """回滚所有中枢状态（线段确立后 或 State 2 自然关闭后调用）"""
@@ -215,6 +215,7 @@ class CenterEngine:
         s.center_line_k         = None
         s.center_line_k_index   = -1
         s.center_direction      = None
+        s.center_trigger_k_index = -1
         s.center_upper_rail     = 0.0
         s.center_lower_rail     = 0.0
         s.center_start_dt       = None
@@ -225,17 +226,43 @@ class CenterEngine:
         s.center_method_found   = None
         s.center_black_k_pass   = False
         s.latest_k0             = None
-        s.escape_bars.clear()
+        # 清理预备闭库状态
+        s.pending_close             = False
+        s.pending_close_end_dt      = None
+        s.pending_close_end_k_index = -1
 
     def seal_on_boundary(self):
-        """物理截断：当线段到达转折极值点时，强制结算当前观测病房。"""
+        """物理截断：当线段到达转折极值点（极值K）时，强制结算当前观测病房。
+
+        破窗闭库机制下的两种情况：
+          1. 已处于"预备闭库"状态（pending_close=True）：
+             直接用冻结的右边界（第一次破窗前的最后一根在轨K）固化，
+             这是正式固化时机——线段结束了（极值K出来了），预备变正式。
+          2. 仍在轨道内（pending_close=False）：
+             强制截断，右边界用当前 center_end_k_index（不含本根极值K），
+             因为极值K本身不应属于中枢内部。
+        """
         s = self.s
         if s.center_state == 2:
-            # 即使还没脱轨，到了分水岭也要强制审计并固化
+            if s.pending_close:
+                # 情况1：预备闭库 → 正式固化，使用冻结的右边界（破窗前最后一根在轨K）
+                s.center_end_dt = s.pending_close_end_dt
+                s.center_end_k_index = s.pending_close_end_k_index
+            else:
+                # 情况2：中枢仍在轨道内，被线段结束强制截断。
+                # 此时 update 刚处理过极值K，center_end_k_index 可能已更新为极值K。
+                # 极值K（线段转折点）本身不应属于中枢内部，需要回退到极值K的前一根。
+                boundary_k_index = len(s.bars_raw) - 1  # 刚处理完的极值K索引
+                if s.center_end_k_index >= boundary_k_index and boundary_k_index > s.center_line_k_index:
+                    # 右边界回退到极值K前一根
+                    prev_idx = boundary_k_index - 1
+                    s.center_end_k_index = prev_idx
+                    s.center_end_dt = s.bars_raw[prev_idx].dt
             self._finalize_and_mount_center()
-        
+
         # 无论是否固化成功，必须归位，新线段开启新篇章
         self.rollback()
+
 
     # =========================================================================
     # 私有方法
@@ -252,17 +279,61 @@ class CenterEngine:
         if s.candidate_tk:
             # 候选顶(G)意味着当前已确认转向向下(Down)
             direction = Direction.Down if s.candidate_tk.mark == Mark.G else Direction.Up
-            return s.candidate_tk.k_index, s.candidate_tk.trigger_k_index, direction
+            return s.candidate_tk.k_index, s.candidate_tk.turning_k_index, direction
 
         # 2. 次优先级：上一个确立的极值（turning_ks[-1]）
         if s.turning_ks:
             tk = s.turning_ks[-1]
             direction = Direction.Up if tk.mark == Mark.D else Direction.Down
             # 优先使用转折确认点索引，若无则回退到极值点索引
-            trig_idx = tk.trigger_k_index if tk.trigger_k_index is not None else tk.k_index
+            trig_idx = tk.turning_k_index if tk.turning_k_index is not None else tk.k_index
             return tk.k_index, trig_idx, direction
 
         return -1, -1, None
+
+    def _get_5k_search_start(self) -> int:
+        """5K 重叠法定左边界：转折K及其后（并受叹息之墙约束）。"""
+        s = self.s
+        start = s.center_trigger_k_index if s.center_trigger_k_index >= 0 else s.center_anchor_idx
+        start = max(0, start)
+        if s.last_center_end_idx != -1:
+            start = max(start, s.last_center_end_idx)
+        return start
+
+    def _get_sanbi_search_start(self) -> int:
+        """三笔法定左边界：转折K之前的顶/底K（并受叹息之墙约束）。"""
+        s = self.s
+        start = max(0, s.center_anchor_idx)
+        if s.last_center_end_idx != -1:
+            start = max(start, s.last_center_end_idx)
+        return start
+
+    def _set_center_start_idx(self, start_idx: int):
+        """仅同步时间左边界，不改价格轨道。"""
+        s = self.s
+        if start_idx < 0 or start_idx >= len(s.bars_raw):
+            return
+        s.center_start_k_index = start_idx
+        s.center_start_dt = s.bars_raw[start_idx].dt
+
+    def _resolve_method_start_idx(self) -> int:
+        """按起手三式返回中枢时间左边界（方法级）。"""
+        s = self.s
+
+        if s.center_method_found == "5K重叠":
+            search_start = self._get_5k_search_start()
+            ok, rel_idx = self._check_5k_overlap_with_idx()
+            if ok and rel_idx != -1:
+                return search_start + rel_idx
+            return max(search_start, s.center_start_k_index)
+
+        if s.center_method_found == "反正两穿":
+            return max(self._get_5k_search_start(), s.center_line_k_index)
+
+        if s.center_method_found == "三笔":
+            return self._get_sanbi_search_start()
+
+        return s.center_start_k_index
 
     def _enter_forming_state(self, direction: Direction, k0: RawBar,
                               confirm_k: RawBar, cf_index: int):
@@ -387,24 +458,11 @@ class CenterEngine:
         if s.center_method_found is None or not s.center_black_k_pass:
             return  # 最终也没成型，放弃
 
-        # ====== 【核心修复】：左边界对合（基于 5K 真实起点回溯） ======
-        final_start_dt = s.center_start_dt
-        final_start_idx = s.center_start_k_index
-        
-        if s.center_method_found == "5K重叠":
-            ok, f5k_relative_idx = self._check_5k_overlap_with_idx()
-            if ok and f5k_relative_idx != -1:
-                # 重新计算相对于 bars_raw 的全局索引
-                # 【核心修复】：必须使用与探测器一致的全局物理锚点
-                search_start_global = max(0, s.center_anchor_idx)
-                if s.last_center_end_idx != -1:
-                    search_start_global = max(search_start_global, s.last_center_end_idx)
-                
-                absolute_f5k_idx = search_start_global + f5k_relative_idx
-                # 【对合逻辑】：取更早的那个点作为逻辑起点（5K 只能帮助起始点前移，绝不允许后移）
-                if absolute_f5k_idx < final_start_idx:
-                    final_start_idx = absolute_f5k_idx
-                    final_start_dt = s.bars_raw[final_start_idx].dt
+        # ====== 方法级时间左边界确权（只改时间，不改轨道价格） ======
+        final_start_idx = self._resolve_method_start_idx()
+        if final_start_idx < 0 or final_start_idx >= len(s.bars_raw):
+            final_start_idx = s.center_start_k_index
+        final_start_dt = s.bars_raw[final_start_idx].dt if final_start_idx >= 0 else s.center_start_dt
 
         # ====== 中枢定性（肉眼 vs 非肉眼） ======
         window_bars = s.bars_raw[s.center_line_k_index : s.center_end_k_index + 1]
@@ -464,14 +522,16 @@ class CenterEngine:
                         last_c.end_dt = center.end_dt
                         last_c.upper_rail = max(last_c.upper_rail, center.upper_rail)
                         last_c.lower_rail = min(last_c.lower_rail, center.lower_rail)
-                        s.last_center_end_idx = s.center_end_k_index
+                        # 叹息之墙 = 破窗K（center_end 是最后在轨K，+1 即破窗K）
+                        s.last_center_end_idx = s.center_end_k_index + 1
                         return
                         
                     else:
                         # 【法则：吞并延伸 (其余情况)】
                         # 无论是“肉吞灵”还是“灵吞灵”，老中枢保持主权，仅吸收时间
                         last_c.end_dt = center.end_dt
-                        s.last_center_end_idx = s.center_end_k_index
+                        # 叹息之墙 = 破窗K
+                        s.last_center_end_idx = s.center_end_k_index + 1
                         return
                 else:
                     # 【完全分离】：绝对独立的主权领地，直接挂载
@@ -480,19 +540,12 @@ class CenterEngine:
         # 挂载当下正式形成的新中枢
         s.potential_centers.append(center)
         # 无论挂载还是吞并，最后的水位线必须同步，作为下一次 K0 搜索的绝对左边界
-        s.last_center_end_idx = s.center_end_k_index
+        # 叹息之墙 = 破窗K（center_end_k_index 是最后一根在轨K，+1 即为破窗K）
+        s.last_center_end_idx = s.center_end_k_index + 1
 
     def _check_center_formation(self):
         """中枢合法性最终校验。名分(Style)与黑K质检解耦判定，直接更新 state 变量。"""
         s = self.s
-        
-        # 【核心修复：物理极值防火墙】
-        # 绝对不允许跨越当前线段的物理发源地去探测名分
-        search_start = max(0, s.center_anchor_idx)
-        
-        # 同步防穿透书签
-        if s.last_center_end_idx != -1:
-            search_start = max(search_start, s.last_center_end_idx)
 
         # 1. 探测名分（如果还没有）
         if s.center_method_found is None:
@@ -505,10 +558,15 @@ class CenterEngine:
                 elif self._check_san_bi():
                     s.center_method_found = "三笔"
 
+        # 名分一旦确立，立刻按方法同步“时间左边界”。
+        if s.center_method_found is not None:
+            self._set_center_start_idx(self._resolve_method_start_idx())
+
         # 2. 探测黑K（如果有了名分但黑K还没过）
         if s.center_method_found is not None and not s.center_black_k_pass:
             if s.center_method_found == "5K重叠":
                 # 5K 视界范围宽：摸到确认K即可
+                search_start = self._get_5k_search_start()
                 window_bars = s.bars_raw[search_start : s.center_end_k_index + 1]
                 if self._check_black_k(s.center_direction, 0, window_bars):
                     s.center_black_k_pass = True
@@ -675,13 +733,7 @@ class CenterEngine:
     def _check_5k_overlap_with_idx(self) -> tuple:
         """中枢确立式二：5K 模式校验（返回是否成立及起始 Ka 索引）"""
         s = self.s
-        # 【核心修复：物理极值防火墙】
-        # 视界必须受限于当前线段锚点，严禁跨线段拼凑
-        search_start = max(0, s.center_anchor_idx)
-        
-        # 同步防穿透书签
-        if s.last_center_end_idx != -1:
-            search_start = max(search_start, s.last_center_end_idx)
+        search_start = self._get_5k_search_start()
         
         # 确认K在截取窗口中的索引
         confirm_idx = s.center_line_k_index - search_start
@@ -788,13 +840,7 @@ class CenterEngine:
         if s.center_line_k_index < 0 or s.center_end_k_index < 0:
             return False
 
-        # 【核心修复：物理极值防火墙】
-        # 视界必须受限于当前线段锚点，严禁跨线段拼凑
-        search_start = max(0, s.center_anchor_idx)
-        
-        # 同步防穿透书签
-        if s.last_center_end_idx != -1:
-            search_start = max(search_start, s.last_center_end_idx)
+        search_start = self._get_sanbi_search_start()
 
         window_bars = s.bars_raw[search_start : s.center_end_k_index + 1]
         confirm_k_idx = s.center_line_k_index - search_start

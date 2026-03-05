@@ -42,6 +42,28 @@ class MacroAuditEngine:
         if idx is None or fake_idx is None:
             return False
 
+        pre_start_idx = idx - 2
+        pre_end_idx = idx + 1
+        if pre_start_idx >= 0 and pre_end_idx <= n:
+            tk_start = tks[pre_start_idx]
+            mid_same = tks[idx - 1]
+            tk_target = tks[idx]
+            tk_end = tks[pre_end_idx]
+
+            if pre_end_idx > pre_start_idx + 1 and tk_start.mark != tk_end.mark:
+                print(
+                    f"  [Audit] Testing Pre-Round: "
+                    f"{tk_start.dt}({tk_start.mark.name}) -> "
+                    f"{tk_end.dt}({tk_end.mark.name}) swallow "
+                    f"{mid_same.dt}/{tk_target.dt}"
+                )
+
+                if self._check_leap_growth_only(tk_start, tk_end, mid_same, tk_target):
+                    print(f"  [Audit] SUCCESS! Pre-Round Leaping from {tk_start.dt} to {tk_end.dt}")
+                    tks[fake_idx].maybe_is_fake = False
+                    self._execute_leap_collapse(pre_start_idx, pre_end_idx)
+                    return True
+
         for round_no in range(1, s.audit_link_rounds + 1):
             start_idx = idx - round_no
             if start_idx < 0:
@@ -133,6 +155,36 @@ class MacroAuditEngine:
         if ma5_is_better:
             return growth_ok and ma5_gravity_ok
         return growth_ok
+
+    def _check_leap_growth_only(
+        self,
+        tk_start: TurningK,
+        tk_end: TurningK,
+        tk_mid_same: TurningK,
+        tk_pullback: TurningK,
+    ) -> bool:
+        """仅执行法则一（生长法则）的物理边际审判。"""
+        s = self.state
+
+        seg_start = tk_start.k_index
+        old_trigger_idx = get_trigger_index(tk_pullback)
+        new_trigger_idx = get_trigger_index(tk_end)
+        scopes = build_scope_windows(s.bars_raw, seg_start, old_trigger_idx, new_trigger_idx)
+        if scopes is None:
+            return False
+        refresh = evaluate_scope_refresh(tk_end.mark, scopes.old_scope, scopes.new_scope)
+
+        tk_end_top = max(tk_end.raw_bar.open, tk_end.raw_bar.close)
+        tk_end_bottom = min(tk_end.raw_bar.open, tk_end.raw_bar.close)
+        tk_mid_top = max(tk_mid_same.raw_bar.open, tk_mid_same.raw_bar.close)
+        tk_mid_bottom = min(tk_mid_same.raw_bar.open, tk_mid_same.raw_bar.close)
+
+        if tk_end.mark == Mark.G:
+            growth_body_ok = tk_end_top > tk_mid_bottom
+        else:
+            growth_body_ok = tk_end_bottom < tk_mid_top
+
+        return refresh.price_refreshed and growth_body_ok
 
     def _execute_leap_collapse(self, anchor_idx: int, new_end_idx: int):
         """执行塌陷：重连主干、落盘幽灵、触发中枢/趋势同步。"""

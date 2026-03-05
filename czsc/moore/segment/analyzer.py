@@ -97,11 +97,20 @@ class SegmentState:
     special_waiting_mark: Optional[Mark] = None
     special_ext_idx_cache: Optional[int] = None
     micro_id_seed: int                  = 0
+    # 异向候选 MA5 刷新基线（运行态，失败候选同样推进）
+    reversal_ma5_gate_mark: Optional[Mark] = None
+    reversal_ma5_gate_start_k_index: int = -1
+    reversal_ma5_gate_extreme: Optional[float] = None
+    # 异向候选价格刷新基线（运行态，失败候选同样推进）
+    reversal_price_gate_mark: Optional[Mark] = None
+    reversal_price_gate_start_k_index: int = -1
+    reversal_price_gate_extreme: Optional[float] = None
 
     # -------------------------------------------------------------------------
     # 中枢引擎游标
     # -------------------------------------------------------------------------
     center_anchor_idx: int            = -1     # 记录当前中枢发源的宏观锚点索引
+    center_trigger_k_index: int       = -1     # 记录当前观测中枢对应的转折K索引（时间左边界裁决用）
     center_state: int                 = 0
     current_k0: Optional[RawBar]      = None
     latest_k0: Optional[RawBar]       = None   # 追踪最近的合规 K0，用于在旧中枢夭折时原地重建
@@ -121,7 +130,12 @@ class SegmentState:
     center_black_k_pass: bool               = False  # 记录黑K质检是否通过
     # is_visible 定性严格规定需在正向一笔完整形成后才可判断，不在 State 2 期间提前定性
     last_center_end_idx: int                = -1     # 记录上一个固化中枢的破窗 K 线索引
-    escape_bars: list                       = field(default_factory=list)  # 脱轨缓冲区
+
+    # 【破窗闭库机制】：破窗后进入"预备闭库"状态，等待线段结束才正式固化。
+    # 若破窗后有K线回到中枢区域，则清空预备状态，边界延伸，等下次再破窗。
+    pending_close: bool                     = False  # 是否处于"预备闭库"状态（已破窗，等待线段结束）
+    pending_close_end_dt: Optional[datetime] = None  # 预备闭库时冻结的中枢右边界时间（第一根脱轨K之前一根）
+    pending_close_end_k_index: int          = -1     # 预备闭库时冻结的中枢右边界索引
 
     # -------------------------------------------------------------------------
     # 趋势穿透层状态
@@ -247,8 +261,8 @@ class SegmentAnalyzer:
             tk_replay_start = s.turning_ks[-2]
             real_start_idx  = tk_replay_start.k_index
             real_trig_idx   = (
-                tk_replay_start.trigger_k_index
-                if tk_replay_start.trigger_k_index is not None
+                tk_replay_start.turning_k_index
+                if tk_replay_start.turning_k_index is not None
                 else tk_replay_start.k_index
             )
             correct_direction = Direction.Up if s.turning_ks[-1].mark == Mark.G else Direction.Down
@@ -435,7 +449,8 @@ class SegmentAnalyzer:
         combined_centers = s.all_centers + s.potential_centers
         for center in reversed(combined_centers):
             if center.start_k_index < start_ext_idx and not getattr(center, 'is_ghost', False):
-                last_valid_end_idx = center.end_k_index
+                # 叹息之墙 = 破窗K（end_k_index 是最后一根在轨K，+1 即为破窗K）
+                last_valid_end_idx = center.end_k_index + 1
                 break
         s.last_center_end_idx = last_valid_end_idx
 
