@@ -76,6 +76,7 @@ def plot_moore_structure_echarts(
     engine: MooreCZSC,
     output_file: str = "moore_czsc_echarts.html",
     title: str = "摩尔缠论结构图 (ECharts)",
+    desc_text: str = "",
 ):
     # ── 1. 基础数据 ───────────────────────────────────────────────────
     dates, ohlcv = [], []
@@ -95,31 +96,93 @@ def plot_moore_structure_echarts(
     for mseg in macro_segments:
         swallowed_micro_ids.update(mseg.cache.get("swallow_internal_micro_ids", []))
 
-    micro_segments = getattr(engine, "micro_segments", [])
-    segment_centers = [ct for seg in engine.segments for ct in seg.centers]
+    micro_segments = getattr(engine, "micro_segments", engine.segments)
+    
+    micro_centers = getattr(engine, "micro_centers", [])
+    macro_centers = getattr(engine, "macro_centers", getattr(engine, "all_centers", []))
+    ghost_centers = getattr(engine, "ghost_centers", [])
+
+    # ── 诊断：实线但无中枢的微观线段 ─────────────────────────────────
+    for i, seg in enumerate(micro_segments):
+        if not seg.is_perfect:
+            continue
+        si, ei = seg.start_k.k_index, seg.end_k.k_index
+        seg_micro = [c for c in micro_centers if c.start_k_index <= ei and c.end_k_index >= si]
+        if not seg_micro:
+            logger.warning(
+                f"[诊断] 微观线段 {i} (v{i}-v{i+1}) 是实线但无微观中枢: "
+                f"{_dt_str(seg.start_k.dt)}→{_dt_str(seg.end_k.dt)} "
+                f"dir={seg.direction.value} k_idx=[{si},{ei}]"
+            )
+
+    # --- 【增压逻辑】：中枢层级过滤 ---
+    # 1. 微观过滤：排除已被宏观审计拆解（进入幽灵仓）的微观中枢
+    ghost_ids = {getattr(c, 'center_id', None) for c in ghost_centers if getattr(c, 'center_id', None) is not None}
+    micro_centers = [c for c in micro_centers if getattr(c, 'center_id', None) not in ghost_ids]
+
+    # 2. 宏观过滤：只有当宏观中枢的 ID 未出现在微观事实仓中时，才认为它是“纯宏观重播”产物
+    micro_ids = {getattr(c, 'center_id', None) for c in micro_centers if getattr(c, 'center_id', None) is not None}
+    macro_centers = [c for c in macro_centers if getattr(c, 'center_id', None) not in micro_ids]
+
+    # 按三仓独立展示：微观仓、宏观仓、幽灵仓
     display_tks = getattr(engine, "micro_turning_ks", engine.turning_ks)
-    display_centers = getattr(engine, "all_centers", [])
+    ghost_forks = getattr(engine, "ghost_forks", [])
+    refreshed_segments = getattr(engine, "refreshed_segments", [])
+    
+    display_tks = getattr(engine, "micro_turning_ks", engine.turning_ks)
     ghost_forks = getattr(engine, "ghost_forks", [])
     refreshed_segments = getattr(engine, "refreshed_segments", [])
 
-    # ── 3. K0 + 确认K markPoint（顶底改用 Scatter，见下方 overlay_series）────
-    confirm_ks = [ct.confirm_k  for ct in segment_centers if ct.confirm_k]
-    anchor_k0s = [ct.anchor_k0  for ct in segment_centers if ct.anchor_k0]
+    # ── 3. K0 + 确认K markPoint（分层提取）────
+    # 不再预提取，直接在循环中根据 center 属性判断
+    tk_points_macro = []
+    for ct in macro_centers:
+        if ct.confirm_k:
+            is_up = ct.direction == Direction.Up
+            tk_points_macro.append({
+                "name": "Macro CK",
+                "coord": [_dt_str(ct.confirm_k.dt), ct.confirm_k.close],
+                # 使用与转折K一致的瘦长箭头路径
+                "symbol": "path://M46 0 L46 75 L20 49 L12 57 L50 95 L88 57 L80 49 L54 75 L54 0 Z",
+                "symbolSize": [14, 40], # 线条更细，整体更长
+                "symbolRotate": 180 if is_up else 0,
+                "symbolOffset": [0, "100%"] if is_up else [0, "-100%"], # 偏移更多一点
+                "itemStyle": {"color": "#FFD600"}
+            })
+        if ct.anchor_k0:
+            k0 = ct.anchor_k0
+            tk_points_macro.append({
+                "name": "Macro K0",
+                "coord": [_dt_str(k0.dt), k0.low if k0.close > k0.open else k0.high],
+                "symbol": "rect",
+                "symbolSize": 5,
+                "itemStyle": {"color": "#FFD600"}
+            })
+            
+    tk_points_micro = []
+    for ct in micro_centers:
+        if ct.confirm_k:
+            is_up = ct.direction == Direction.Up
+            tk_points_micro.append({
+                "name": "Micro CK",
+                "coord": [_dt_str(ct.confirm_k.dt), ct.confirm_k.close],
+                "symbol": "path://M46 0 L46 75 L20 49 L12 57 L50 95 L88 57 L80 49 L54 75 L54 0 Z",
+                "symbolSize": [14, 35],
+                "symbolRotate": 180 if is_up else 0,
+                "symbolOffset": [0, "85%"] if is_up else [0, "-85%"],
+                "itemStyle": {"color": "#CE93D8"}
+            })
+        if ct.anchor_k0:
+            k0 = ct.anchor_k0
+            tk_points_micro.append({
+                "name": "Micro K0",
+                "coord": [_dt_str(k0.dt), k0.low if k0.close > k0.open else k0.high],
+                "symbol": "rect",
+                "symbolSize": 6,
+                "itemStyle": {"color": "#BA68C8"}
+            })
 
-    # 只把 K0 / 确认K 放入 markPoint（无须文字标签）
-    tk_points = []
-    for ck in confirm_ks:
-        tk_points.append(opts.MarkPointItem(
-            name="CK", coord=[_dt_str(ck.dt), ck.close],
-            symbol="diamond", symbol_size=9,
-            itemstyle_opts=opts.ItemStyleOpts(color="#CE93D8"),
-        ))
-    for k0 in anchor_k0s:
-        tk_points.append(opts.MarkPointItem(
-            name="K0", coord=[_dt_str(k0.dt), k0.close],
-            symbol="rect", symbol_size=[8, 8],
-            itemstyle_opts=opts.ItemStyleOpts(color="#A1887F"),
-        ))
+    # 顶底极值 → 两个 Scatter 系列，分别控制 label 位置
 
     # 顶底极值 → 两个 Scatter 系列，分别控制 label 位置
     top_tks = [(i, tk) for i, tk in enumerate(display_tks) if tk.mark == Mark.G]
@@ -176,11 +239,11 @@ def plot_moore_structure_echarts(
                 y_val = tk.turning_k.low if is_up else tk.turning_k.high
                 mp_data.append({
                     "coord": [dt_str, y_val],
-                    "symbol": "path://M46 0 L46 75 L20 49 L12 57 L50 95 L88 57 L80 49 L54 75 L54 0 Z",
+                    "symbol": "path://M46 0 L46 75 L15 48 L10 56 L50 95 L90 56 L85 48 L54 75 L54 0 Z",
                     "symbolSize": [14, 35],
                     "symbolRotate": 180 if is_up else 0,
                     "symbolOffset": [0, "85%"] if is_up else [0, "-85%"],
-                    "itemStyle": {"color": "#D32F2F" if is_up else "#2E7D32"}
+                    "itemStyle": {"color": "#000000"} # 统一黑色
                 })
                 has_data = True
                 
@@ -188,7 +251,7 @@ def plot_moore_structure_echarts(
             return None
 
         return (
-            _dummy_line(dates, name, "#D32F2F" if is_up else "#2E7D32")
+            _dummy_line(dates, name, "#000000")
             .set_series_opts(markpoint_opts=opts.MarkPointOpts(
                 data=mp_data,
                 label_opts=opts.LabelOpts(is_show=False),
@@ -232,60 +295,37 @@ def plot_moore_structure_echarts(
         ])
 
     # ── 5. 中枢 markArea 数据分类 ─────────────────────────────────────
-    logger.info(f"中枢总数（含幽灵）: {len(display_centers)}")
+    logger.info(f"三仓中枢统计 -> Macro: {len(macro_centers)}, Micro: {len(micro_centers)}, Ghost: {len(ghost_centers)}")
 
-    center_vis_data, center_hid_data, center_ghost_data = [], [], []
-    for c_idx, ct in enumerate(display_centers):
-        if not ct.start_dt or not ct.end_dt:
-            continue
-        is_ghost  = getattr(ct, "is_ghost", False)
-        y_lo = ct.lower_rail
-        y_hi = ct.upper_rail
-        method = getattr(ct, "method", "?")
-        y_mid = getattr(ct, "center_line", (y_lo + y_hi) / 2)
+    def _prepare_area_data(clist, layer_name):
+        data = []
+        for ct in clist:
+            if not ct.start_dt or not ct.end_dt: continue
+            y_lo, y_hi = ct.lower_rail, ct.upper_rail
+            cid = getattr(ct, "center_id", "?")
+            
+            if layer_name == "macro":
+                fill, border = "rgba(41,128,185,0.15)", "#2980B9" # 蓝色：宏观
+            elif layer_name == "micro":
+                fill, border = "rgba(142,68,173,0.12)", "#8E44AD" # 紫色：微观
+            else:
+                fill, border = "rgba(149,165,166,0.15)", "#7F8C8D" # 灰色：幽灵
 
-        if is_ghost:
-            fill = "rgba(160,160,160,0.12)"
-            border = "#999999"
-            c_type = "幽灵"
-            target = center_ghost_data
-        elif ct.is_visible:
-            fill = "rgba(233,30,99,0.10)"
-            border = "#E91E63"
-            c_type = "肉眼"
-            target = center_vis_data
-        else:
-            fill = "rgba(46,204,113,0.10)"
-            border = "#2ECC71"
-            c_type = "隐性"
-            target = center_hid_data
-
-        # markArea 标注放在框上方（position="top"），清晰不遮挡 K 线
-        c_type_str = "幽灵" if is_ghost else ("肉眼" if ct.is_visible else "隐性")
-        label_txt = f"#{c_idx} {c_type_str}-{method} [{y_lo:.2f},{y_hi:.2f}]"
-
-        target.append([
-            {
-                "xAxis": _dt_str(ct.start_dt), "yAxis": y_lo,
-                "label": {
-                    "show": True,
-                    "position": "top",
-                    "formatter": label_txt,
-                    "fontSize": 8,
-                    "color": border,
-                    "fontWeight": "bold",
+            label_txt = f"ID:{cid} {layer_name}-{getattr(ct, 'method', '?')}"
+            data.append([
+                {
+                    "xAxis": _dt_str(ct.start_dt), "yAxis": y_lo,
+                    "label": {"show": True, "position": "top", "formatter": label_txt, "fontSize": 9, "color": border, "opacity": 0.8},
+                    "itemStyle": {"color": fill, "borderWidth": 1.5, "borderColor": border, "opacity": 0.6,
+                                  "borderType": "dashed" if layer_name == "ghost" else "solid"}
                 },
-                "itemStyle": {
-                    "color": fill,
-                    "borderColor": border,
-                    "borderWidth": 1.5,
-                    "borderType": "dashed" if is_ghost else "solid",
-                },
-            },
-            {"xAxis": _dt_str(ct.end_dt), "yAxis": y_hi},
-        ])
+                {"xAxis": _dt_str(ct.end_dt), "yAxis": y_hi}
+            ])
+        return data
 
-
+    macro_area_data = _prepare_area_data(macro_centers, "macro")
+    micro_area_data = _prepare_area_data(micro_centers, "micro")
+    ghost_area_data = _prepare_area_data(ghost_centers, "ghost")
     # ── 6. 构建各图例系列 ─────────────────────────────────────────────
     def _seg_series(name, seg_list, color, width, alpha=0.85):
         data = _seg_markline_data(seg_list, color, width, alpha)
@@ -340,7 +380,7 @@ def plot_moore_structure_echarts(
     overlay_series.append(line_ma)
 
     # 微观线段（全部合并，统一灰色）
-    s = _seg_series("微观线段", micro_all, "#555555", 1.5, alpha=0.75)
+    s = _seg_series("微观线段", micro_all, "#555555", 2.5, alpha=0.75)
     if s:
         overlay_series.append(s)
 
@@ -370,15 +410,14 @@ def plot_moore_structure_echarts(
     if s:
         overlay_series.append(s)
 
-    # 中枢
+    # 中枢绘制
     for name, data, color in [
-        ("常规肉眼中枢", center_vis_data,   "#E91E63"),
-        ("常规隐性中枢", center_hid_data,   "#2ECC71"),
-        ("幽灵中枢",     center_ghost_data, "#999999"),
+        ("宏观中枢", macro_area_data, "#2980B9"),
+        ("微观中枢", micro_area_data, "#8E44AD"),
+        ("幽灵中枢", ghost_area_data, "#7F8C8D"),
     ]:
         s = _center_series(name, data, color)
-        if s:
-            overlay_series.append(s)
+        if s: overlay_series.append(s)
 
     # 顶底极值 Scatter（顶标签在上，底标签在下）
     sc_top = _tk_scatter("微观顶极值", top_tks, "top")
@@ -406,10 +445,14 @@ def plot_moore_structure_echarts(
                 color="#D32F2F", color0="#2E7D32",
                 border_color="#D32F2F", border_color0="#2E7D32",
             ),
+            markpoint_opts=opts.MarkPointOpts(
+                data=tk_points_macro + tk_points_micro,
+                label_opts=opts.LabelOpts(is_show=False)
+            )
         )
         .set_global_opts(
             title_opts=opts.TitleOpts(
-                title=title,
+                title=title + "\n" + desc_text,
                 title_textstyle_opts=opts.TextStyleOpts(font_size=14, color="#222"),
             ),
             tooltip_opts=opts.TooltipOpts(
@@ -510,6 +553,10 @@ def plot_moore_structure_echarts(
                 pos_top="5%", pos_right="2%",
                 orient="vertical",
                 textstyle_opts=opts.TextStyleOpts(font_size=11),
+                selected_map={
+                    "幽灵中枢": False,
+                    "幽灵枝丫": False,
+                }
             ),
             yaxis_opts=opts.AxisOpts(
                 is_scale=True,
@@ -529,7 +576,7 @@ def plot_moore_structure_echarts(
         )
         .set_series_opts(
             markpoint_opts=opts.MarkPointOpts(
-                data=tk_points,
+                data=tk_points_macro + tk_points_micro,
                 label_opts=opts.LabelOpts(is_show=False),  # K0/CK 不显示文字标签
             ),
         )
@@ -615,14 +662,15 @@ class AnalyzeTask:
 
 if __name__ == "__main__":
     tasks = [
-        AnalyzeTask("300371", sdt="20181220", edt="20201030", desc="汇中股份"),
+        AnalyzeTask("300371", sdt="20181220",edt="20201030", desc="汇中股份"),
         AnalyzeTask("002346", sdt="20180901", edt="20200908", desc="柘中股份"),
         AnalyzeTask("sz002286", sdt="20210101", edt="20210701", desc="保利发展"),
         AnalyzeTask("300137", sdt="20190415", edt="20201130", desc="先河环保"),
+        AnalyzeTask("000993", sdt="20190515", edt="20200920", desc="闽东电力"),
     ]
 
     # 🎯 切换这里
-    task = tasks[0]
+    task = tasks[4]
 
     try:
         symbol = task.symbol
@@ -654,6 +702,7 @@ if __name__ == "__main__":
             bars, engine,
             output_file=output_file,
             title=f"摩尔缠论 {symbol} ({task.desc})",
+            desc_text="金色: 宏观 | 紫色: 微观 | 箭头: 中枢线确认K (CK) | 圆圈: 起始锚点 (K0)"
         )
 
     except Exception as e:

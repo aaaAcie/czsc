@@ -76,10 +76,17 @@ class MooreCenter:
     start_dt: Optional[datetime] = None   # 中枢确立的起始时间
     end_dt: Optional[datetime] = None     # 中枢确立的终点时间
 
+    # 增强属性
+    center_id: int = -1                   # 唯一自增 ID
+    confirm_k_index: int = -1             # 确认 K 线的索引，用于时序锁定
+    source_layer: str = ""                # "micro" | "macro" | "ghost"
+    owner_seg_key: Optional[tuple] = None # (start_micro_id, end_micro_id) 所属线段的微观 ID 键对
+    origin_center_id: Optional[int] = None # 追踪来源（宏观复用或幽灵迁移自哪号中枢）
+
     start_k_index: int = -1               # 中枢起始 K 线索引
     end_k_index: int = -1                 # 中枢结束 K 线索引
     
-    is_ghost: bool = False                # 标记该中枢是否为洗盘期遗留的“逆势幽灵中枢”
+    is_ghost: bool = False                # 标记该中枢是否为洗盘期遗留的“幽灵中枢”
 
     cache: dict = field(default_factory=dict)
 

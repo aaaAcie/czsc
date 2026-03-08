@@ -33,6 +33,7 @@ class MooreCZSC:
         use_left_3k_locator: bool = True,
         ma34_cross_as_valid_gate: bool = True,
         audit_link_rounds: int = 5,
+        enable_macro_audit: bool = True,
     ):
         # --- 30分钟线段级 ---
         self.segment_analyzer = SegmentAnalyzer(
@@ -41,6 +42,7 @@ class MooreCZSC:
             use_left_3k_locator=use_left_3k_locator,
             ma34_cross_as_valid_gate=ma34_cross_as_valid_gate,
             audit_link_rounds=audit_link_rounds,
+            enable_macro_audit=enable_macro_audit,
         )
 
         # --- 高级别（未来）---
@@ -78,6 +80,18 @@ class MooreCZSC:
     @property
     def potential_centers(self) -> List[MooreCenter]:
         return self.segment_analyzer.potential_centers
+
+    @property
+    def micro_centers(self) -> List[MooreCenter]:
+        return self.segment_analyzer.micro_centers
+
+    @property
+    def macro_centers(self) -> List[MooreCenter]:
+        return self.segment_analyzer.macro_centers
+
+    @property
+    def ghost_centers(self) -> List[MooreCenter]:
+        return self.segment_analyzer.ghost_centers
 
     @property
     def ghost_forks(self) -> List[tuple]:

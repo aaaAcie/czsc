@@ -790,7 +790,10 @@ class MicroStructureEngine:
             
             # --- 挂载中枢逻辑（用于图表显示 K0 和 确认K） ---
             seg.centers = []
-            for c in all_avail_centers:
+            # 仅挂载事实仓（micro_centers）中的非幽灵中枢
+            for c in s.micro_centers:
+                if getattr(c, 'is_ghost', False):
+                    continue
                 c_confirm_dt = c.confirm_k.dt if c.confirm_k else c.start_dt
                 if not c_confirm_dt: continue
                 # 判定中枢落在本线段序列内

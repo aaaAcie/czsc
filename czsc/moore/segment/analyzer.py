@@ -77,7 +77,13 @@ class SegmentState:
     # 宏观世界（吞噬/审计后的顶底与线段，默认对外展示）
     macro_turning_ks: List[TurningK]  = field(default_factory=list)
     macro_segments: List[MooreSegment] = field(default_factory=list)
-    all_centers: List[MooreCenter]    = field(default_factory=list)
+
+    # 【三仓中枢架构】
+    micro_centers: List[MooreCenter]  = field(default_factory=list) # 微观事实仓（同步前重播产出）
+    macro_centers: List[MooreCenter]  = field(default_factory=list) # 宏观结果仓（仅审计命中后更新）
+    ghost_centers: List[MooreCenter]  = field(default_factory=list) # 幽灵仓（覆盖区迁出的中枢）
+
+    all_centers: List[MooreCenter]    = field(default_factory=list) # 兼容接口：映射到 macro_centers
     refreshed_segments: list          = field(default_factory=list)
     ghost_forks: List[tuple]          = field(default_factory=list)   # 微观幽灵（兼容）
     macro_ghost_forks: List[tuple]    = field(default_factory=list)
@@ -91,12 +97,14 @@ class SegmentState:
     last_ma5: Optional[float]         = None
     candidate_tk: Optional[TurningK]  = None
     potential_centers: List[MooreCenter] = field(default_factory=list)
+    cache: dict = field(default_factory=dict)
 
     # 特殊法则状态机（转折K无效则后移一根）
     waiting_special_rule: bool          = False
     special_waiting_mark: Optional[Mark] = None
     special_ext_idx_cache: Optional[int] = None
     micro_id_seed: int                  = 0
+    center_id_seed: int                 = 0
     # 异向候选 MA5 刷新基线（运行态，失败候选同样推进）
     reversal_ma5_gate_mark: Optional[Mark] = None
     reversal_ma5_gate_start_k_index: int = -1
@@ -128,7 +136,9 @@ class SegmentState:
     center_is_double_gap: bool              = False  # confirm_k 与 k0 是否双跳空（式一自动成立）
     center_method_found: Optional[str]      = None   # 记录该中枢第一个被触发的确立名分（起手三式）
     center_black_k_pass: bool               = False  # 记录黑K质检是否通过
-    # is_visible 定性严格规定需在正向一笔完整形成后才可判断，不在 State 2 期间提前定性
+    # is_visible 定性严格规定需在正向一笔完整形成后才可判断，State 2 期间实时更新此状态
+    center_is_visible: bool                 = False  # 当前观测病房中枢是否探测到了“肉眼可见”基因
+    center_price_confirmed: bool            = False  # 中枢结界轨道是否已最终确定
     last_center_end_idx: int                = -1     # 记录上一个固化中枢的破窗 K 线索引
 
     # 【破窗闭库机制】：破窗后进入"预备闭库"状态，等待线段结束才正式固化。
@@ -136,6 +146,10 @@ class SegmentState:
     pending_close: bool                     = False  # 是否处于"预备闭库"状态（已破窗，等待线段结束）
     pending_close_end_dt: Optional[datetime] = None  # 预备闭库时冻结的中枢右边界时间（第一根脱轨K之前一根）
     pending_close_end_k_index: int          = -1     # 预备闭库时冻结的中枢右边界索引
+    # 【沙盒机制】：新肉眼中枢与旧隐位中枢的博弈。
+    # 当新皇候选面临旧隐位重叠时，开启沙盒试算。
+    sandbox_active: bool                    = False  # 是否处于沙盒回溯状态
+    pending_overwrite_center: Optional[MooreCenter] = None # 被挂起受威胁的旧隐位中枢
 
     # -------------------------------------------------------------------------
     # 趋势穿透层状态
@@ -174,6 +188,7 @@ class SegmentAnalyzer:
         use_left_3k_locator: bool = True,
         ma34_cross_as_valid_gate: bool = True,
         audit_link_rounds: int = 5,
+        enable_macro_audit: bool = True,
     ):
         # 1. 准备共享状态容器（初始物理空间为空）
         s = SegmentState(
@@ -182,6 +197,7 @@ class SegmentAnalyzer:
             use_left_3k_locator=use_left_3k_locator,
             ma34_cross_as_valid_gate=ma34_cross_as_valid_gate,
             audit_link_rounds=audit_link_rounds,
+            enable_macro_audit=enable_macro_audit,
         )
         self.state = s
 
@@ -238,40 +254,38 @@ class SegmentAnalyzer:
         new_tk_len     = len(s.turning_ks)
         new_last_tk_dt = s.turning_ks[-1].dt if s.turning_ks else None
 
-        # --- 4. 宏观世界同步 + 宏观审计 ---
+        # --- 4. 同步前：分层重播阶段 ---
         # 变化分类：
-        #   is_new_tk    = 新的反向 TurningK 被确立（turning_ks 数量真正增加）
-        #                  → N+1 段的终点（点4）已固化，这是审判的"黄金时机"
-        #   is_refreshed = 仅发生了同向刷新（数量不变但末端 dt 变了）
-        #                  → N+1 段终点未固化，审判依据不足，按兵不动
         is_new_tk    = new_tk_len > old_tk_len
         is_refreshed = (not is_new_tk) and (old_tk_len > 0 and old_last_tk_dt != new_last_tk_dt)
         is_changed   = is_new_tk or is_refreshed
 
-        # 先将“已提交的微观快照”增量同步到宏观世界，再决定是否发起宏观审计
-        macro_changed = self._sync_macro_world_from_micro()
-        if s.enable_macro_audit and macro_changed and len(s.macro_turning_ks) > 4:
-            macro_changed = self._macro_engine.audit_and_replay(k_index) or macro_changed
-
-        # --- 5. 微观中枢重播（仅由微观结构变化触发）---
+        # 4.1 微观层重播 (Stage 1)
         if is_changed and len(s.turning_ks) >= 2:
-            # turning_ks[-2] 是当前最新完整线段的起点锚。
-            # 若发生跃迁，_execute_leap_collapse 已重建 turning_ks，
-            # 此时 turning_ks[-2] 正是跃迁锚点（n1/n0/nm1），k_index 即其物理 bar 位置。
             tk_replay_start = s.turning_ks[-2]
             real_start_idx  = tk_replay_start.k_index
-            real_trig_idx   = (
-                tk_replay_start.turning_k_index
-                if tk_replay_start.turning_k_index is not None
-                else tk_replay_start.k_index
-            )
+            real_trig_idx   = tk_replay_start.turning_k_index if tk_replay_start.turning_k_index is not None else tk_replay_start.k_index
             correct_direction = Direction.Up if s.turning_ks[-1].mark == Mark.G else Direction.Down
-            self._replay_center_engine_for_segment(real_start_idx, real_trig_idx, k_index, correct_direction)
             
-            # 【核心同步】：重播找回中枢后，必须立即同步到线段对象中，否则绘图层看到的 centers 为空
+            # 第一阶段重播：打标并生成消费级中心
+            self._replay_center_engine_for_segment(real_start_idx, real_trig_idx, k_index, correct_direction)
             self._fractal_engine._update_segments()
 
-        # 宏观线段基于当前宏观顶底与中枢快照独立重建
+        # 4.2 事实仓维护 (ALWAYS 同步 micro_centers)
+        self._sync_potential_to_micro_warehouse()
+
+        # --- 5. 宏观同步与审计 (Stage 2) ---
+        macro_changed = self._sync_macro_world_from_micro()
+        
+        if s.enable_macro_audit and macro_changed and len(s.macro_turning_ks) > 4:
+            # 这里的 audit_and_replay 只执行顶底塌陷逻辑
+            audit_hit = self._macro_engine.audit_and_replay(k_index)
+            if audit_hit:
+                # 命中审计：触发宏观中枢两步走（幽灵迁移 + 区间重建）
+                self._replay_centers_for_macro_audit()
+                macro_changed = True
+
+        # 宏观线段基于当前宏观顶底与宏观中枢仓独立重建
         if macro_changed:
             self._update_macro_segments()
 
@@ -353,7 +367,42 @@ class SegmentAnalyzer:
 
         s.macro_last_synced_micro_id = committed_ids[-1]
 
+        # 宏观审计未命中时，也尝试增量同步 micro_centers 到 macro_centers (滞后复用)
+        for c in s.micro_centers:
+            if not getattr(c, 'is_ghost', False) and c not in s.macro_centers:
+                # 检查此中枢是否已经在 ghost 仓里（防止重复）
+                if any(gc.center_id == c.center_id for gc in s.ghost_centers):
+                    continue
+                s.macro_centers.append(c)
+
         return changed
+
+    def _sync_potential_to_micro_warehouse(self):
+        """维护微观事实仓：将运行态 potential_centers 同步到 micro_centers，并打上所有权标。"""
+        s = self.state
+        current_mids = {tk.cache.get("micro_id") for tk in s.turning_ks if tk.cache.get("micro_id") is not None}
+        
+        # 1. 增量导入
+        for c in s.potential_centers:
+            if c not in s.micro_centers:
+                c.source_layer = "micro"
+                s.micro_centers.append(c)
+
+        # 2. 补齐所有权标 (owner_seg_key)
+        # 微观仓中枢的所有权始终基于当前微观线段划分。
+        for c in s.micro_centers:
+            if c.owner_seg_key is not None:
+                continue
+            
+            # 判定中枢归属哪段微观线段
+            c_confirm_dt = c.confirm_k.dt if c.confirm_k else c.start_dt
+            for seg in s.segments:
+                if seg.start_k.dt <= c_confirm_dt <= seg.end_k.dt:
+                    ms_id = seg.start_k.cache.get("micro_id")
+                    me_id = seg.end_k.cache.get("micro_id")
+                    if ms_id is not None and me_id is not None:
+                        c.owner_seg_key = (ms_id, me_id)
+                    break
 
     def _update_macro_segments(self):
         """根据宏观顶底重建宏观线段，并挂载现有中枢快照。"""
@@ -366,7 +415,7 @@ class SegmentAnalyzer:
         micro_id_seq = [tk.cache.get("micro_id") for tk in s.turning_ks if tk.cache.get("micro_id") is not None]
         micro_id_to_pos = {mid: i for i, mid in enumerate(micro_id_seq)}
 
-        all_avail_centers = s.all_centers + s.potential_centers
+        all_avail_centers = s.macro_centers
         for i in range(len(tks) - 1):
             tk1 = tks[i]
             tk2 = tks[i + 1]
@@ -421,25 +470,20 @@ class SegmentAnalyzer:
         s = self.state
 
         # Step 1: 精准清理（拔根与留种）
+        # 属于前一个线段且恰好结束于 start_ext_idx 的中枢必须保留（由 start_k_index < start_ext_idx 保证）
+        # 凡是起点落在重播区间 [start_ext_idx, current_end_idx] 之后的中枢，若方向不对则转为幽灵，
+        # 若方向一致，则应当被清理掉，因为接下来的重播会重新生成它们。
         new_potential = []
         for center in s.potential_centers:
             if center.start_k_index >= start_ext_idx:
-                if center.direction != correct_direction:
-                    center.is_ghost = True
-                    new_potential.append(center)
+                # 微观重播不再产生幽灵，幽灵目前仅由宏观审计产生
+                # 同向中枢不进入 new_potential，等待重播生成
+                pass
             else:
                 new_potential.append(center)
         s.potential_centers = new_potential
 
-        new_all = []
-        for center in s.all_centers:
-            if center.start_k_index >= start_ext_idx:
-                if center.direction != correct_direction:
-                    center.is_ghost = True
-                    new_all.append(center)
-            else:
-                new_all.append(center)
-        s.all_centers = new_all
+        # Stage 1 重播不直接修改 all_centers/macro_centers，保持解耦
 
         # Step 2: 状态机洗盘重置
         self._center_engine.rollback()
@@ -467,6 +511,60 @@ class SegmentAnalyzer:
                     self._center_engine.seal_on_boundary()
             else:
                 self._center_engine.update(bar, i)
+
+    def _replay_centers_for_macro_audit(self):
+        """第二阶段重播：宏观审计命中后的中枢维护。"""
+        s = self.state
+        marks = s.cache.pop("macro_replay_marks", None)
+        if not marks:
+            return
+
+        start_idx = marks['start_ext_idx']
+        swallow_end_idx = marks['swallow_end_idx']
+        correct_dir = marks['correct_direction']
+        
+        # 1. 幽灵迁移
+        stay_micro = []
+        for c in s.micro_centers:
+            if c.end_k_index >= start_idx and c.start_k_index <= swallow_end_idx:
+                c.is_ghost = True
+                c.source_layer = "ghost"
+                c.origin_center_id = c.center_id
+                if c not in s.ghost_centers:
+                    s.ghost_centers.append(c)
+            else:
+                stay_micro.append(c)
+        s.micro_centers = stay_micro
+
+        # 2. 宏观仓清理
+        s.macro_centers = [c for c in s.macro_centers if not (c.end_k_index >= start_idx and c.start_k_index <= swallow_end_idx)]
+
+        # 3. 运行态缓冲区临时备份（宏观重播会污染 potential_centers，需还原）
+        old_potential = [deepcopy(c) for c in s.potential_centers]
+        s.potential_centers = [c for c in s.potential_centers if c.start_k_index < start_idx]
+
+        # 4. 执行宏观区间重建 (仅重建吞噬区间)
+        self._center_engine.rollback()
+        s.last_center_end_idx = start_idx
+
+        # 仅重播到吞噬终点，找回宏观级别的主干中枢
+        for i in range(start_idx, swallow_end_idx + 1):
+            bar = s.bars_raw[i]
+            self._center_engine.update(bar, i, force_direction=correct_dir, 
+                                       force_anchor_idx=start_idx,
+                                       force_trigger_idx=marks.get('start_trig_idx', start_idx))
+            if i == swallow_end_idx:
+                self._center_engine.seal_on_boundary()
+
+        # 5. 重播产物入库 (Macro Warehouse)
+        for c in s.potential_centers:
+            if c.start_k_index >= start_idx:
+                c.source_layer = "macro"
+                if c not in s.macro_centers:
+                    s.macro_centers.append(c)
+        
+        # 6. 还原运行态缓冲区（供后续 K 线继续微观探测）
+        s.potential_centers = old_potential
             
 
     # =========================================================================
@@ -494,8 +592,21 @@ class SegmentAnalyzer:
         return self.state.all_centers + self.state.potential_centers
 
     @property
-    def potential_centers(self) -> List[MooreCenter]:
-        return self.state.potential_centers
+    def micro_centers(self) -> List[MooreCenter]:
+        return self.state.micro_centers
+
+    @property
+    def macro_centers(self) -> List[MooreCenter]:
+        return self.state.macro_centers
+
+    @property
+    def all_centers(self) -> List[MooreCenter]:
+        """兼容性接口：映射到 macro_centers"""
+        return self.state.macro_centers
+
+    @property
+    def ghost_centers(self) -> List[MooreCenter]:
+        return self.state.ghost_centers
 
     @property
     def ghost_forks(self) -> List[tuple]:

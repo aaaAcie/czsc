@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """宏观审计引擎：负责疑点审计、跃迁判定与吞噬塌陷。"""
-from czsc.py.enum import Mark
+from czsc.py.enum import Mark, Direction
 
 from ..objects import TurningK
 from .scope_utils import build_scope_windows, evaluate_scope_refresh, get_trigger_index
@@ -222,6 +222,15 @@ class MacroAuditEngine:
         s.macro_turning_ks = new_turning_ks
 
         tk_new_end.maybe_is_fake = False
+
+        # --- 【增压逻辑】：设置宏观重播打标 ---
+        correct_dir = Direction.Up if tk_new_end.mark == Mark.G else Direction.Down
+        s.cache["macro_replay_marks"] = {
+            'start_ext_idx': tk_anchor.k_index,
+            'swallow_end_idx': tk_new_end.k_index,
+            'correct_direction': correct_dir,
+            'start_trig_idx': tk_anchor.turning_k_index if tk_anchor.turning_k_index is not None else tk_anchor.k_index
+        }
 
         if len(s.macro_turning_ks) >= 3:
             s.macro_turning_ks[-3].is_locked = True
