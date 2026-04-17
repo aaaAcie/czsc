@@ -493,6 +493,45 @@ class MicroStructureEngine:
     def _confirm_candidate(self, final_tk: TurningK, perfect_struct: bool, has_visible: bool):
         """确认转折点，更新系统状态"""
         s = self.s
+
+        # -----------------------------------------------------------------------
+        # 【滞后审判】实线保护法则
+        # 触发条件：
+        #   1. 当前确立的是异向转折点 C（方向与上一端点相反）
+        #   2. 存在备份端点 B（曾被同向刷新 B' 顶替，且 B 是实线段终点）
+        #   3. 新线段 B'C 是虚线（perfect_struct = False）
+        # 判定：若备份 B 到 C 之间存在有效中枢（BC 是实线） → 恢复 B，丢弃 B'，
+        #       此后 C 以 B 为起点，BC 成为实线段。
+        # 哲学意义：顶底刷新的合法性由刷新后连成的下一段（BC vs B'C）的虚实决定，
+        #           而非刷新前那段（AB vs AB'）—— AB 若为实线，AB' 必然也是实线，
+        #           两者比较无意义。
+        # -----------------------------------------------------------------------
+        if (
+            s.turning_ks
+            and s.turning_ks[-1].mark != final_tk.mark  # C 是异向转折
+            and s.refresh_backup_tk is not None          # 存在备份端点 B
+            and not perfect_struct                        # B'C 是虚线
+        ):
+            backup_b = s.refresh_backup_tk
+            # 检查 BC 是否为实线（区间内有有效中枢）
+            if self._has_center_between(backup_b.k_index, final_tk.k_index):
+                # BC 是实线 → 恢复 B，丢弃 B'
+                s.turning_ks.pop()           # 移除 B'
+                s.turning_ks.append(backup_b)  # 恢复 B
+                perfect_struct = True
+                # 重新计算 has_v（检查 B→C 区间内是否含肉眼可见中枢）
+                all_c = s.all_centers + s.potential_centers
+                has_visible = any(
+                    getattr(c, 'is_visible', False) for c in all_c
+                    if backup_b.k_index <= c.start_k_index <= final_tk.k_index
+                    and not getattr(c, 'is_ghost', False)
+                )
+
+        # 异向确立后，无论是否触发保护，都清零备份（等待下一轮可能的刷新）
+        if s.turning_ks and s.turning_ks[-1].mark != final_tk.mark:
+            s.refresh_backup_tk = None
+
+        # ── 常规确立流程 ──────────────────────────────────────────────────────
         final_tk.is_valid = True
         final_tk.is_perfect = perfect_struct
         final_tk.maybe_is_fake = not perfect_struct
@@ -511,6 +550,11 @@ class MicroStructureEngine:
 
         # 同向替换：实现微观延伸（生长）
         if s.turning_ks and s.turning_ks[-1].mark == final_tk.mark:
+            old_tk = s.turning_ks[-1]
+            # 【备份机制】：若旧端点是实线，保存备份，供异向转折点出现时的滞后审判使用。
+            # 若旧端点是虚线但已存在备份，保持备份不变（备份始终指向最近一次实线端点）。
+            if old_tk.is_perfect:
+                s.refresh_backup_tk = old_tk
             s.turning_ks.pop()
 
         s.turning_ks.append(final_tk)
@@ -533,6 +577,31 @@ class MicroStructureEngine:
             s.turning_ks[-2].is_locked = True
         if len(s.turning_ks) >= 3:
             s.turning_ks[-3].is_locked = True
+
+    def _has_center_between(self, start_k_index: int, end_k_index: int) -> bool:
+        """检查 [start_k_index, end_k_index] 区间内是否存在有效（非幽灵）中枢。
+
+        用于滞后审判：判断以备份端点 B 为起点、当前异向转折点 C 为终点的线段 BC
+        是否为实线（内部存在中枢）。口径与 _validate_four_rules Rule3 / analyzer 的
+        _check_actual_perfection 保持一致。
+
+        覆盖范围：
+          A. 已固化中枢（all_centers + potential_centers，排除幽灵）
+          B. 正在孵化的活跃中枢（State 2，名分 + 黑K 均已通过才算）
+        """
+        s = self.s
+        # A. 已固化中枢
+        all_c = s.all_centers + s.potential_centers
+        for c in all_c:
+            if start_k_index <= c.start_k_index <= end_k_index and not getattr(c, 'is_ghost', False):
+                return True
+        # B. 正在孵化的活跃中枢（时序截止锚：确认K必须在区间内）
+        if s.center_state >= 2 and s.center_line_k:
+            is_confirmed = (s.center_method_found is not None and s.center_black_k_pass)
+            if is_confirmed and s.center_line_k_index <= end_k_index:
+                if start_k_index <= s.center_start_k_index <= end_k_index:
+                    return True
+        return False
 
     def _validate_four_rules(self, tk: TurningK) -> tuple:
         """确立顶底的核心四法则 (严格同步核心定义文档)

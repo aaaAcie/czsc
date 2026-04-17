@@ -105,6 +105,10 @@ class SegmentState:
     special_ext_idx_cache: Optional[int] = None
     micro_id_seed: int                  = 0
     center_id_seed: int                 = 0
+    # 【实线保护备份】：同向刷新 B→B' 时，若 B 是实线端点，则将 B 缓存于此；
+    # 等待异向转折点 C 出现后，比较 B'C 与 BC 的虚实，若 B'C 是虚线而 BC 是实线，
+    # 则恢复 B（滞后审判机制）。
+    refresh_backup_tk: Optional['TurningK'] = None
     # 异向候选 MA5 刷新基线（运行态，失败候选同样推进）
     reversal_ma5_gate_mark: Optional[Mark] = None
     reversal_ma5_gate_start_k_index: int = -1
