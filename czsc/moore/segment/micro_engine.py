@@ -69,11 +69,26 @@ class MicroStructureEngine:
             reversal_mark = Mark.G if last_mark == Mark.D else Mark.D
             refresh_mark  = last_mark
 
+        prev2_ma5 = None
+        if k_index >= 2:
+            prev2_ma5 = s.bars_raw[k_index - 2].cache.get("ma5")
+
         def _is_turning_triggered(target_mark: Mark) -> bool:
+            # 局部趋势门槛（3 点）：
+            # - 找顶：ma5[k] < ma5[k-1] <= ma5[k-2]，表达“上升后拐头”
+            # - 找底：ma5[k] > ma5[k-1] >= ma5[k-2]，表达“下降后拐头”
+            # 当 prev2 不可用时，退回 2 点比较，避免冷启动误阻断。
+            if prev2_ma5 is None:
+                ma5_turn_down = ma5 < s.last_ma5
+                ma5_turn_up = ma5 > s.last_ma5
+            else:
+                ma5_turn_down = (ma5 < s.last_ma5) and (s.last_ma5 >= prev2_ma5)
+                ma5_turn_up = (ma5 > s.last_ma5) and (s.last_ma5 <= prev2_ma5)
+
             if target_mark == Mark.G:  # 找顶
-                return (ma5 <= s.last_ma5 or is_solid_gap_down) and (min(bar.open, bar.close) < ma5)
+                return (ma5_turn_down or is_solid_gap_down) and (min(bar.open, bar.close) < ma5)
             # 找底
-            return (ma5 >= s.last_ma5 or is_solid_gap_up) and (max(bar.open, bar.close) > ma5)
+            return (ma5_turn_up or is_solid_gap_up) and (max(bar.open, bar.close) > ma5)
 
         def _run_attempt(
             target_mark: Mark,
@@ -193,8 +208,13 @@ class MicroStructureEngine:
             return None
         return max(b.high for b in scope) if mark == Mark.G else min(b.low for b in scope)
 
-    def _check_and_update_reversal_ma5_gate(self, new_mark: Mark, trigger_index: int) -> bool:
-        """异向候选的运行门槛：MA5 或价格任一刷新即可，失败候选同样推进。"""
+    def _check_and_update_reversal_ma5_gate(self, new_mark: Mark, trigger_index: int, commit: bool = True) -> bool:
+        """异向候选门槛校验：MA5 或价格任一刷新即可。
+
+        参数：
+        - commit=True: 校验后写回门控基准（历史行为）
+        - commit=False: 仅校验，不写回（用于“先检查后提交”的后置提交流程）
+        """
         s = self.s
         if not s.turning_ks:
             return True
@@ -236,24 +256,25 @@ class MicroStructureEngine:
         else:
             price_refreshed = current_price_extreme < prev_price_extreme
 
-        s.reversal_ma5_gate_mark = new_mark
-        s.reversal_ma5_gate_start_k_index = leg_start
-        if current_ma5_extreme is not None:
-            if prev_ma5_extreme is None:
-                s.reversal_ma5_gate_extreme = current_ma5_extreme
-            elif new_mark == Mark.G:
-                s.reversal_ma5_gate_extreme = max(prev_ma5_extreme, current_ma5_extreme)
-            else:
-                s.reversal_ma5_gate_extreme = min(prev_ma5_extreme, current_ma5_extreme)
+        if commit:
+            s.reversal_ma5_gate_mark = new_mark
+            s.reversal_ma5_gate_start_k_index = leg_start
+            if current_ma5_extreme is not None:
+                if prev_ma5_extreme is None:
+                    s.reversal_ma5_gate_extreme = current_ma5_extreme
+                elif new_mark == Mark.G:
+                    s.reversal_ma5_gate_extreme = max(prev_ma5_extreme, current_ma5_extreme)
+                else:
+                    s.reversal_ma5_gate_extreme = min(prev_ma5_extreme, current_ma5_extreme)
 
-        s.reversal_price_gate_mark = new_mark
-        s.reversal_price_gate_start_k_index = leg_start
-        if prev_price_extreme is None:
-            s.reversal_price_gate_extreme = current_price_extreme
-        elif new_mark == Mark.G:
-            s.reversal_price_gate_extreme = max(prev_price_extreme, current_price_extreme)
-        else:
-            s.reversal_price_gate_extreme = min(prev_price_extreme, current_price_extreme)
+            s.reversal_price_gate_mark = new_mark
+            s.reversal_price_gate_start_k_index = leg_start
+            if prev_price_extreme is None:
+                s.reversal_price_gate_extreme = current_price_extreme
+            elif new_mark == Mark.G:
+                s.reversal_price_gate_extreme = max(prev_price_extreme, current_price_extreme)
+            else:
+                s.reversal_price_gate_extreme = min(prev_price_extreme, current_price_extreme)
 
         return ma5_refreshed or price_refreshed
 
@@ -444,8 +465,15 @@ class MicroStructureEngine:
             if min_first_non_overlap_idx is not None and (ext_idx - 1) < min_first_non_overlap_idx:
                 return
 
-        if s.turning_ks and s.turning_ks[-1].mark != new_mark:
-            if not self._check_and_update_reversal_ma5_gate(new_mark, trigger_index):
+        is_reversal = bool(s.turning_ks and s.turning_ks[-1].mark != new_mark)
+        # 异向门控采用“先检查后提交”：
+        # 1) 常规路径先按旧基准校验，不立即提交；
+        # 2) 若触发“特殊法则后移一根”，本次不提交；
+        # 3) 后移回调路径（from_special_rule=True）不再重复卡门控。
+        if is_reversal and not from_special_rule:
+            # 进门检查：仅校验入场权，不执行刷新。
+            # 这是为了防止“后移一根”场景下，当前 K 线把自己刷新后的极值当做门槛拦住了下一根的回调。
+            if not self._check_and_update_reversal_ma5_gate(new_mark, trigger_index, commit=False):
                 return
 
         # 同向刷新若命中与上一个完全相同的极值K，只更新时间触发锚点，不重建新候选
@@ -472,16 +500,25 @@ class MicroStructureEngine:
         if s.candidate_tk:
             valid, perfect, visible = self._validate_four_rules(s.candidate_tk)
             if valid:
+                # 只要通过了初步门检并走到了这里，说明该极值具有客观意义，执行更新。
+                # 放在这里是为了实现在“校验后刷新”且“不管通过与否都刷新”的客观性
+                if is_reversal:
+                    self._check_and_update_reversal_ma5_gate(new_mark, trigger_index, commit=True)
+
                 # 特殊法则：当转折K本身就是本段极值K，且四法则通过时，
-                # 当前转折K无效，后移一根作为新生转折K（不改极值K）。
                 if (not from_special_rule) and allow_special_shift and ext_idx == trigger_index:
                     s.waiting_special_rule = True
                     s.special_waiting_mark = new_mark
                     s.special_ext_idx_cache = ext_idx
                     s.candidate_tk = None
                     return
+                # 候选最终落地前不再需要重复提交，因为前置校验时已执行 commit=True
                 self._confirm_candidate(s.candidate_tk, perfect, visible)
             else:
+                # 即使四法则没过，我们也认为这个候选点触碰到的极值是真实的，执行客观刷新（基准下移/上移）
+                if is_reversal:
+                    self._check_and_update_reversal_ma5_gate(new_mark, trigger_index, commit=True)
+
                 # 顶底确立是静态裁决：当前不通过即废弃，不跨K线等待
                 s.candidate_tk = None
                 if invalidate_last_on_fail and s.turning_ks and s.turning_ks[-1].mark == new_mark:

@@ -20,6 +20,10 @@ from loguru import logger
 from pyecharts import options as opts
 from pyecharts.charts import Kline, Line, Bar, Grid, Scatter
 from pyecharts.commons.utils import JsCode
+from pyecharts.globals import CurrentConfig
+
+# 解决 ECharts 脚本加载失败问题，更换为更稳定的 CDN
+CurrentConfig.ONLINE_HOST = "https://cdn.staticfile.org/echarts/5.4.3/"
 
 from czsc.connectors import research
 from czsc.moore.analyze import MooreCZSC
@@ -663,21 +667,32 @@ class AnalyzeTask:
 if __name__ == "__main__":
     tasks = [
         AnalyzeTask("300371", sdt="20181220",edt="20201030", desc="汇中股份"),
-        AnalyzeTask("002346", sdt="20180901", edt="20200908", desc="柘中股份"),
+        AnalyzeTask("002346", sdt="20180901", edt="20200928", desc="柘中股份"),
         AnalyzeTask("sz002286", sdt="20210101", edt="20210701", desc="保利发展"),
         AnalyzeTask("300137", sdt="20190415", edt="20201130", desc="先河环保"),
         AnalyzeTask("000993", sdt="20190515", edt="20200920", desc="闽东电力"),
     ]
 
     # 🎯 切换这里
-    task = tasks[4]
+    task = tasks[1]
 
     try:
         symbol = task.symbol
         logger.info(f"正在拉取标的 {symbol} ({task.desc}) | 时间: {task.sdt} ~ {task.edt}")
         bars = research.get_raw_bars_origin(symbol, sdt=task.sdt, edt=task.edt)
 
-        engine = MooreCZSC(bars, ma34_cross_as_valid_gate=False, audit_link_rounds=3)
+        replay_centers_after_macro_swallow = False
+        engine = MooreCZSC(
+            bars,
+            ma34_cross_as_valid_gate=False,
+            audit_link_rounds=3,
+            replay_centers_after_macro_swallow=replay_centers_after_macro_swallow,
+        )
+        # logger.info(
+        #     f"[配置] macro_audit=True | audit_link_rounds=3 | "
+        #     f"ma34_cross_as_valid_gate=False | "
+        #     f"replay_centers_after_macro_swallow={replay_centers_after_macro_swallow}"
+        # )
 
         total_fail = sum(engine._debug_rule_fail.values())
         logger.info(

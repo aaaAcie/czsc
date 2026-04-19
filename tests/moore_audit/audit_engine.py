@@ -38,7 +38,87 @@ def audit_300371_special():
     }
     unified_audit(symbol, sdt, edt, target_dates, flags)
 
-def unified_audit(symbol: str, sdt: str, edt: str, target_dates: List[str], flags: Dict[str, bool]):
+def _fmt_dt(dt):
+    return dt.strftime('%Y-%m-%d') if dt else 'None'
+
+
+def _audit_target_segment(engine: MooreCZSC, seg_start: str, seg_end: str):
+    """定点审计：解释某条线段为何实/虚，以及是否被 ghost 化。"""
+    segs = getattr(engine, 'micro_segments', engine.segments)
+    target = None
+    target_i = None
+    for i, seg in enumerate(segs):
+        if seg.start_k.dt.strftime('%Y-%m-%d') == seg_start and seg.end_k.dt.strftime('%Y-%m-%d') == seg_end:
+            target = seg
+            target_i = i
+            break
+
+    print("\n" + "🔍 SECTION 4: 目标线段 ghost 归因审计")
+    print("-" * 120)
+    if target is None:
+        print(f"未找到目标线段: {seg_start} -> {seg_end}")
+        return
+
+    print(
+        f"Target: v{target_i}-v{target_i+1} | {seg_start} -> {seg_end} | "
+        f"Perfect={target.is_perfect} | seg.centers={len(getattr(target, 'centers', []))} | "
+        f"k_idx=({target.start_k.k_index},{target.end_k.k_index})"
+    )
+
+    si, ei = target.start_k.k_index, target.end_k.k_index
+    micro_hit = [c for c in engine.micro_centers if c.start_k_index <= ei and c.end_k_index >= si]
+    ghost_hit = [c for c in engine.ghost_centers if c.start_k_index <= ei and c.end_k_index >= si]
+
+    uniq = {}
+    for c in micro_hit + ghost_hit:
+        key = (getattr(c, 'center_id', None), c.start_k_index, c.end_k_index)
+        uniq[key] = c
+    centers = list(uniq.values())
+
+    if not centers:
+        print("重叠中枢: 无")
+    else:
+        print("重叠中枢:")
+        for c in sorted(centers, key=lambda x: (x.start_k_index, x.end_k_index)):
+            print(
+                f"  C#{getattr(c, 'center_id', None)} | {_fmt_dt(c.start_dt)}->{_fmt_dt(c.end_dt)} | "
+                f"idx=({c.start_k_index},{c.end_k_index}) | ghost={getattr(c,'is_ghost',None)} | "
+                f"visible={getattr(c,'is_visible',None)} | method={getattr(c,'method',None)} | "
+                f"layer={getattr(c,'source_layer',None)}"
+            )
+
+    forks = getattr(engine, 'ghost_forks', []) or []
+    if not forks:
+        print("ghost_forks: 无（无法映射吞噬窗口）")
+    else:
+        print("匹配到的吞噬窗口:")
+        matched = 0
+        for anchor_tk, consumed in forks:
+            points = [anchor_tk] + list(consumed)
+            idxs = [p.k_index for p in points]
+            left, right = min(idxs), max(idxs)
+            if any(c.end_k_index >= left and c.start_k_index <= right for c in centers):
+                matched += 1
+                consumed_txt = ", ".join([f"{_fmt_dt(t.dt)}({t.mark.name})" for t in consumed])
+                print(f"  anchor={_fmt_dt(anchor_tk.dt)} idx={anchor_tk.k_index} | window=({left},{right})")
+                print(f"    consumed: {consumed_txt}")
+        if matched == 0:
+            print("  无直接命中（可能被后续重播覆盖）")
+
+    has_ghost = any(getattr(c, 'is_ghost', False) for c in centers)
+    if has_ghost:
+        print("结论: 这条线段先因中枢被确权为实线，后有重叠中枢被迁入 ghost 仓；is_perfect 不会自动回退。")
+    else:
+        print("结论: 这条线段当前重叠中枢均未 ghost 化；实线判定与当前结构一致。")
+
+
+def unified_audit(
+    symbol: str, sdt: str, edt: str, target_dates: List[str], flags: Dict[str, bool],
+    seg_start: str = None, seg_end: str = None,
+    audit_link_rounds: int = 5,
+    ma34_cross_as_valid_gate: bool = True,
+    replay_centers_after_macro_swallow: bool = True,
+):
     """
     统一审计逻辑入口
     """
@@ -83,7 +163,12 @@ def unified_audit(symbol: str, sdt: str, edt: str, target_dates: List[str], flag
             print(f"❌ 错误: 未能获取到标的 {symbol} 的 K 线数据")
             return
 
-        engine = MooreCZSC(bars)
+        engine = MooreCZSC(
+            bars,
+            audit_link_rounds=audit_link_rounds,
+            ma34_cross_as_valid_gate=ma34_cross_as_valid_gate,
+            replay_centers_after_macro_swallow=replay_centers_after_macro_swallow,
+        )
         s = engine.segment_analyzer.state
 
         # =========================================================================
@@ -159,6 +244,9 @@ def unified_audit(symbol: str, sdt: str, edt: str, target_dates: List[str], flag
                 for ck in consumed:
                     print(f"    - 被抹除极值: {ck.dt} | {ck.mark.name} | Price: {ck.price:.2f}")
 
+        if seg_start and seg_end:
+            _audit_target_segment(engine, seg_start, seg_end)
+
     finally:
         mod_center.CenterEngine.update = orig_center["update"]
         print(f"\n{'='*120}")
@@ -174,11 +262,27 @@ if __name__ == '__main__':
     gen.add_argument('--sdt', default='20200101')
     gen.add_argument('--edt', default='20200828')
     gen.add_argument('--target', nargs='+', default=[])
+    gen.add_argument('--seg-start', default=None, help='目标线段起点日期，格式 YYYY-MM-DD')
+    gen.add_argument('--seg-end', default=None, help='目标线段终点日期，格式 YYYY-MM-DD')
+    gen.add_argument('--audit-link-rounds', type=int, default=5, help='宏观审计回放轮数')
+    gen.add_argument('--ma34-cross-as-valid-gate', action='store_true', help='开启法则2作为成立门槛（默认关闭）')
+    gen.add_argument(
+        '--disable-replay-centers-after-macro-swallow',
+        action='store_true',
+        help='命中宏观吞噬后，不重播吞噬窗口中枢'
+    )
     args = parser.parse_args()
 
     if args.command == 'scan_300371':
         audit_300371_special()
     elif args.command == 'generic':
-        unified_audit(args.symbol, args.sdt, args.edt, args.target, {'audit_center': True, 'show_ghosts': True})
+        unified_audit(
+            args.symbol, args.sdt, args.edt, args.target,
+            {'audit_center': True, 'show_ghosts': True},
+            seg_start=args.seg_start, seg_end=args.seg_end,
+            audit_link_rounds=args.audit_link_rounds,
+            ma34_cross_as_valid_gate=args.ma34_cross_as_valid_gate,
+            replay_centers_after_macro_swallow=not args.disable_replay_centers_after_macro_swallow,
+        )
     else:
         parser.print_help()

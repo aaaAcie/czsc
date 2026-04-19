@@ -169,6 +169,7 @@ class SegmentState:
     # -------------------------------------------------------------------------
     enable_macro_audit: bool            = True  # False 时关闭吞噬/跃迁
     audit_link_rounds: int              = 5     # 左右连接机会统一：右侧成熟度 + 左侧回溯轮数
+    replay_centers_after_macro_swallow: bool = True  # False 时吞噬后不重播吞噬窗口中枢
 
     # -------------------------------------------------------------------------
     # 调试计数器
@@ -193,6 +194,7 @@ class SegmentAnalyzer:
         ma34_cross_as_valid_gate: bool = True,
         audit_link_rounds: int = 5,
         enable_macro_audit: bool = True,
+        replay_centers_after_macro_swallow: bool = True,
     ):
         # 1. 准备共享状态容器（初始物理空间为空）
         s = SegmentState(
@@ -202,6 +204,7 @@ class SegmentAnalyzer:
             ma34_cross_as_valid_gate=ma34_cross_as_valid_gate,
             audit_link_rounds=audit_link_rounds,
             enable_macro_audit=enable_macro_audit,
+            replay_centers_after_macro_swallow=replay_centers_after_macro_swallow,
         )
         self.state = s
 
@@ -285,8 +288,12 @@ class SegmentAnalyzer:
             # 这里的 audit_and_replay 只执行顶底塌陷逻辑
             audit_hit = self._macro_engine.audit_and_replay(k_index)
             if audit_hit:
-                # 命中审计：触发宏观中枢两步走（幽灵迁移 + 区间重建）
-                self._replay_centers_for_macro_audit()
+                # 命中审计：可配置是否执行吞噬窗口中枢重播（幽灵迁移 + 区间重建）
+                if s.replay_centers_after_macro_swallow:
+                    self._replay_centers_for_macro_audit()
+                else:
+                    # 禁用重播时，清理审计打标，避免后续误消费旧 marks。
+                    s.cache.pop("macro_replay_marks", None)
                 macro_changed = True
 
         # 宏观线段基于当前宏观顶底与宏观中枢仓独立重建
@@ -530,7 +537,9 @@ class SegmentAnalyzer:
         # 1. 幽灵迁移
         stay_micro = []
         for c in s.micro_centers:
-            if c.end_k_index >= start_idx and c.start_k_index <= swallow_end_idx:
+            # 仅迁移“真正进入吞噬窗口内部”的中枢：
+            # 左边界贴边（c.end_k_index == start_idx）视为前一段资产，不应被连带 ghost 化。
+            if c.end_k_index > start_idx and c.start_k_index <= swallow_end_idx:
                 c.is_ghost = True
                 c.source_layer = "ghost"
                 c.origin_center_id = c.center_id
@@ -541,7 +550,10 @@ class SegmentAnalyzer:
         s.micro_centers = stay_micro
 
         # 2. 宏观仓清理
-        s.macro_centers = [c for c in s.macro_centers if not (c.end_k_index >= start_idx and c.start_k_index <= swallow_end_idx)]
+        s.macro_centers = [
+            c for c in s.macro_centers
+            if not (c.end_k_index > start_idx and c.start_k_index <= swallow_end_idx)
+        ]
 
         # 3. 运行态缓冲区临时备份（宏观重播会污染 potential_centers，需还原）
         old_potential = [deepcopy(c) for c in s.potential_centers]
