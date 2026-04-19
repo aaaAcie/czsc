@@ -277,20 +277,6 @@ def plot_moore_structure_echarts(
     # 只要存在幽灵数据就展示对应叠层，不再因为存在吞噬映射而隐藏证据。
     show_ghost_overlay = True
 
-    # 幽灵枝丫
-    ghost_fork_data = []
-    if ghost_forks and show_ghost_overlay:
-        for fork_tk, consumed in ghost_forks:
-            path = [fork_tk] + consumed
-            for i in range(len(path) - 1):
-                ta, tb = path[i], path[i + 1]
-                tp = "solid" if tb.is_perfect else "dashed"
-                ghost_fork_data.append([
-                    {"coord": [_dt_str(ta.dt), ta.price], "symbol": "none",
-                     "lineStyle": {"color": "#555555", "width": 2, "type": tp, "opacity": 0.75}},
-                    {"coord": [_dt_str(tb.dt), tb.price], "symbol": "none"},
-                ])
-
     # 演变刷新路径：统一灰色虚线
     refresh_data = []
     for seg in refreshed_segments:
@@ -417,13 +403,8 @@ def plot_moore_structure_echarts(
     )
     overlay_series.append(line_ma)
 
-    # 微观线段（未被吞噬部分，灰色）
-    s = _seg_series("微观线段", micro_unswallowed, "#555555", 2.5, alpha=0.75)
-    if s:
-        overlay_series.append(s)
-
-    # 被吞噬微观段：单独高亮，便于直接定位“被覆盖证据”
-    s = _seg_series("被吞噬微观段", micro_swallowed, "#C0392B", 3.2, alpha=0.9)
+    # 微观线段（全部，统一灰色）
+    s = _seg_series("微观线段", micro_all, "#555555", 2.5, alpha=0.75)
     if s:
         overlay_series.append(s)
 
@@ -453,10 +434,6 @@ def plot_moore_structure_echarts(
     if s:
         overlay_series.append(s)
     s = _history_tk_scatter("历史刷新端点(底)", refreshed_old_bot, "#16A085")
-    if s:
-        overlay_series.append(s)
-
-    s = _raw_seg_series("幽灵枝丫", ghost_fork_data, "#AAAAAA")
     if s:
         overlay_series.append(s)
 
@@ -605,7 +582,6 @@ def plot_moore_structure_echarts(
                 textstyle_opts=opts.TextStyleOpts(font_size=11),
                 selected_map={
                     "幽灵中枢": True,
-                    "幽灵枝丫": True,
                 }
             ),
             yaxis_opts=opts.AxisOpts(
@@ -760,7 +736,7 @@ class AnalyzeTask:
 if __name__ == "__main__":
     tasks = [
         AnalyzeTask("300371", sdt="20181220",edt="20201030", desc="汇中股份"),
-        AnalyzeTask("002346", sdt="20180901", edt="20200928", desc="柘中股份"),
+        AnalyzeTask("002346", sdt="20180901", edt="20201001", desc="柘中股份"),
         AnalyzeTask("sz002286", sdt="20210101", edt="20210701", desc="保利发展"),
         AnalyzeTask("300137", sdt="20190415", edt="20201130", desc="先河环保"),
         AnalyzeTask("000993", sdt="20190515", edt="20200920", desc="闽东电力"),
@@ -777,7 +753,7 @@ if __name__ == "__main__":
         replay_centers_after_macro_swallow = False
         engine = MooreCZSC(
             bars,
-            ma34_cross_as_valid_gate=True,
+            ma34_cross_as_valid_gate=False,
             audit_link_rounds=3,
             replay_centers_after_macro_swallow=replay_centers_after_macro_swallow,
         )

@@ -964,7 +964,13 @@ class CenterEngine:
                 return False, -1, 0, 0, 0
 
             # 4. 统计重叠（回归价格触碰标准）
-            ov_indices = [i for i, k in enumerate(bars) if k.high >= ov_low and k.low <= ov_high]
+            # 口径修正：
+            # - “找首K(Ka)” 的搜索左边界保持不变（仍由 _get_5k_search_start 控制）；
+            # - 仅“5K重叠数量统计”的时间左边界改为 Ka 本身，不再把 Ka 左侧命中计入 cnt。
+            ov_indices = [
+                i for i in range(target_idx, len(bars))
+                if bars[i].high >= ov_low and bars[i].low <= ov_high
+            ]
             cnt = len(ov_indices)
             
             # 5. 终极确权（时间口径）：重叠命中集合必须包含确认K（中枢线K）

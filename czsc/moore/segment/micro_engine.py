@@ -957,11 +957,8 @@ class MicroStructureEngine:
                 if tk1.dt <= c_confirm_dt <= tk2.dt:
                     seg.centers.append(c)
 
-            # --- 【核心修复】：物理结构校正 ---
-            # 如果重播或生长找回了中枢，则该线段应该是"实"的（Perfect）
-            if seg.centers:
-                tk2.is_perfect = True
-                # 与 is_perfect 同步：一旦被结构校正为实线端点，撤销宏观疑假标记
-                tk2.maybe_is_fake = False
+            # --- 结构状态重算（每次重建都覆写，避免旧状态残留） ---
+            tk2.is_perfect = bool(seg.centers)
+            tk2.maybe_is_fake = not tk2.is_perfect
             
             s.segments.append(seg)

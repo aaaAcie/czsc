@@ -443,9 +443,9 @@ class SegmentAnalyzer:
                     continue
                 if tk1.dt <= c_confirm_dt <= tk2.dt:
                     seg.centers.append(c)
-            if seg.centers:
-                tk2.is_perfect = True
-                tk2.maybe_is_fake = False
+            # 结构状态重算（每次重建都覆写，避免旧状态残留）
+            tk2.is_perfect = bool(seg.centers)
+            tk2.maybe_is_fake = not tk2.is_perfect
             start_src = tk1.cache.get("source_micro_id")
             end_src = tk2.cache.get("source_micro_id")
             swallow_ids = []
