@@ -109,14 +109,18 @@ class SegmentState:
     # 等待异向转折点 C 出现后，比较 B'C 与 BC 的虚实，若 B'C 是虚线而 BC 是实线，
     # 则恢复 B（滞后审判机制）。
     refresh_backup_tk: Optional['TurningK'] = None
-    # 异向候选 MA5 刷新基线（运行态，失败候选同样推进）
-    reversal_ma5_gate_mark: Optional[Mark] = None
-    reversal_ma5_gate_start_k_index: int = -1
-    reversal_ma5_gate_extreme: Optional[float] = None
-    # 异向候选价格刷新基线（运行态，失败候选同样推进）
-    reversal_price_gate_mark: Optional[Mark] = None
-    reversal_price_gate_start_k_index: int = -1
-    reversal_price_gate_extreme: Optional[float] = None
+    # 异向转折门槛：全时域双向最值包络追踪（实时客观，不依赖于信号触发更新）
+    leg_max_ma5: Optional[float] = None
+    leg_min_ma5: Optional[float] = None
+    leg_max_price: Optional[float] = None
+    leg_min_price: Optional[float] = None
+    leg_extreme_anchor_idx: int = -1
+    leg_extreme_anchor_mark: Optional[Mark] = None
+    # 异向门控快照基准（上一时刻包络），用于“先检查，再刷新”
+    gate_prev_leg_max_ma5: Optional[float] = None
+    gate_prev_leg_min_ma5: Optional[float] = None
+    gate_prev_leg_max_price: Optional[float] = None
+    gate_prev_leg_min_price: Optional[float] = None
 
     # -------------------------------------------------------------------------
     # 中枢引擎游标
