@@ -406,6 +406,39 @@ class MicroStructureEngine:
                     return curr_b.low, i
         return self._find_extreme_in_range(mark, start_idx, trigger_index)
 
+    def _passes_rule1_local(self, mark: Mark, idx: int) -> bool:
+        """检查候选 idx 是否满足法则1（含实体-MA5约束）。"""
+        bars = self.s.bars_raw
+        if idx < 0 or idx >= len(bars):
+            return False
+
+        prev_b = bars[idx - 1] if idx - 1 >= 0 else None
+        curr_b = bars[idx]
+        next_b = bars[idx + 1] if idx + 1 < len(bars) else bars[-1]
+
+        if mark == Mark.G:
+            is_local_extreme = (curr_b.high >= (prev_b.high if prev_b else -1)) and (curr_b.high >= next_b.high)
+        else:
+            is_local_extreme = (curr_b.low <= (prev_b.low if prev_b else 999999)) and (curr_b.low <= next_b.low)
+        if not is_local_extreme:
+            return False
+
+        curr_ma5 = curr_b.cache.get("ma5")
+        if curr_ma5 is None:
+            return False
+        body_top = max(curr_b.open, curr_b.close)
+        body_bottom = min(curr_b.open, curr_b.close)
+        if mark == Mark.G:
+            return body_top > curr_ma5
+        return body_bottom < curr_ma5
+
+    def _find_prev_rule1_3k(self, mark: Mark, start_idx: int, from_idx: int):
+        """从 from_idx 向左扫描，返回第一个满足法则1（含实体-MA5）的 3K 候选索引。"""
+        for i in range(from_idx, start_idx - 1, -1):
+            if self._passes_rule1_local(mark, i):
+                return i
+        return None
+
     def _find_extreme_by_trigger(self, mark: Mark, start_idx: int, trigger_index: int) -> tuple:
         """通过转折K找顶底：
         1) 先看 [start, trigger) 的绝对极值是否等于当前段绝对极值；
@@ -443,23 +476,23 @@ class MicroStructureEngine:
             min_non_overlap_idx = min_first_non_overlap_idx + 1
 
         # 1. 寻找极值
+        if s.turning_ks:
+            last = s.turning_ks[-1]
+            if last.mark == new_mark:
+                search_start = s.turning_ks[-2].k_index + 1 if len(s.turning_ks) >= 2 else 0
+            else:
+                # 异向寻址左边界约束到“中间K索引”：
+                # first_idx >= max(上一个极值中间K+2, 上一个转折K+1)
+                # => ext_idx >= max(...) + 1
+                search_start = max(last.k_index + 2, get_trigger_index(last) + 1) + 1
+        else:
+            search_start = 0
+
         if preset_ext_idx is not None:
             ext_idx = preset_ext_idx
             ext_bar = s.bars_raw[ext_idx]
             new_price = ext_bar.high if new_mark == Mark.G else ext_bar.low
         else:
-            search_start = 0
-            if s.turning_ks:
-                # 无论是 Refresh 还是 Reversal，寻址起点都在上一个异向点之后
-                last = s.turning_ks[-1]
-                if last.mark == new_mark:
-                    search_start = s.turning_ks[-2].k_index + 1 if len(s.turning_ks) >= 2 else 0
-                else:
-                    # 异向寻址左边界约束到“中间K索引”：
-                    # first_idx >= max(上一个极值中间K+2, 上一个转折K+1)
-                    # => ext_idx >= max(...) + 1
-                    search_start = max(last.k_index + 2, get_trigger_index(last) + 1) + 1
-
             # 反向转折：由开关控制使用“左侧3K”或“区间绝对极值”
             # 同向刷新：沿用“绝对极值优先，必要时回退左侧3K”的寻址策略
             if s.turning_ks and s.turning_ks[-1].mark != new_mark:
@@ -474,6 +507,15 @@ class MicroStructureEngine:
             # 明确校验“第一根K”不越过异向左边界
             if min_first_non_overlap_idx is not None and (ext_idx - 1) < min_first_non_overlap_idx:
                 return
+
+        # 若当前极值点不满足法则1（含实体-MA5），继续向左找下一个满足法则1的 3K 点
+        if not self._passes_rule1_local(new_mark, ext_idx):
+            alt_idx = self._find_prev_rule1_3k(new_mark, search_start, ext_idx - 1)
+            if alt_idx is None:
+                return
+            ext_idx = alt_idx
+            ext_bar = s.bars_raw[ext_idx]
+            new_price = ext_bar.high if new_mark == Mark.G else ext_bar.low
 
         is_reversal = bool(s.turning_ks and s.turning_ks[-1].mark != new_mark)
         # 异向门控采用“先检查后提交”：
@@ -592,6 +634,15 @@ class MicroStructureEngine:
             # 若旧端点是虚线但已存在备份，保持备份不变（备份始终指向最近一次实线端点）。
             if old_tk.is_perfect:
                 s.refresh_backup_tk = old_tk
+            # 记录同向刷新演变轨迹（用于图层“演变路径”可视化）
+            s.refreshed_segments.append(
+                MooreSegment(
+                    symbol=old_tk.symbol,
+                    start_k=old_tk,
+                    end_k=final_tk,
+                    direction=Direction.Up if final_tk.mark == Mark.G else Direction.Down,
+                )
+            )
             s.turning_ks.pop()
 
         s.turning_ks.append(final_tk)

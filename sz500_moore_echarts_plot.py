@@ -269,11 +269,13 @@ def plot_moore_structure_echarts(
         return (mid_s in swallowed_micro_ids) or (mid_e in swallowed_micro_ids)
 
     micro_all    = [s for s in micro_segments]         # 微观全部，不区分被吞与否
+    micro_swallowed = [s for s in micro_segments if _is_sw(s)]  # 被宏观吞噬映射覆盖到的微观段
+    micro_unswallowed = [s for s in micro_segments if not _is_sw(s)]
     macro_all    = [s for s in macro_segments]         # 宏观全部，不区分吸噬与否
     macro_swallow = [s for s in macro_segments if s.cache.get("is_macro_swallow", False)]  # 仅用于宽度计算
 
-    # 宏观吸噬段：只用于宽度前是否加粗（现已合并，保留宏观吸噬列表备用）
-    show_ghost_overlay = not (micro_segments and swallowed_micro_ids)
+    # 只要存在幽灵数据就展示对应叠层，不再因为存在吞噬映射而隐藏证据。
+    show_ghost_overlay = True
 
     # 幽灵枝丫
     ghost_fork_data = []
@@ -297,6 +299,38 @@ def plot_moore_structure_echarts(
              "lineStyle": {"color": "#666666", "width": 1.5, "type": "dashed", "opacity": 0.7}},
             {"coord": [_dt_str(seg.end_k.dt), seg.end_k.price], "symbol": "none"},
         ])
+
+    # 被同向刷新替换掉的历史端点（用于显示“曾成立、后被同向替换”的微观点）
+    refreshed_old_top = {}
+    refreshed_old_bot = {}
+    for seg in refreshed_segments:
+        tk = seg.start_k
+        d = _dt_str(tk.dt)
+        if tk.mark == Mark.G:
+            refreshed_old_top[d] = tk.price
+        else:
+            refreshed_old_bot[d] = tk.price
+
+    def _history_tk_scatter(name, val_map, color):
+        if not val_map:
+            return None
+        ys = [val_map.get(d, None) for d in dates]
+        return (
+            Scatter()
+            .add_xaxis(dates)
+            .add_yaxis(
+                name, ys,
+                symbol="diamond", symbol_size=6,
+                label_opts=opts.LabelOpts(is_show=False),
+                itemstyle_opts=opts.ItemStyleOpts(
+                    color=color, border_color="#111111", border_width=0.8
+                ),
+            )
+            .set_global_opts(
+                xaxis_opts=opts.AxisOpts(type_="category"),
+                legend_opts=opts.LegendOpts(is_show=False),
+            )
+        )
 
     # ── 5. 中枢 markArea 数据分类 ─────────────────────────────────────
     logger.info(f"三仓中枢统计 -> Macro: {len(macro_centers)}, Micro: {len(micro_centers)}, Ghost: {len(ghost_centers)}")
@@ -383,8 +417,13 @@ def plot_moore_structure_echarts(
     )
     overlay_series.append(line_ma)
 
-    # 微观线段（全部合并，统一灰色）
-    s = _seg_series("微观线段", micro_all, "#555555", 2.5, alpha=0.75)
+    # 微观线段（未被吞噬部分，灰色）
+    s = _seg_series("微观线段", micro_unswallowed, "#555555", 2.5, alpha=0.75)
+    if s:
+        overlay_series.append(s)
+
+    # 被吞噬微观段：单独高亮，便于直接定位“被覆盖证据”
+    s = _seg_series("被吞噬微观段", micro_swallowed, "#C0392B", 3.2, alpha=0.9)
     if s:
         overlay_series.append(s)
 
@@ -407,6 +446,13 @@ def plot_moore_structure_echarts(
         overlay_series.append(s)
 
     s = _raw_seg_series("演变路径", refresh_data, "#BBBBBB")
+    if s:
+        overlay_series.append(s)
+
+    s = _history_tk_scatter("历史刷新端点(顶)", refreshed_old_top, "#E67E22")
+    if s:
+        overlay_series.append(s)
+    s = _history_tk_scatter("历史刷新端点(底)", refreshed_old_bot, "#16A085")
     if s:
         overlay_series.append(s)
 
@@ -558,8 +604,8 @@ def plot_moore_structure_echarts(
                 orient="vertical",
                 textstyle_opts=opts.TextStyleOpts(font_size=11),
                 selected_map={
-                    "幽灵中枢": False,
-                    "幽灵枝丫": False,
+                    "幽灵中枢": True,
+                    "幽灵枝丫": True,
                 }
             ),
             yaxis_opts=opts.AxisOpts(
@@ -625,12 +671,14 @@ def plot_moore_structure_echarts(
     )
 
     # ── 10. Grid 布局 ─────────────────────────────────────────────────
+    chart_id = f"grid_{symbol}"
     grid = (
         Grid(init_opts=opts.InitOpts(
             width="100%",
             height="860px",
             page_title=title,
             bg_color="#FAFAFA",
+            chart_id=chart_id,
         ))
         .add(
             kline,
@@ -647,6 +695,51 @@ def plot_moore_structure_echarts(
             ),
         )
     )
+
+    # ── 11. 持久化 Zoom 状态 ──────────────────────────────────────────
+    # 使用 localStorage 存储最近一次的缩放范围，刷新页面后自动恢复
+    # ------------------------------------------------------------------
+    zoom_persistence_js = f"""
+    (function() {{
+        var storageKey = "echarts_zoom_{symbol}";
+        setTimeout(function() {{
+            // 尝试通过类名获取，更鲁棒
+            var container = document.querySelector(".chart-container");
+            if (!container) return;
+            
+            var chart = echarts.getInstanceByDom(container);
+            if (!chart) return;
+
+            // 1. 恢复状态
+            var saved = localStorage.getItem(storageKey);
+            if (saved) {{
+                var zoom = JSON.parse(saved);
+                chart.dispatchAction({{
+                    type: 'dataZoom',
+                    start: zoom.start,
+                    end: zoom.end
+                }});
+            }}
+
+            // 2. 监听并保存状态 (防抖处理)
+            var timer = null;
+            chart.on('datazoom', function() {{
+                if (timer) clearTimeout(timer);
+                timer = setTimeout(function() {{
+                    var opt = chart.getOption();
+                    if (opt.dataZoom && opt.dataZoom.length > 0) {{
+                        var dz = opt.dataZoom[0];
+                        localStorage.setItem(storageKey, JSON.stringify({{
+                            start: dz.start,
+                            end: dz.end
+                        }}));
+                    }}
+                }}, 500);
+            }});
+        }}, 500);
+    }})();
+    """
+    grid.add_js_funcs(zoom_persistence_js)
 
     grid.render(output_file)
     logger.success(f"成功！ECharts 交互图已保存至: {os.path.abspath(output_file)}")
@@ -684,7 +777,7 @@ if __name__ == "__main__":
         replay_centers_after_macro_swallow = False
         engine = MooreCZSC(
             bars,
-            ma34_cross_as_valid_gate=False,
+            ma34_cross_as_valid_gate=True,
             audit_link_rounds=3,
             replay_centers_after_macro_swallow=replay_centers_after_macro_swallow,
         )
