@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
-"""
-兼容层：旧的 higher 模块已迁移至 daily_segment 模块。
-"""
-from ..daily_segment import (
+"""兼容层：旧的 higher.analyzer 已迁移至 daily_segment.analyzer。"""
+
+from ..daily_segment.analyzer import (
     DailySegmentAnalyzer,
     DailySegmentCenter,
     DailySegment,

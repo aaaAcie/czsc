@@ -740,10 +740,13 @@ if __name__ == "__main__":
         AnalyzeTask("sz002286", sdt="20210101", edt="20210701", desc="保利发展"),
         AnalyzeTask("300137", sdt="20190415", edt="20201130", desc="先河环保"),
         AnalyzeTask("000993", sdt="20190515", edt="20200920", desc="闽东电力"),
+        AnalyzeTask("002286", sdt="20200328", edt="20200810", desc="保龄宝"),
+        AnalyzeTask("300428", sdt="20200108", edt="20200520", desc="四通新材"),
+
     ]
 
     # 🎯 切换这里
-    task = tasks[1]
+    task = tasks[5]
 
     try:
         symbol = task.symbol
@@ -753,7 +756,7 @@ if __name__ == "__main__":
         replay_centers_after_macro_swallow = False
         engine = MooreCZSC(
             bars,
-            ma34_cross_as_valid_gate=False,
+            ma34_cross_as_valid_gate=True,
             audit_link_rounds=3,
             replay_centers_after_macro_swallow=replay_centers_after_macro_swallow,
         )

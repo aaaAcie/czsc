@@ -5,9 +5,7 @@
 MooreCZSC 是对外的统一入口，随能力增长持续组合新的子分析器。
 当前实现：
   - segment_analyzer：30分钟线段级分析（SegmentAnalyzer）
-
-未来扩展：
-  - higher_analyzer：高级别线段中枢分析（消费 segments，独立逻辑）
+  - daily_segment_analyzer：日线级别线段分析（消费宏观 segments，独立逻辑）
 
 外部调用者（如 sz500_moore_plot.py）通过属性代理访问结果，
 无需感知内部由哪个子分析器提供数据。
@@ -17,6 +15,7 @@ from czsc.py.objects import RawBar
 from czsc.py.enum import Direction
 
 from .segment import SegmentAnalyzer
+from .daily_segment import DailySegmentAnalyzer, DailySegmentCenter, DailySegment
 from .objects import TurningK, MooreCenter, MooreSegment
 
 
@@ -47,13 +46,13 @@ class MooreCZSC:
             replay_centers_after_macro_swallow=replay_centers_after_macro_swallow,
         )
 
-        # --- 高级别（未来）---
-        # self.higher_analyzer = HigherAnalyzer(self.segment_analyzer)
+        # --- 日线级别线段 ---
+        self.daily_segment_analyzer = DailySegmentAnalyzer(self.segment_analyzer.segments)
 
     def update(self, bar: RawBar):
         """流式喂入一根新 K 线，驱动所有子分析器"""
         self.segment_analyzer.update(bar)
-        # 未来：self.higher_analyzer.update(self.segment_analyzer.segments)
+        self.daily_segment_analyzer.update(self.segment_analyzer.segments)
 
     # =========================================================================
     # 属性代理：将 segment_analyzer 的结果透传，维持对外接口不变
@@ -122,6 +121,54 @@ class MooreCZSC:
     @property
     def trend_low(self) -> Optional[float]:
         return self.segment_analyzer.trend_low
+
+    @property
+    def daily_segments(self) -> List[DailySegment]:
+        return self.daily_segment_analyzer.daily_segments
+
+    @property
+    def daily_current_segments(self) -> List[MooreSegment]:
+        return self.daily_segment_analyzer.current_segments
+
+    @property
+    def daily_active_center(self) -> Optional[DailySegmentCenter]:
+        return self.daily_segment_analyzer.active_center
+
+    @property
+    def daily_archived_centers(self) -> List[DailySegmentCenter]:
+        return self.daily_segment_analyzer.archived_centers
+
+    @property
+    def daily_candidates(self) -> List[DailySegmentCenter]:
+        return self.daily_segment_analyzer.candidates
+
+    # -------------------------------------------------------------------------
+    # 兼容旧命名：higher_* 继续转发到 daily_*
+    # -------------------------------------------------------------------------
+
+    @property
+    def higher_analyzer(self) -> DailySegmentAnalyzer:
+        return self.daily_segment_analyzer
+
+    @property
+    def higher_segments(self) -> List[DailySegment]:
+        return self.daily_segments
+
+    @property
+    def higher_current_segments(self) -> List[MooreSegment]:
+        return self.daily_current_segments
+
+    @property
+    def higher_active_center(self) -> Optional[DailySegmentCenter]:
+        return self.daily_active_center
+
+    @property
+    def higher_archived_centers(self) -> List[DailySegmentCenter]:
+        return self.daily_archived_centers
+
+    @property
+    def higher_candidates(self) -> List[DailySegmentCenter]:
+        return self.daily_candidates
 
     # -------------------------------------------------------------------------
     # 调试属性（与旧 MooreCZSC 保持向后兼容）
