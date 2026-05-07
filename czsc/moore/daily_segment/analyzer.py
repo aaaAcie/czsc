@@ -309,6 +309,10 @@ class DailySegmentAnalyzer:
         if self.state.continuity_broken or len(segments) < 3:
             return []
 
+        non_same_window = self._try_non_same_processing(segments)
+        if non_same_window:
+            return non_same_window
+
         max_len = len(segments) if len(segments) % 2 == 1 else len(segments) - 1
         for window_len in range(3, max_len + 1, 2):
             window = list(segments[:window_len])
@@ -324,6 +328,51 @@ class DailySegmentAnalyzer:
             if not self._is_extension_same_trend(window, next_two):
                 return window
         return []
+
+    def _try_non_same_processing(self, segments: Sequence[MooreSegment]) -> List[MooreSegment]:
+        """反向趋势以虚线 30F 线段开头时，尝试 idx-1 到 idx+2 直连。"""
+        if len(segments) < 3 or not self.state.completed_segments:
+            return []
+
+        first = segments[0]
+        prev_daily = self.state.completed_segments[-1]
+        if first.direction == prev_daily.direction:
+            return []
+        if first.is_perfect:
+            return []
+
+        window = list(segments[:3])
+        if not self._check_daily_segment_continuity(window):
+            return []
+        if not self._ma34_reverses_against_window(window):
+            return []
+        return window
+
+    def _ma34_reverses_against_window(self, window: Sequence[MooreSegment]) -> bool:
+        if not window or not self.state.ma34:
+            return False
+
+        start_price = seg_start_price(window[0])
+        end_price = seg_end_price(window[-1])
+        if end_price == start_price:
+            return False
+
+        start_idx = self._turning_index(window[0].start_k)
+        end_idx = self._turning_index(window[-1].end_k)
+        if start_idx > end_idx:
+            start_idx, end_idx = end_idx, start_idx
+
+        vals = [
+            self.state.ma34[idx]
+            for idx in range(start_idx, end_idx + 1)
+            if 0 <= idx < len(self.state.ma34) and self.state.ma34[idx] is not None
+        ]
+        if len(vals) < 2:
+            return False
+
+        if end_price > start_price:
+            return any(curr < prev for prev, curr in zip(vals, vals[1:]))
+        return any(curr > prev for prev, curr in zip(vals, vals[1:]))
 
     @staticmethod
     def _is_extension_same_trend(window: Sequence[MooreSegment], next_two: Sequence[MooreSegment]) -> bool:

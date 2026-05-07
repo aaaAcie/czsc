@@ -86,6 +86,12 @@ def make_analyzer_with_ma(states: dict[int, int], size: int = 240) -> DailySegme
     return analyzer
 
 
+def set_ma34(analyzer: DailySegmentAnalyzer, values: dict[int, float], size: int = 240):
+    analyzer.state.ma34 = [None] * size
+    for idx, value in values.items():
+        analyzer.state.ma34[idx] = value
+
+
 def test_slice_segments_from_anchor_dual_key():
     seg1 = make_seg(0, 2, Direction.Up, 10, 12)
     seg2 = make_seg(3, 5, Direction.Down, 12, 11)
@@ -303,6 +309,7 @@ def test_live_processing_extends_by_two_until_reverse_trend_forms():
         make_seg(7, 8, Direction.Down, 14, 9, start_turning_idx=80, end_turning_idx=90),
     ]
     analyzer = make_analyzer_with_ma({10: 1, 60: -1, 90: 1})
+    segs[5].end_k.is_perfect = True
 
     for seg in segs:
         analyzer._process_new_segment(seg)
@@ -311,6 +318,63 @@ def test_live_processing_extends_by_two_until_reverse_trend_forms():
     assert analyzer.daily_segments[0].segments == segs[:5]
     assert analyzer.state.current_segments == segs[5:]
     assert analyzer.state.pending_daily_segments == segs[5:]
+
+
+def test_non_same_processing_directly_connects_reverse_dashed_start_to_idx_plus_2_on_ma34_reversal():
+    prev = make_seg(0, 3, Direction.Up, 10, 15, start_turning_idx=10, end_turning_idx=30)
+    reverse_dashed = make_seg(3, 4, Direction.Down, 15, 14, start_turning_idx=30, end_turning_idx=40)
+    middle = make_seg(4, 5, Direction.Up, 14, 16, start_turning_idx=40, end_turning_idx=50)
+    end = make_seg(5, 6, Direction.Down, 16, 13, start_turning_idx=50, end_turning_idx=60)
+
+    analyzer = DailySegmentAnalyzer()
+    analyzer.state.completed_segments = [
+        DailySegment(
+            symbol="TEST.DAILY",
+            direction=Direction.Up,
+            start_seg=prev,
+            end_seg=prev,
+            segments=[prev],
+        )
+    ]
+    set_ma34(analyzer, {30: 10, 40: 9, 50: 11, 60: 8})
+
+    for seg in [reverse_dashed, middle]:
+        analyzer._process_new_segment(seg)
+    assert len(analyzer.daily_segments) == 1
+
+    analyzer._process_new_segment(end)
+
+    assert len(analyzer.daily_segments) == 2
+    assert analyzer.daily_segments[-1].segments == [reverse_dashed, middle, end]
+    assert analyzer.daily_segments[-1].start_seg is reverse_dashed
+    assert analyzer.daily_segments[-1].end_seg is end
+    assert analyzer.state.current_segments == []
+
+
+def test_non_same_processing_requires_dashed_reverse_start():
+    prev = make_seg(0, 3, Direction.Up, 10, 15, start_turning_idx=10, end_turning_idx=30)
+    reverse_perfect = make_seg(3, 4, Direction.Down, 15, 14, start_turning_idx=30, end_turning_idx=40)
+    reverse_perfect.end_k.is_perfect = True
+    middle = make_seg(4, 5, Direction.Up, 14, 16, start_turning_idx=40, end_turning_idx=50)
+    end = make_seg(5, 6, Direction.Down, 16, 13, start_turning_idx=50, end_turning_idx=60)
+
+    analyzer = DailySegmentAnalyzer()
+    analyzer.state.completed_segments = [
+        DailySegment(
+            symbol="TEST.DAILY",
+            direction=Direction.Up,
+            start_seg=prev,
+            end_seg=prev,
+            segments=[prev],
+        )
+    ]
+    set_ma34(analyzer, {30: 10, 40: 9, 50: 11, 60: 8})
+
+    for seg in [reverse_perfect, middle, end]:
+        analyzer._process_new_segment(seg)
+
+    assert len(analyzer.daily_segments) == 1
+    assert analyzer.state.current_segments == [reverse_perfect, middle, end]
 
 
 def test_old_trend_break_no_longer_resets_running_candidate():
