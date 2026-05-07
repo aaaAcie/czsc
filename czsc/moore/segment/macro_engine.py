@@ -3,7 +3,7 @@
 from czsc.py.enum import Mark, Direction
 
 from ..objects import TurningK
-from .scope_utils import build_scope_windows, evaluate_scope_refresh, get_trigger_index
+from .scope_utils import evaluate_scope_refresh, get_trigger_index
 
 
 class MacroAuditEngine:
@@ -110,13 +110,20 @@ class MacroAuditEngine:
         """执行跃迁判定：法则一 (实力生长) OR 法则二 (重心演化)。"""
         s = self.state
 
-        old_start_idx = tk_start.k_index
+        start_idx = tk_start.k_index
+        end_idx = tk_end.k_index
         old_trigger_idx = get_trigger_index(tk_start)
         new_trigger_idx = get_trigger_index(tk_end)
-        scopes = build_scope_windows(s.bars_raw, old_start_idx, old_trigger_idx, new_trigger_idx)
-        if scopes is None:
+        if not (start_idx <= old_trigger_idx < end_idx <= new_trigger_idx):
             return False
-        refresh = evaluate_scope_refresh(tk_end.mark, scopes.old_scope, scopes.new_scope)
+
+        # 生长法则 & ma5_is_better 的比较窗口：
+        # old_scope = [V_start, V_end), new_scope = [V_end, trigger(V_end)]
+        growth_old_scope = s.bars_raw[start_idx:end_idx]
+        growth_new_scope = s.bars_raw[end_idx : new_trigger_idx + 1]
+        if not growth_old_scope or not growth_new_scope:
+            return False
+        refresh = evaluate_scope_refresh(tk_end.mark, growth_old_scope, growth_new_scope)
 
         path_bars = s.bars_raw[tk_mid_same.k_index : new_trigger_idx + 1]
         if not path_bars:
@@ -141,7 +148,11 @@ class MacroAuditEngine:
 
         # ma5_is_better 统一按 old_scope/new_scope 的趋势极值比较，避免单点 MA5 失真。
         ma5_is_better = refresh.ma5_refreshed
-        start_ma5_ref = refresh.start_ma5_ref
+        # 引力防刺穿窗口：
+        # old_scope = [V_start, trigger(V_start)]
+        gravity_old_scope = s.bars_raw[start_idx : old_trigger_idx + 1]
+        gravity_old_ma5 = [b.cache.get("ma5") for b in gravity_old_scope if b.cache.get("ma5") is not None]
+        start_ma5_ref = (min(gravity_old_ma5) if tk_end.mark == Mark.G else max(gravity_old_ma5)) if gravity_old_ma5 else None
         if start_ma5_ref is None:
             start_ma5_ref = tk_start.raw_bar.cache.get("ma5")
         if start_ma5_ref is None:
@@ -154,7 +165,9 @@ class MacroAuditEngine:
         )
 
         if ma5_is_better:
-            return growth_ok and ma5_gravity_ok
+            # return growth_ok and ma5_gravity_ok
+            return ma5_gravity_ok
+
         return growth_ok
 
     def _check_leap_growth_only(
@@ -164,16 +177,28 @@ class MacroAuditEngine:
         tk_mid_same: TurningK,
         tk_pullback: TurningK,
     ) -> bool:
-        """仅执行法则一（生长法则）的物理边际审判。"""
+        """仅执行法则一（生长法则）的物理边际审判。
+
+        注意：Pre-Round 只能在 ma5_is_better == False 时启用法则一兜底。
+        若 ma5_is_better == True，必须走完整物理审判（含法则二），
+        不能无条件以法则一放行。
+        """
         s = self.state
 
-        old_start_idx = tk_start.k_index
-        old_trigger_idx = get_trigger_index(tk_start)
+        start_idx = tk_start.k_index
+        end_idx = tk_end.k_index
         new_trigger_idx = get_trigger_index(tk_end)
-        scopes = build_scope_windows(s.bars_raw, old_start_idx, old_trigger_idx, new_trigger_idx)
-        if scopes is None:
+        if not (start_idx < end_idx <= new_trigger_idx):
             return False
-        refresh = evaluate_scope_refresh(tk_end.mark, scopes.old_scope, scopes.new_scope)
+
+        # 生长法则窗口：old_scope = [V_start, V_end), new_scope = [V_end, trigger(V_end)]
+        growth_old_scope = s.bars_raw[start_idx:end_idx]
+        growth_new_scope = s.bars_raw[end_idx : new_trigger_idx + 1]
+        if not growth_old_scope or not growth_new_scope:
+            return False
+        refresh = evaluate_scope_refresh(tk_end.mark, growth_old_scope, growth_new_scope)
+        if refresh.ma5_refreshed:
+            return False
 
         tk_end_top = max(tk_end.raw_bar.open, tk_end.raw_bar.close)
         tk_end_bottom = min(tk_end.raw_bar.open, tk_end.raw_bar.close)

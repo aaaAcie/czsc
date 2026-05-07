@@ -943,7 +943,7 @@ if __name__ == "__main__":
     ]
 
     # 🎯 切换这里
-    task = tasks[-1]
+    task = tasks[-2]
 
     try:
         symbol = task.symbol
@@ -951,7 +951,7 @@ if __name__ == "__main__":
         bars = research.get_raw_bars_origin(symbol, sdt=task.sdt, edt=task.edt)
 
         replay_centers_after_macro_swallow = False
-        enable_pre_round = False
+        enable_pre_round = True
         engine = MooreCZSC(
             bars,
             ma34_cross_as_valid_gate=True,
