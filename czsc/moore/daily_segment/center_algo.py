@@ -7,7 +7,7 @@ from typing import Optional, Sequence, Tuple
 from czsc.py.enum import Direction
 
 from ..objects import MooreSegment
-from .utils import seg_end_index, seg_end_price, seg_start_index
+from .utils import seg_end_index, seg_start_index
 
 
 def find_local_extreme(
@@ -53,6 +53,24 @@ def check_ma34_overlap(
         if a_norm < norm_val < b_norm:
             return True
     return False
+
+
+def check_price_reentry(
+    seg: MooreSegment,
+    a_norm: float,
+    b_norm: float,
+    sign: int,
+) -> bool:
+    for bar in seg.bars:
+        low = min(bar.low, bar.high) * sign
+        high = max(bar.low, bar.high) * sign
+        if max(low, a_norm) < min(high, b_norm):
+            return True
+    start_norm = seg.start_k.price * sign
+    end_norm = seg.end_k.price * sign
+    low = min(start_norm, end_norm)
+    high = max(start_norm, end_norm)
+    return max(low, a_norm) < min(high, b_norm)
 
 
 def find_b_point(
@@ -121,10 +139,9 @@ def find_center(
             i += 2
             continue
 
-        seg45_end = seg_end_price(seg_45) * sign
         a_norm = a_val * sign
         b_norm = b_val * sign
-        if not (a_norm < seg45_end < b_norm):
+        if not check_price_reentry(seg_45, a_norm, b_norm, sign):
             i += 2
             continue
 

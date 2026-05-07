@@ -12,7 +12,10 @@ describe: 用 pyecharts (Apache ECharts) 实现摩尔缠论 K 线结构图。
   - 📤 输出独立 .html，浏览器直接打开
 """
 import os
+import ssl
+import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 
 import pandas as pd
 from loguru import logger
@@ -22,8 +25,12 @@ from pyecharts.charts import Kline, Line, Bar, Grid, Scatter
 from pyecharts.commons.utils import JsCode
 from pyecharts.globals import CurrentConfig
 
-# 解决 ECharts 脚本加载失败问题，更换为更稳定的 CDN
-CurrentConfig.ONLINE_HOST = "https://cdn.staticfile.org/echarts/5.4.3/"
+# 输出 HTML 使用本地相对资源，避免 file:// 打开时 CDN 加载失败导致 echarts 未定义。
+CurrentConfig.ONLINE_HOST = "./assets/"
+ECHARTS_ASSET_URLS = (
+    "https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js",
+    "https://unpkg.com/echarts@5.4.3/dist/echarts.min.js",
+)
 
 from czsc.connectors import research
 from czsc.moore.analyze import MooreCZSC
@@ -33,6 +40,29 @@ from czsc.py.enum import Direction, Mark
 # ─────────────────────────────────────────────────────────────────────
 # 工具函数
 # ─────────────────────────────────────────────────────────────────────
+def _ensure_echarts_asset(output_file: str):
+    output_dir = Path(os.path.abspath(output_file)).parent
+    asset_dir = output_dir / "assets"
+    asset_path = asset_dir / "echarts.min.js"
+    if asset_path.exists() and asset_path.stat().st_size > 100_000:
+        return
+
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    last_error = None
+    for url in ECHARTS_ASSET_URLS:
+        for context in (None, ssl._create_unverified_context()):
+            try:
+                with urllib.request.urlopen(url, timeout=20, context=context) as resp:
+                    data = resp.read()
+                if len(data) <= 100_000:
+                    raise RuntimeError(f"asset too small from {url}")
+                asset_path.write_bytes(data)
+                return
+            except Exception as exc:
+                last_error = exc
+    raise RuntimeError(f"无法下载 ECharts 本地资源: {last_error}")
+
+
 def _dt_str(dt) -> str:
     return pd.Timestamp(dt).strftime("%Y-%m-%d")
 
@@ -140,6 +170,7 @@ def plot_moore_structure_echarts(
     close_s = pd.Series([b.close for b in bars])
     ma5_list  = _ma(close_s, 5)
     ma34_list = _ma(close_s, 34)
+    ma170_list = _ma(close_s, 170)
     vol_list  = [b.vol for b in bars]
 
     # ── 2. 引擎数据提取 ───────────────────────────────────────────────
@@ -469,6 +500,10 @@ def plot_moore_structure_echarts(
                    linestyle_opts=opts.LineStyleOpts(width=1.2, color="#2980B9"),
                    label_opts=opts.LabelOpts(is_show=False),
                    itemstyle_opts=opts.ItemStyleOpts(color="#2980B9"))
+        .add_yaxis("MA170", ma170_list, symbol="none", is_smooth=True,
+                   linestyle_opts=opts.LineStyleOpts(width=1.4, color="#5D6D7E"),
+                   label_opts=opts.LabelOpts(is_show=False),
+                   itemstyle_opts=opts.ItemStyleOpts(color="#5D6D7E"))
         .set_global_opts(xaxis_opts=opts.AxisOpts(type_="category", is_scale=True))
     )
     overlay_series.append(line_ma)
@@ -581,12 +616,13 @@ def plot_moore_structure_echarts(
                 axis_pointer_type="cross",
                 formatter=JsCode("""function(params){
                     if(!params || params.length === 0) return '';
-                    var k, m5, m34;
+                    var k, m5, m34, m170;
                     for(var i=0; i<params.length; i++){
                         var p = params[i];
                         if(p.seriesName === 'K线'){ k = p; }
                         else if(p.seriesName === 'MA5'){ m5 = Array.isArray(p.value) ? p.value[1] : p.value; }
                         else if(p.seriesName === 'MA34'){ m34 = Array.isArray(p.value) ? p.value[1] : p.value; }
+                        else if(p.seriesName === 'MA170'){ m170 = Array.isArray(p.value) ? p.value[1] : p.value; }
                     }
                     if(!k || !k.value) return '';
                     var d = k.value;
@@ -598,6 +634,9 @@ def plot_moore_structure_echarts(
                     }
                     if(m34 != null && !isNaN(parseFloat(m34))){
                         res += '  <span style=\"color:#2980B9\">● MA34: ' + parseFloat(m34).toFixed(2) + '</span>';
+                    }
+                    if(m170 != null && !isNaN(parseFloat(m170))){
+                        res += '  <span style=\"color:#5D6D7E\">● MA170: ' + parseFloat(m170).toFixed(2) + '</span>';
                     }
                     return res;
                 }"""),
@@ -872,6 +911,7 @@ def plot_moore_structure_echarts(
     grid.add_js_funcs(zoom_persistence_js)
 
     abs_output = os.path.abspath(output_file)
+    _ensure_echarts_asset(abs_output)
     grid.render(abs_output)
     logger.success(f"成功！ECharts 交互图已保存至: {abs_output}")
     return grid
@@ -894,14 +934,16 @@ if __name__ == "__main__":
         AnalyzeTask("002346", sdt="20180901", edt="20201001", desc="柘中股份"),
         AnalyzeTask("sz002286", sdt="20210101",edt="20210701", desc="保利发展"),
         AnalyzeTask("300137", sdt="20190415", edt="20201130", desc="先河环保"),
-        AnalyzeTask("000993", sdt="20190515", edt="20200920", desc="闽东电力"),
+        AnalyzeTask("000993", sdt="20190515",edt="20200920", desc="闽东电力"),
         AnalyzeTask("002286", sdt="20200328", edt="20200810", desc="保龄宝"),
         AnalyzeTask("300428", sdt="20200108", edt="20200520", desc="四通新材"),
         AnalyzeTask("600707", sdt="20150301", edt="20210820", desc="彩虹股份"),
+        AnalyzeTask("002613", sdt="20150801", edt="20210820", desc="北玻股份"),
+        AnalyzeTask("002772", sdt="20160401", edt="20210701", desc="众兴菌业"),
     ]
 
     # 🎯 切换这里
-    task = tasks[7]
+    task = tasks[-1]
 
     try:
         symbol = task.symbol

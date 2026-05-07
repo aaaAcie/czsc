@@ -215,6 +215,7 @@ class SegmentAnalyzer:
         # 2. 准备滑窗缓存
         self._ma5_q  = collections.deque(maxlen=5)
         self._ma34_q = collections.deque(maxlen=34)
+        self._ma170_q = collections.deque(maxlen=170)
 
         # 3. 实例化子引擎（此时它们持有了空的 state 引用）
         self._trend_engine   = TrendEngine(self.state)
@@ -240,6 +241,7 @@ class SegmentAnalyzer:
 
         self._ma5_q.append(bar.close)
         self._ma34_q.append(bar.close)
+        self._ma170_q.append(bar.close)
 
         # MA5 不应受 MA34 冷启动门限制：满 5 根后立即写入缓存
         if len(self._ma5_q) == 5:
@@ -251,6 +253,8 @@ class SegmentAnalyzer:
         current_ma34 = sum(self._ma34_q) / 34
 
         bar.cache['ma34'] = current_ma34
+        if len(self._ma170_q) == 170:
+            bar.cache['ma170'] = sum(self._ma170_q) / 170
         current_ma5 = bar.cache.get('ma5')
 
         # --- 2. 中枢引擎（先于顶底引擎）---

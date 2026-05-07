@@ -47,12 +47,18 @@ class MooreCZSC:
         )
 
         # --- 日线级别线段 ---
-        self.daily_segment_analyzer = DailySegmentAnalyzer(self.segment_analyzer.segments)
+        self.daily_segment_analyzer = DailySegmentAnalyzer(
+            self.segment_analyzer.segments,
+            bars=self.segment_analyzer.state.bars_raw,
+        )
 
     def update(self, bar: RawBar):
         """流式喂入一根新 K 线，驱动所有子分析器"""
         self.segment_analyzer.update(bar)
-        self.daily_segment_analyzer.update(self.segment_analyzer.segments)
+        self.daily_segment_analyzer.update(
+            self.segment_analyzer.segments,
+            bars=self.segment_analyzer.state.bars_raw,
+        )
 
     # =========================================================================
     # 属性代理：将 segment_analyzer 的结果透传，维持对外接口不变
@@ -121,6 +127,10 @@ class MooreCZSC:
     @property
     def trend_low(self) -> Optional[float]:
         return self.segment_analyzer.trend_low
+
+    @property
+    def last_ma5(self) -> Optional[float]:
+        return self.segment_analyzer.state.last_ma5
 
     @property
     def daily_segments(self) -> List[DailySegment]:

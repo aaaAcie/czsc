@@ -18,6 +18,17 @@ def _seg_end_index(seg: MooreSegment) -> int:
     return seg.end_k.k_index
 
 
+def _turning_index(tk) -> int:
+    return tk.turning_k_index if tk.turning_k_index is not None else tk.k_index
+
+
+def _turning_dt(tk) -> datetime:
+    turning_k = getattr(tk, "turning_k", None)
+    if turning_k is not None:
+        return turning_k.dt
+    return tk.dt
+
+
 @dataclass
 class DailySegmentCenter:
     """日线级别线段中枢候选 / 活跃态对象。"""
@@ -33,11 +44,11 @@ class DailySegmentCenter:
 
     @property
     def start_dt(self) -> datetime:
-        return self.segments[0].sdt
+        return _turning_dt(self.segments[0].start_k)
 
     @property
     def end_dt(self) -> datetime:
-        return self.segments[-1].edt
+        return _turning_dt(self.segments[-1].end_k)
 
     @property
     def start_index(self) -> int:
@@ -70,11 +81,35 @@ class DailySegment:
 
     @property
     def sdt(self) -> datetime:
-        return self.start_seg.sdt
+        return self.confirm_start_dt
 
     @property
     def edt(self) -> datetime:
-        return self.end_seg.edt
+        return self.confirm_end_dt
+
+    @property
+    def price_start_dt(self) -> datetime:
+        return self.start_seg.start_k.dt
+
+    @property
+    def price_end_dt(self) -> datetime:
+        return self.end_seg.end_k.dt
+
+    @property
+    def confirm_start_dt(self) -> datetime:
+        return _turning_dt(self.start_seg.start_k)
+
+    @property
+    def confirm_end_dt(self) -> datetime:
+        return _turning_dt(self.end_seg.end_k)
+
+    @property
+    def confirm_start_index(self) -> int:
+        return _turning_index(self.start_seg.start_k)
+
+    @property
+    def confirm_end_index(self) -> int:
+        return _turning_index(self.end_seg.end_k)
 
     @property
     def start_price(self) -> float:

@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta
 
 from czsc.moore.analyze import MooreCZSC
-from czsc.moore.daily_segment import DailySegmentAnalyzer
+from czsc.moore.daily_segment import DailySegment, DailySegmentAnalyzer
 from czsc.moore.daily_segment.center_algo import find_b_point, find_d_point
 from czsc.moore.daily_segment.utils import slice_segments_from_anchor
 from czsc.moore.objects import MooreSegment, TurningK
@@ -26,9 +26,19 @@ def make_bar(idx: int, close_: float) -> RawBar:
     )
 
 
-def make_seg(start_idx: int, end_idx: int, direction: Direction, start_price: float, end_price: float) -> MooreSegment:
+def make_seg(
+    start_idx: int,
+    end_idx: int,
+    direction: Direction,
+    start_price: float,
+    end_price: float,
+    start_turning_idx: int | None = None,
+    end_turning_idx: int | None = None,
+) -> MooreSegment:
     start_bar = make_bar(start_idx, start_price)
     end_bar = make_bar(end_idx, end_price)
+    start_turning_bar = make_bar(start_turning_idx, start_price) if start_turning_idx is not None else start_bar
+    end_turning_bar = make_bar(end_turning_idx, end_price) if end_turning_idx is not None else end_bar
     start_mark = Mark.D if direction == Direction.Up else Mark.G
     end_mark = Mark.G if direction == Direction.Up else Mark.D
     start_tk = TurningK(
@@ -38,6 +48,8 @@ def make_seg(start_idx: int, end_idx: int, direction: Direction, start_price: fl
         mark=start_mark,
         price=start_price,
         k_index=start_idx,
+        trigger_k=start_turning_bar,
+        trigger_k_index=start_turning_idx if start_turning_idx is not None else start_idx,
     )
     end_tk = TurningK(
         symbol="TEST.DAILY",
@@ -46,6 +58,8 @@ def make_seg(start_idx: int, end_idx: int, direction: Direction, start_price: fl
         mark=end_mark,
         price=end_price,
         k_index=end_idx,
+        trigger_k=end_turning_bar,
+        trigger_k_index=end_turning_idx if end_turning_idx is not None else end_idx,
     )
     bars = [make_bar(i, start_price + (end_price - start_price) * (i - start_idx) / max(end_idx - start_idx, 1)) for i in range(start_idx, end_idx + 1)]
     return MooreSegment(
@@ -55,6 +69,21 @@ def make_seg(start_idx: int, end_idx: int, direction: Direction, start_price: fl
         direction=direction,
         bars=bars,
     )
+
+
+def make_ma_arrays(states: dict[int, int], size: int = 240) -> tuple[list[float | None], list[float | None]]:
+    ma34 = [None] * size
+    ma170 = [None] * size
+    for idx, state in states.items():
+        ma170[idx] = 10
+        ma34[idx] = 11 if state > 0 else 9 if state < 0 else 10
+    return ma34, ma170
+
+
+def make_analyzer_with_ma(states: dict[int, int], size: int = 240) -> DailySegmentAnalyzer:
+    analyzer = DailySegmentAnalyzer()
+    analyzer.state.ma34, analyzer.state.ma170 = make_ma_arrays(states, size=size)
+    return analyzer
 
 
 def test_slice_segments_from_anchor_dual_key():
@@ -116,3 +145,223 @@ def test_swallow_segment_direct_commit_and_moore_aliases():
     engine.daily_segment_analyzer.update([swallow])
     assert engine.daily_segments == engine.higher_segments
     assert engine.daily_active_center == engine.higher_active_center
+
+
+def test_trend_relationship_requires_unique_start_extreme_and_allows_equal_end_extreme():
+    analyzer = DailySegmentAnalyzer()
+    up_ok = [
+        make_seg(0, 1, Direction.Up, 10, 13),
+        make_seg(1, 2, Direction.Down, 13, 11),
+        make_seg(2, 3, Direction.Up, 11, 13),
+    ]
+    assert analyzer._check_global_trend_relationship(up_ok)
+
+    up_duplicate_start_low = [
+        make_seg(0, 1, Direction.Up, 10, 13),
+        make_seg(1, 2, Direction.Down, 13, 10),
+        make_seg(2, 3, Direction.Up, 10, 13),
+    ]
+    assert not analyzer._check_global_trend_relationship(up_duplicate_start_low)
+
+    down_ok = [
+        make_seg(0, 1, Direction.Down, 20, 17),
+        make_seg(1, 2, Direction.Up, 17, 19),
+        make_seg(2, 3, Direction.Down, 19, 17),
+    ]
+    assert analyzer._check_global_trend_relationship(down_ok)
+
+    down_duplicate_start_high = [
+        make_seg(0, 1, Direction.Down, 20, 17),
+        make_seg(1, 2, Direction.Up, 17, 20),
+        make_seg(2, 3, Direction.Down, 20, 17),
+    ]
+    assert not analyzer._check_global_trend_relationship(down_duplicate_start_high)
+
+
+def test_ma_cross_scans_between_turning_k_confirmations():
+    segs = [
+        make_seg(0, 1, Direction.Up, 10, 12, start_turning_idx=10, end_turning_idx=20),
+        make_seg(1, 2, Direction.Down, 12, 11, start_turning_idx=20, end_turning_idx=30),
+        make_seg(2, 3, Direction.Up, 11, 14, start_turning_idx=30, end_turning_idx=40),
+    ]
+
+    analyzer = make_analyzer_with_ma({10: 1, 25: -1, 40: 1})
+    assert analyzer._check_ma_cross_correlation(segs, analyzer.state.ma34, analyzer.state.ma170)
+
+    analyzer = make_analyzer_with_ma({10: 1, 25: 1, 40: -1})
+    assert analyzer._check_ma_cross_correlation(segs, analyzer.state.ma34, analyzer.state.ma170)
+
+    analyzer = make_analyzer_with_ma({10: 1, 40: 0})
+    assert not analyzer._check_ma_cross_correlation(segs, analyzer.state.ma34, analyzer.state.ma170)
+
+
+def test_daily_segment_exposes_turning_confirmation_time_separately_from_price_endpoint():
+    segs = [
+        make_seg(0, 1, Direction.Up, 10, 12, start_turning_idx=10, end_turning_idx=20),
+        make_seg(1, 2, Direction.Down, 12, 11, start_turning_idx=20, end_turning_idx=30),
+        make_seg(2, 3, Direction.Up, 11, 14, start_turning_idx=30, end_turning_idx=40),
+    ]
+
+    daily = DailySegment(
+        symbol="TEST.DAILY",
+        direction=Direction.Up,
+        start_seg=segs[0],
+        end_seg=segs[-1],
+        segments=segs,
+    )
+
+    assert daily.price_end_dt == make_bar(3, 14).dt
+    assert daily.confirm_end_index == 40
+    assert daily.edt == make_bar(40, 14).dt
+
+
+def test_ma_cross_allows_exactly_one_segment_lag():
+    segs = [
+        make_seg(0, 1, Direction.Up, 10, 12, start_turning_idx=10, end_turning_idx=20),
+        make_seg(1, 2, Direction.Down, 12, 11, start_turning_idx=20, end_turning_idx=30),
+        make_seg(2, 3, Direction.Up, 11, 14, start_turning_idx=30, end_turning_idx=40),
+    ]
+    lag = make_seg(3, 4, Direction.Down, 14, 12, start_turning_idx=40, end_turning_idx=50)
+    too_late = make_seg(4, 5, Direction.Up, 12, 15, start_turning_idx=50, end_turning_idx=60)
+
+    analyzer = make_analyzer_with_ma({10: 1, 40: 1, 50: -1, 60: -1})
+    assert analyzer._check_ma_cross_correlation(segs, analyzer.state.ma34, analyzer.state.ma170, lag)
+
+    analyzer = make_analyzer_with_ma({10: 1, 40: 1, 50: 1, 60: -1})
+    assert not analyzer._check_ma_cross_correlation(segs, analyzer.state.ma34, analyzer.state.ma170, lag)
+    assert analyzer._check_ma_cross_correlation(segs, analyzer.state.ma34, analyzer.state.ma170, too_late)
+
+
+def test_commit_selects_odd_window_from_continuous_start():
+    segs = [
+        make_seg(0, 1, Direction.Up, 10, 12, start_turning_idx=10, end_turning_idx=20),
+        make_seg(1, 2, Direction.Down, 12, 11, start_turning_idx=20, end_turning_idx=30),
+        make_seg(2, 3, Direction.Up, 11, 13, start_turning_idx=30, end_turning_idx=40),
+        make_seg(3, 4, Direction.Down, 13, 12, start_turning_idx=40, end_turning_idx=50),
+        make_seg(4, 5, Direction.Up, 12, 15, start_turning_idx=50, end_turning_idx=60),
+    ]
+    analyzer = make_analyzer_with_ma({10: 1, 40: 1, 60: -1})
+
+    assert analyzer._commit_segments_if_valid(segs)
+    assert len(analyzer.daily_segments) == 1
+    assert analyzer.daily_segments[0].segments == segs[:5]
+
+
+def test_live_processing_locks_ready_segment_and_restarts_from_its_endpoint():
+    segs = [
+        make_seg(0, 1, Direction.Down, 20, 16, start_turning_idx=10, end_turning_idx=20),
+        make_seg(1, 2, Direction.Up, 16, 18, start_turning_idx=20, end_turning_idx=30),
+        make_seg(2, 3, Direction.Down, 18, 10, start_turning_idx=30, end_turning_idx=40),
+        make_seg(3, 4, Direction.Up, 10, 13, start_turning_idx=40, end_turning_idx=50),
+        make_seg(4, 5, Direction.Down, 13, 11, start_turning_idx=50, end_turning_idx=60),
+        make_seg(5, 6, Direction.Up, 11, 15, start_turning_idx=60, end_turning_idx=70),
+    ]
+    analyzer = make_analyzer_with_ma({10: 1, 40: -1, 70: 1})
+
+    for seg in segs[:3]:
+        analyzer._process_new_segment(seg)
+
+    assert analyzer.daily_segments == []
+    assert analyzer.state.pending_daily_segments == segs[:3]
+    assert analyzer.state.current_segments == segs[:3]
+
+    for seg in segs[3:]:
+        analyzer._process_new_segment(seg)
+
+    assert len(analyzer.daily_segments) == 1
+    assert analyzer.daily_segments[0].segments == segs[:3]
+    assert analyzer.state.current_segments == segs[3:6]
+    assert analyzer.state.pending_daily_segments == segs[3:6]
+
+
+def test_breaking_lag_segment_can_confirm_previous_window_before_reset():
+    segs = [
+        make_seg(0, 1, Direction.Up, 10, 12, start_turning_idx=10, end_turning_idx=20),
+        make_seg(1, 2, Direction.Down, 12, 11, start_turning_idx=20, end_turning_idx=30),
+        make_seg(2, 3, Direction.Up, 11, 14, start_turning_idx=30, end_turning_idx=40),
+        make_seg(3, 4, Direction.Down, 14, 9, start_turning_idx=40, end_turning_idx=50),
+    ]
+    analyzer = make_analyzer_with_ma({10: 1, 40: 1, 50: -1})
+
+    for seg in segs:
+        analyzer._process_new_segment(seg)
+
+    assert analyzer.daily_segments == []
+    assert analyzer.state.pending_daily_segments == segs[:3]
+    assert analyzer.state.current_segments == segs
+
+
+def test_live_processing_extends_by_two_until_reverse_trend_forms():
+    segs = [
+        make_seg(0, 1, Direction.Up, 10, 12, start_turning_idx=10, end_turning_idx=20),
+        make_seg(1, 2, Direction.Down, 12, 11, start_turning_idx=20, end_turning_idx=30),
+        make_seg(2, 3, Direction.Up, 11, 13, start_turning_idx=30, end_turning_idx=40),
+        make_seg(3, 4, Direction.Down, 13, 12, start_turning_idx=40, end_turning_idx=50),
+        make_seg(4, 5, Direction.Up, 12, 15, start_turning_idx=50, end_turning_idx=60),
+        make_seg(5, 6, Direction.Down, 15, 13, start_turning_idx=60, end_turning_idx=70),
+        make_seg(6, 7, Direction.Up, 13, 14, start_turning_idx=70, end_turning_idx=80),
+        make_seg(7, 8, Direction.Down, 14, 9, start_turning_idx=80, end_turning_idx=90),
+    ]
+    analyzer = make_analyzer_with_ma({10: 1, 60: -1, 90: 1})
+
+    for seg in segs:
+        analyzer._process_new_segment(seg)
+
+    assert len(analyzer.daily_segments) == 1
+    assert analyzer.daily_segments[0].segments == segs[:5]
+    assert analyzer.state.current_segments == segs[5:]
+    assert analyzer.state.pending_daily_segments == segs[5:]
+
+
+def test_old_trend_break_no_longer_resets_running_candidate():
+    seg1 = make_seg(0, 1, Direction.Up, 10, 12, start_turning_idx=10, end_turning_idx=20)
+    seg2 = make_seg(1, 2, Direction.Down, 12, 9, start_turning_idx=20, end_turning_idx=30)
+    analyzer = make_analyzer_with_ma({10: 1, 30: -1})
+
+    analyzer._process_new_segment(seg1)
+    analyzer._process_new_segment(seg2)
+
+    assert analyzer.daily_segments == []
+    assert analyzer.state.current_segments == [seg1, seg2]
+    assert analyzer.state.continuity_broken is False
+
+
+def test_swallow_segment_can_also_participate_in_ordinary_window():
+    swallow = make_seg(0, 1, Direction.Up, 10, 12, start_turning_idx=10, end_turning_idx=20)
+    swallow.cache["is_macro_swallow"] = True
+    seg2 = make_seg(1, 2, Direction.Down, 12, 11, start_turning_idx=20, end_turning_idx=30)
+    seg3 = make_seg(2, 3, Direction.Up, 11, 14, start_turning_idx=30, end_turning_idx=40)
+    break_seg = make_seg(3, 4, Direction.Down, 14, 9, start_turning_idx=40, end_turning_idx=50)
+
+    analyzer = DailySegmentAnalyzer()
+    analyzer.state.ma34, analyzer.state.ma170 = make_ma_arrays({10: 1, 40: -1})
+    for seg in [swallow, seg2, seg3, break_seg]:
+        analyzer._process_new_segment(seg)
+
+    assert len(analyzer.daily_segments) == 1
+    assert analyzer.daily_segments[0].segments == [swallow]
+    assert analyzer.state.current_segments == [seg2, seg3, break_seg]
+
+
+def test_continuity_break_blocks_later_daily_segment_from_skipping_gap():
+    first = [
+        make_seg(0, 1, Direction.Up, 10, 12, start_turning_idx=10, end_turning_idx=20),
+        make_seg(1, 2, Direction.Down, 12, 11, start_turning_idx=20, end_turning_idx=30),
+        make_seg(2, 3, Direction.Up, 11, 14, start_turning_idx=30, end_turning_idx=40),
+    ]
+    failed = [
+        make_seg(3, 4, Direction.Down, 14, 13, start_turning_idx=40, end_turning_idx=50),
+        make_seg(4, 5, Direction.Up, 13, 14, start_turning_idx=50, end_turning_idx=60),
+        make_seg(5, 6, Direction.Down, 14, 12, start_turning_idx=60, end_turning_idx=70),
+    ]
+    later = [
+        make_seg(6, 7, Direction.Up, 12, 15, start_turning_idx=70, end_turning_idx=80),
+        make_seg(7, 8, Direction.Down, 15, 13, start_turning_idx=80, end_turning_idx=90),
+        make_seg(8, 9, Direction.Up, 13, 16, start_turning_idx=90, end_turning_idx=100),
+    ]
+    analyzer = make_analyzer_with_ma({10: 1, 40: -1, 70: -1, 100: 1})
+
+    assert analyzer._commit_segments_if_valid(first)
+    assert not analyzer._commit_segments_if_valid(failed)
+    analyzer.state.continuity_broken = True
+    assert not analyzer._commit_segments_if_valid(later)
