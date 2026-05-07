@@ -43,26 +43,7 @@ class DailySegmentAnalyzer:
 
     @property
     def daily_segments(self) -> List[DailySegment]:
-      # 末段未终结 Higher 线段的运行态输出
-      # return self.state.completed_segments
-        res = list(self.state.completed_segments)
-        if self.state.current_segments:
-            s = self.state
-            running_seg = DailySegment(
-                symbol=s.current_segments[0].symbol,
-                direction=s.current_segments[0].direction,
-                start_seg=s.current_segments[0],
-                end_seg=s.current_segments[-1],
-                segments=list(s.current_segments),
-                centers=[c for c in s.candidates if c.is_active],
-                cache={"is_live": True}
-            )
-            res.append(running_seg)
-        return res
-
-    @property
-    def current_segments(self) -> List[MooreSegment]:
-        return self.state.current_segments
+        return self.state.completed_segments
 
     @property
     def active_center(self) -> Optional[DailySegmentCenter]:

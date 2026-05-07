@@ -57,6 +57,40 @@ def _dummy_line(dates: list, name: str, icon_color: str) -> Line:
     )
 
 
+def _markpoint_series(dates: list, name: str, icon_color: str, data: list) -> Line:
+    """创建仅承载 markPoint 的独立图例系列。"""
+    if not data:
+        return None
+    return (
+        _dummy_line(dates, name, icon_color)
+        .set_series_opts(
+            markpoint_opts=opts.MarkPointOpts(
+                data=data,
+                label_opts=opts.LabelOpts(is_show=False),
+            )
+        )
+    )
+
+
+def _legend_group_series(dates: list, name: str, icon_color: str) -> Line:
+    """创建仅用于图例分组控制的占位系列。"""
+    return (
+        Line()
+        .add_xaxis([dates[0], dates[-1]])
+        .add_yaxis(
+            name, [None, None],
+            symbol="roundRect",
+            symbol_size=14,
+            linestyle_opts=opts.LineStyleOpts(width=0, opacity=0),
+            label_opts=opts.LabelOpts(is_show=False),
+            itemstyle_opts=opts.ItemStyleOpts(color=icon_color),
+        )
+        .set_series_opts(
+            linestyle_opts=opts.LineStyleOpts(width=0, opacity=0),
+        )
+    )
+
+
 def _seg_markline_data(segs: list, color: str, width: float, alpha: float = 0.85) -> list:
     """把线段列表转为 markLine data（支持 per-item lineStyle，用虚实区分 is_perfect）。"""
     data = []
@@ -67,6 +101,20 @@ def _seg_markline_data(segs: list, color: str, width: float, alpha: float = 0.85
              "symbol": "none",
              "lineStyle": {"color": color, "width": width, "type": tp, "opacity": alpha}},
             {"coord": [_dt_str(seg.end_k.dt), seg.end_k.price],
+             "symbol": "none"},
+        ])
+    return data
+
+
+def _daily_seg_markline_data(daily_segs: list, color: str, width: float, alpha: float = 0.9, line_type: str = "solid") -> list:
+    """把日线级别线段列表转为 markLine data。"""
+    data = []
+    for seg in daily_segs:
+        data.append([
+            {"coord": [_dt_str(seg.start_seg.start_k.dt), seg.start_seg.start_k.price],
+             "symbol": "none",
+             "lineStyle": {"color": color, "width": width, "type": line_type, "opacity": alpha}},
+            {"coord": [_dt_str(seg.end_seg.end_k.dt), seg.end_seg.end_k.price],
              "symbol": "none"},
         ])
     return data
@@ -106,18 +154,9 @@ def plot_moore_structure_echarts(
     macro_centers = getattr(engine, "macro_centers", getattr(engine, "all_centers", []))
     ghost_centers = getattr(engine, "ghost_centers", [])
 
-    # ── 诊断：实线但无中枢的微观线段 ─────────────────────────────────
-    for i, seg in enumerate(micro_segments):
-        if not seg.is_perfect:
-            continue
-        si, ei = seg.start_k.k_index, seg.end_k.k_index
-        seg_micro = [c for c in micro_centers if c.start_k_index <= ei and c.end_k_index >= si]
-        if not seg_micro:
-            logger.warning(
-                f"[诊断] 微观线段 {i} (v{i}-v{i+1}) 是实线但无微观中枢: "
-                f"{_dt_str(seg.start_k.dt)}→{_dt_str(seg.end_k.dt)} "
-                f"dir={seg.direction.value} k_idx=[{si},{ei}]"
-            )
+    daily_segments = getattr(engine, "daily_segments", getattr(engine, "higher_segments", []))
+    daily_active_center = getattr(engine, "daily_active_center", getattr(engine, "higher_active_center", None))
+    daily_archived_centers = getattr(engine, "daily_archived_centers", getattr(engine, "higher_archived_centers", []))
 
     # --- 【增压逻辑】：中枢层级过滤 ---
     # 1. 微观过滤：排除已被宏观审计拆解（进入幽灵仓）的微观中枢
@@ -319,8 +358,6 @@ def plot_moore_structure_echarts(
         )
 
     # ── 5. 中枢 markArea 数据分类 ─────────────────────────────────────
-    logger.info(f"三仓中枢统计 -> Macro: {len(macro_centers)}, Micro: {len(micro_centers)}, Ghost: {len(ghost_centers)}")
-
     def _prepare_area_data(clist, layer_name):
         data = []
         for ct in clist:
@@ -350,6 +387,39 @@ def plot_moore_structure_echarts(
     macro_area_data = _prepare_area_data(macro_centers, "macro")
     micro_area_data = _prepare_area_data(micro_centers, "micro")
     ghost_area_data = _prepare_area_data(ghost_centers, "ghost")
+
+    def _prepare_daily_center_area_data(clist, layer_name):
+        data = []
+        for idx, ct in enumerate(clist):
+            if not ct.segments:
+                continue
+            start_dt = ct.start_dt
+            end_dt = ct.end_dt
+            y_lo, y_hi = ct.low, ct.high
+
+            if layer_name == "daily":
+                fill, border = "rgba(231, 76, 60, 0.12)", "#C0392B"
+                border_type = "solid"
+            elif layer_name == "daily_active":
+                fill, border = "rgba(46, 204, 113, 0.14)", "#27AE60"
+                border_type = "solid"
+            else:
+                fill, border = "rgba(243, 156, 18, 0.10)", "#F39C12"
+                border_type = "dashed"
+
+            label_txt = f"D{idx} T{ct.overlap_type} {ct.status}"
+            data.append([
+                {
+                    "xAxis": _dt_str(start_dt), "yAxis": y_lo,
+                    "label": {"show": True, "position": "top", "formatter": label_txt, "fontSize": 9, "color": border, "opacity": 0.85},
+                    "itemStyle": {"color": fill, "borderWidth": 1.6, "borderColor": border, "opacity": 0.65, "borderType": border_type}
+                },
+                {"xAxis": _dt_str(end_dt), "yAxis": y_hi}
+            ])
+        return data
+
+    final_daily_center = daily_active_center or (daily_archived_centers[-1] if daily_archived_centers else None)
+    daily_center_area_data = _prepare_daily_center_area_data([final_daily_center] if final_daily_center else [], "daily_active")
     # ── 6. 构建各图例系列 ─────────────────────────────────────────────
     def _seg_series(name, seg_list, color, width, alpha=0.85):
         data = _seg_markline_data(seg_list, color, width, alpha)
@@ -405,8 +475,10 @@ def plot_moore_structure_echarts(
 
     # 微观线段（全部，统一灰色）
     s = _seg_series("微观线段", micro_all, "#555555", 2.5, alpha=0.75)
+    minute_series = []
+    daily_series = []
     if s:
-        overlay_series.append(s)
+        minute_series.append(s)
 
     # 宏观线段（全部合并，黑色，吞噬段线宽略大）
     def _macro_all_data():
@@ -424,27 +496,38 @@ def plot_moore_structure_echarts(
         return data
     s = _raw_seg_series("宏观线段", _macro_all_data(), "#000000")
     if s:
-        overlay_series.append(s)
+        minute_series.append(s)
+
+    # 日线级别线段（已完成）
+    s = _raw_seg_series("日线级别线段", _daily_seg_markline_data(daily_segments, "#C0392B", 4.5, alpha=0.95), "#C0392B")
+    if s:
+        daily_series.append(s)
 
     s = _raw_seg_series("演变路径", refresh_data, "#BBBBBB")
     if s:
-        overlay_series.append(s)
+        minute_series.append(s)
 
     s = _history_tk_scatter("历史刷新端点(顶)", refreshed_old_top, "#E67E22")
     if s:
-        overlay_series.append(s)
+        minute_series.append(s)
     s = _history_tk_scatter("历史刷新端点(底)", refreshed_old_bot, "#16A085")
     if s:
-        overlay_series.append(s)
+        minute_series.append(s)
 
     # 中枢绘制
     for name, data, color in [
         ("宏观中枢", macro_area_data, "#2980B9"),
         ("微观中枢", micro_area_data, "#8E44AD"),
         ("幽灵中枢", ghost_area_data, "#7F8C8D"),
+        ("日线级别中枢", daily_center_area_data, "#27AE60"),
     ]:
         s = _center_series(name, data, color)
-        if s: overlay_series.append(s)
+        if not s:
+            continue
+        if name.startswith("日线"):
+            daily_series.append(s)
+        else:
+            minute_series.append(s)
 
     # 顶底极值 Scatter（顶标签在上，底标签在下）
     sc_top = _tk_scatter("微观顶极值", top_tks, "top")
@@ -454,13 +537,24 @@ def plot_moore_structure_echarts(
     if sc_bot:
         overlay_series.append(sc_bot)
 
+    # 30分钟中枢确认k（紫色 CK / K0）单独成层，纳入 30 分钟图例分组
+    s = _markpoint_series(dates, "30分钟中枢确认k", "#BA68C8", tk_points_micro)
+    if s:
+        minute_series.append(s)
+
     # 转折K箭头（指向触发K线的高低点）
     arr_up = _arrow_series("向上转折确立", bot_tks, is_up=True)
     arr_dn = _arrow_series("向下转折确立", top_tks, is_up=False)
     if arr_up:
-        overlay_series.append(arr_up)
+        minute_series.append(arr_up)
     if arr_dn:
-        overlay_series.append(arr_dn)
+        minute_series.append(arr_dn)
+
+    # 图例分组：作为明显的批量开关按钮，并放在各自图层前面
+    overlay_series.append(_legend_group_series(dates, "━━ 日线 ━━", "#C0392B"))
+    overlay_series.extend(daily_series)
+    overlay_series.append(_legend_group_series(dates, "━━ 30分钟 ━━", "#7F8C8D"))
+    overlay_series.extend(minute_series)
 
     # ── 7. 主 K 线 ────────────────────────────────────────────────────
     kline = (
@@ -473,7 +567,7 @@ def plot_moore_structure_echarts(
                 border_color="#D32F2F", border_color0="#2E7D32",
             ),
             markpoint_opts=opts.MarkPointOpts(
-                data=tk_points_macro + tk_points_micro,
+                data=tk_points_macro,
                 label_opts=opts.LabelOpts(is_show=False)
             )
         )
@@ -581,7 +675,20 @@ def plot_moore_structure_echarts(
                 orient="vertical",
                 textstyle_opts=opts.TextStyleOpts(font_size=11),
                 selected_map={
+                    "━━ 30分钟 ━━": False,
+                    "━━ 日线 ━━": True,
+                    "微观线段": False,
+                    "宏观线段": False,
+                    "演变路径": False,
+                    "历史刷新端点(顶)": False,
+                    "历史刷新端点(底)": False,
+                    "微观中枢": False,
+                    "宏观中枢": False,
                     "幽灵中枢": True,
+                    "30分钟中枢确认k": False,
+                    "向上转折确立": False,
+                    "向下转折确立": False,
+                    "日线级别中枢": True,
                 }
             ),
             yaxis_opts=opts.AxisOpts(
@@ -598,12 +705,6 @@ def plot_moore_structure_echarts(
                 boundary_gap=True,
                 axisline_opts=opts.AxisLineOpts(is_on_zero=False),
                 splitline_opts=opts.SplitLineOpts(is_show=False),
-            ),
-        )
-        .set_series_opts(
-            markpoint_opts=opts.MarkPointOpts(
-                data=tk_points_macro + tk_points_micro,
-                label_opts=opts.LabelOpts(is_show=False),  # K0/CK 不显示文字标签
             ),
         )
     )
@@ -712,13 +813,67 @@ def plot_moore_structure_echarts(
                     }}
                 }}, 500);
             }});
+
+            // 图例分组联动：30分钟 / 日线
+            var legendGroup30m = [
+                "微观线段", "宏观线段", "演变路径",
+                "历史刷新端点(顶)", "历史刷新端点(底)",
+                "微观中枢", "宏观中枢", "幽灵中枢",
+                "30分钟中枢确认k",
+                "向上转折确立", "向下转折确立"
+            ];
+            var legendGroupDaily = [
+                "日线级别线段", "日线级别中枢"
+            ];
+            var legendGuard = false;
+
+            chart.on('legendselectchanged', function(params) {{
+                if (legendGuard) return;
+                if (params.name !== "━━ 30分钟 ━━" && params.name !== "━━ 日线 ━━") return;
+
+                legendGuard = true;
+                var names = params.name === "━━ 30分钟 ━━" ? legendGroup30m : legendGroupDaily;
+                var actionType = params.selected[params.name] ? 'legendSelect' : 'legendUnSelect';
+                names.forEach(function(name) {{
+                    chart.dispatchAction({{
+                        type: actionType,
+                        name: name
+                    }});
+                }});
+                legendGuard = false;
+            }});
+
+            // 页面初始化时，让分组按钮的选中状态真正同步到子图层
+            setTimeout(function() {{
+                var opt = chart.getOption();
+                var selected = (((opt || {{}}).legend || [{{}}])[0] || {{}}).selected || {{}};
+
+                legendGuard = true;
+                var dailyOn = selected["━━ 日线 ━━"] !== false;
+                legendGroupDaily.forEach(function(name) {{
+                    chart.dispatchAction({{
+                        type: dailyOn ? 'legendSelect' : 'legendUnSelect',
+                        name: name
+                    }});
+                }});
+
+                var minuteOn = selected["━━ 30分钟 ━━"] === true;
+                legendGroup30m.forEach(function(name) {{
+                    chart.dispatchAction({{
+                        type: minuteOn ? 'legendSelect' : 'legendUnSelect',
+                        name: name
+                    }});
+                }});
+                legendGuard = false;
+            }}, 50);
         }}, 500);
     }})();
     """
     grid.add_js_funcs(zoom_persistence_js)
 
-    grid.render(output_file)
-    logger.success(f"成功！ECharts 交互图已保存至: {os.path.abspath(output_file)}")
+    abs_output = os.path.abspath(output_file)
+    grid.render(abs_output)
+    logger.success(f"成功！ECharts 交互图已保存至: {abs_output}")
     return grid
 
 
@@ -737,16 +892,16 @@ if __name__ == "__main__":
     tasks = [
         AnalyzeTask("300371", sdt="20181220",edt="20201030", desc="汇中股份"),
         AnalyzeTask("002346", sdt="20180901", edt="20201001", desc="柘中股份"),
-        AnalyzeTask("sz002286", sdt="20210101", edt="20210701", desc="保利发展"),
+        AnalyzeTask("sz002286", sdt="20210101",edt="20210701", desc="保利发展"),
         AnalyzeTask("300137", sdt="20190415", edt="20201130", desc="先河环保"),
         AnalyzeTask("000993", sdt="20190515", edt="20200920", desc="闽东电力"),
         AnalyzeTask("002286", sdt="20200328", edt="20200810", desc="保龄宝"),
         AnalyzeTask("300428", sdt="20200108", edt="20200520", desc="四通新材"),
-
+        AnalyzeTask("600707", sdt="20150301", edt="20210820", desc="彩虹股份"),
     ]
 
     # 🎯 切换这里
-    task = tasks[5]
+    task = tasks[7]
 
     try:
         symbol = task.symbol
@@ -766,20 +921,25 @@ if __name__ == "__main__":
         #     f"replay_centers_after_macro_swallow={replay_centers_after_macro_swallow}"
         # )
 
-        total_fail = sum(engine._debug_rule_fail.values())
-        logger.info(
-            f"[诊断] 四法则拦截总计: {total_fail} 次 | "
-            f"法则1(3K): {engine._debug_rule_fail.get(1, 0)} | "
-            f"法则1.1(脱离): {engine._debug_rule_fail.get(1.1, 0)} | "
-            f"法则2(金死叉): {engine._debug_rule_fail.get(2, 0)} | "
-            f"法则3(中枢): {engine._debug_rule_fail.get(3, 0)}"
-        )
-        logger.info(
-            f"[诊断] turning_ks: {len(engine.turning_ks)} | "
-            f"触发: {engine._debug_trigger_count} | "
-            f"实体拦截: {engine._debug_body_filter} | "
-            f"candidate_tk: {engine.candidate_tk}"
-        )
+        display_tks = getattr(engine, "micro_turning_ks", engine.turning_ks)
+        print("TurningKs:")
+        for i, tk in enumerate(display_tks):
+            suffix = "T" if tk.mark == Mark.G else "B"
+            print(f"{_dt_str(tk.dt)} V{i}{suffix}")
+
+        daily_active_center = getattr(engine, "daily_active_center", getattr(engine, "higher_active_center", None))
+        daily_archived_centers = getattr(engine, "daily_archived_centers", getattr(engine, "higher_archived_centers", []))
+        final_daily_center = daily_active_center or (daily_archived_centers[-1] if daily_archived_centers else None)
+        if final_daily_center:
+            center_source = "active" if daily_active_center else "archived_last"
+            print(
+                f"DailyCenter: {center_source} "
+                f"{_dt_str(final_daily_center.start_dt)} -> {_dt_str(final_daily_center.end_dt)} "
+                f"[{final_daily_center.low:.3f}, {final_daily_center.high:.3f}] "
+                f"T{final_daily_center.overlap_type} {final_daily_center.status}"
+            )
+        else:
+            print("DailyCenter: None")
 
         output_dir = "moore_plots"
         os.makedirs(output_dir, exist_ok=True)

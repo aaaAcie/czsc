@@ -51,15 +51,15 @@ class MacroAuditEngine:
             tk_end = tks[pre_end_idx]
 
             if pre_end_idx > pre_start_idx + 1 and tk_start.mark != tk_end.mark:
-                print(
-                    f"  [Audit] Testing Pre-Round: "
-                    f"{tk_start.dt}({tk_start.mark.name}) -> "
-                    f"{tk_end.dt}({tk_end.mark.name}) swallow "
-                    f"{mid_same.dt}/{tk_target.dt}"
-                )
+                # print(
+                #     f"  [Audit] Testing Pre-Round: "
+                #     f"{tk_start.dt}({tk_start.mark.name}) -> "
+                #     f"{tk_end.dt}({tk_end.mark.name}) swallow "
+                #     f"{mid_same.dt}/{tk_target.dt}"
+                # )
 
                 if self._check_leap_growth_only(tk_start, tk_end, mid_same, tk_target):
-                    print(f"  [Audit] SUCCESS! Pre-Round Leaping from {tk_start.dt} to {tk_end.dt}")
+                    # print(f"  [Audit] SUCCESS! Pre-Round Leaping from {tk_start.dt} to {tk_end.dt}")
                     tks[fake_idx].maybe_is_fake = False
                     self._execute_leap_collapse(pre_start_idx, pre_end_idx)
                     return True
@@ -83,15 +83,15 @@ class MacroAuditEngine:
 
                 mid_same = tks[idx - 1]
                 tk_target = tks[idx]
-                print(
-                    f"  [Audit] Testing Leap Round {round_no}: "
-                    f"{tk_start.dt}({tk_start.mark.name}) -> "
-                    f"{tk_end.dt}({tk_end.mark.name}) swallow "
-                    f"{mid_same.dt}/{tk_target.dt}"
-                )
+                # print(
+                #     f"  [Audit] Testing Leap Round {round_no}: "
+                #     f"{tk_start.dt}({tk_start.mark.name}) -> "
+                #     f"{tk_end.dt}({tk_end.mark.name}) swallow "
+                #     f"{mid_same.dt}/{tk_target.dt}"
+                # )
 
                 if self._check_leap_physics(tk_start, tk_end, mid_same, tk_target):
-                    print(f"  [Audit] SUCCESS! Leaping from {tk_start.dt} to {tk_end.dt}")
+                    # print(f"  [Audit] SUCCESS! Leaping from {tk_start.dt} to {tk_end.dt}")
                     # 被审计的 fake 点已被处理，先撤销标签再塌陷。
                     tks[fake_idx].maybe_is_fake = False
                     self._execute_leap_collapse(start_idx, end_idx)

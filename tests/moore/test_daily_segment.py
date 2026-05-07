@@ -110,7 +110,7 @@ def test_swallow_segment_direct_commit_and_moore_aliases():
     assert len(analyzer.daily_segments) == 1
     assert analyzer.daily_segments[0].segments == [swallow]
     assert analyzer.daily_segments[0].cache["from_macro_swallow"] is True
-    assert analyzer.current_segments == []
+    assert analyzer.state.current_segments == []
 
     engine = MooreCZSC([])
     engine.daily_segment_analyzer.update([swallow])

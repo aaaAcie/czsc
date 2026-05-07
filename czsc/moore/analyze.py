@@ -127,10 +127,6 @@ class MooreCZSC:
         return self.daily_segment_analyzer.daily_segments
 
     @property
-    def daily_current_segments(self) -> List[MooreSegment]:
-        return self.daily_segment_analyzer.current_segments
-
-    @property
     def daily_active_center(self) -> Optional[DailySegmentCenter]:
         return self.daily_segment_analyzer.active_center
 
@@ -153,10 +149,6 @@ class MooreCZSC:
     @property
     def higher_segments(self) -> List[DailySegment]:
         return self.daily_segments
-
-    @property
-    def higher_current_segments(self) -> List[MooreSegment]:
-        return self.daily_current_segments
 
     @property
     def higher_active_center(self) -> Optional[DailySegmentCenter]:
