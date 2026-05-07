@@ -47,12 +47,17 @@ def build_scope_windows(
     old_trigger_idx: int,
     new_trigger_idx: int,
 ) -> Optional[ScopeWindows]:
-    """构造 old/new 两段区间；边界不合法时返回 None。"""
+    """构造 old/new 两段区间；边界不合法时返回 None。
+
+    区间定义：
+    - old_scope: [seg_start, old_trigger_idx]（闭区间）
+    - new_scope: (old_trigger_idx, new_trigger_idx]（前开后闭）
+    """
     if new_trigger_idx <= old_trigger_idx:
         return None
 
     old_scope = bars[seg_start : old_trigger_idx + 1]
-    new_scope = bars[seg_start : new_trigger_idx + 1]
+    new_scope = bars[old_trigger_idx + 1 : new_trigger_idx + 1]
     if not old_scope or not new_scope:
         return None
 

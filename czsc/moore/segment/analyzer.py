@@ -172,6 +172,7 @@ class SegmentState:
     # 宏观审计引擎配置
     # -------------------------------------------------------------------------
     enable_macro_audit: bool            = True  # False 时关闭吞噬/跃迁
+    enable_pre_round: bool              = True  # False 时关闭预备轮（Pre-Round）
     audit_link_rounds: int              = 5     # 左右连接机会统一：右侧成熟度 + 左侧回溯轮数
     replay_centers_after_macro_swallow: bool = True  # False 时吞噬后不重播吞噬窗口中枢
 
@@ -198,6 +199,7 @@ class SegmentAnalyzer:
         ma34_cross_as_valid_gate: bool = True,
         audit_link_rounds: int = 5,
         enable_macro_audit: bool = True,
+        enable_pre_round: bool = True,
         replay_centers_after_macro_swallow: bool = True,
     ):
         # 1. 准备共享状态容器（初始物理空间为空）
@@ -208,6 +210,7 @@ class SegmentAnalyzer:
             ma34_cross_as_valid_gate=ma34_cross_as_valid_gate,
             audit_link_rounds=audit_link_rounds,
             enable_macro_audit=enable_macro_audit,
+            enable_pre_round=enable_pre_round,
             replay_centers_after_macro_swallow=replay_centers_after_macro_swallow,
         )
         self.state = s

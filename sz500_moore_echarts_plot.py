@@ -951,10 +951,12 @@ if __name__ == "__main__":
         bars = research.get_raw_bars_origin(symbol, sdt=task.sdt, edt=task.edt)
 
         replay_centers_after_macro_swallow = False
+        enable_pre_round = False
         engine = MooreCZSC(
             bars,
             ma34_cross_as_valid_gate=True,
             audit_link_rounds=3,
+            enable_pre_round=enable_pre_round,
             replay_centers_after_macro_swallow=replay_centers_after_macro_swallow,
         )
         # logger.info(

@@ -42,27 +42,28 @@ class MacroAuditEngine:
         if idx is None or fake_idx is None:
             return False
 
-        pre_start_idx = idx - 2
-        pre_end_idx = idx + 1
-        if pre_start_idx >= 0 and pre_end_idx <= n:
-            tk_start = tks[pre_start_idx]
-            mid_same = tks[idx - 1]
-            tk_target = tks[idx]
-            tk_end = tks[pre_end_idx]
+        if s.enable_pre_round:
+            pre_start_idx = idx - 2
+            pre_end_idx = idx + 1
+            if pre_start_idx >= 0 and pre_end_idx <= n:
+                tk_start = tks[pre_start_idx]
+                mid_same = tks[idx - 1]
+                tk_target = tks[idx]
+                tk_end = tks[pre_end_idx]
 
-            if pre_end_idx > pre_start_idx + 1 and tk_start.mark != tk_end.mark:
-                # print(
-                #     f"  [Audit] Testing Pre-Round: "
-                #     f"{tk_start.dt}({tk_start.mark.name}) -> "
-                #     f"{tk_end.dt}({tk_end.mark.name}) swallow "
-                #     f"{mid_same.dt}/{tk_target.dt}"
-                # )
+                if pre_end_idx > pre_start_idx + 1 and tk_start.mark != tk_end.mark:
+                    # print(
+                    #     f"  [Audit] Testing Pre-Round: "
+                    #     f"{tk_start.dt}({tk_start.mark.name}) -> "
+                    #     f"{tk_end.dt}({tk_end.mark.name}) swallow "
+                    #     f"{mid_same.dt}/{tk_target.dt}"
+                    # )
 
-                if self._check_leap_growth_only(tk_start, tk_end, mid_same, tk_target):
-                    # print(f"  [Audit] SUCCESS! Pre-Round Leaping from {tk_start.dt} to {tk_end.dt}")
-                    tks[fake_idx].maybe_is_fake = False
-                    self._execute_leap_collapse(pre_start_idx, pre_end_idx)
-                    return True
+                    if self._check_leap_growth_only(tk_start, tk_end, mid_same, tk_target):
+                        # print(f"  [Audit] SUCCESS! Pre-Round Leaping from {tk_start.dt} to {tk_end.dt}")
+                        tks[fake_idx].maybe_is_fake = False
+                        self._execute_leap_collapse(pre_start_idx, pre_end_idx)
+                        return True
 
         for round_no in range(1, s.audit_link_rounds + 1):
             start_idx = idx - round_no
@@ -109,10 +110,10 @@ class MacroAuditEngine:
         """执行跃迁判定：法则一 (实力生长) OR 法则二 (重心演化)。"""
         s = self.state
 
-        seg_start = tk_start.k_index
-        old_trigger_idx = get_trigger_index(tk_pullback)
+        old_start_idx = tk_start.k_index
+        old_trigger_idx = get_trigger_index(tk_start)
         new_trigger_idx = get_trigger_index(tk_end)
-        scopes = build_scope_windows(s.bars_raw, seg_start, old_trigger_idx, new_trigger_idx)
+        scopes = build_scope_windows(s.bars_raw, old_start_idx, old_trigger_idx, new_trigger_idx)
         if scopes is None:
             return False
         refresh = evaluate_scope_refresh(tk_end.mark, scopes.old_scope, scopes.new_scope)
@@ -166,10 +167,10 @@ class MacroAuditEngine:
         """仅执行法则一（生长法则）的物理边际审判。"""
         s = self.state
 
-        seg_start = tk_start.k_index
-        old_trigger_idx = get_trigger_index(tk_pullback)
+        old_start_idx = tk_start.k_index
+        old_trigger_idx = get_trigger_index(tk_start)
         new_trigger_idx = get_trigger_index(tk_end)
-        scopes = build_scope_windows(s.bars_raw, seg_start, old_trigger_idx, new_trigger_idx)
+        scopes = build_scope_windows(s.bars_raw, old_start_idx, old_trigger_idx, new_trigger_idx)
         if scopes is None:
             return False
         refresh = evaluate_scope_refresh(tk_end.mark, scopes.old_scope, scopes.new_scope)

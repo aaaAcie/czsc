@@ -33,6 +33,7 @@ class MooreCZSC:
         ma34_cross_as_valid_gate: bool = True,
         audit_link_rounds: int = 5,
         enable_macro_audit: bool = True,
+        enable_pre_round: bool = True,
         replay_centers_after_macro_swallow: bool = True,
     ):
         # --- 30分钟线段级 ---
@@ -43,6 +44,7 @@ class MooreCZSC:
             ma34_cross_as_valid_gate=ma34_cross_as_valid_gate,
             audit_link_rounds=audit_link_rounds,
             enable_macro_audit=enable_macro_audit,
+            enable_pre_round=enable_pre_round,
             replay_centers_after_macro_swallow=replay_centers_after_macro_swallow,
         )
 
