@@ -940,10 +940,13 @@ if __name__ == "__main__":
         AnalyzeTask("600707", sdt="20150301", edt="20210820", desc="彩虹股份"),
         AnalyzeTask("002613", sdt="20150801", edt="20210820", desc="北玻股份"),
         AnalyzeTask("002772", sdt="20160401", edt="20210701", desc="众兴菌业"),
+        AnalyzeTask("000411", sdt="20160401", edt="20210701", desc="英特集团"),
+        AnalyzeTask("000553", sdt="20181015", edt="20210701", desc="安道麦A"),
+        AnalyzeTask("300339", sdt="20150415", edt="20210701", desc="润和软件"),
     ]
 
     # 🎯 切换这里
-    task = tasks[-2]
+    task = tasks[-1]
 
     try:
         symbol = task.symbol

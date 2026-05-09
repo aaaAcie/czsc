@@ -257,7 +257,7 @@ class MicroStructureEngine:
     def _check_and_update_reversal_ma5_gate(
         self, new_mark: Mark, candidate_idx: int, candidate_price: float
     ) -> bool:
-        """异向准入校验：候选点本身对标上一时刻包络基准。"""
+        """异向准入校验：候选点对标“截至候选K”的同段包络基准。"""
         s = self.s
         if not s.turning_ks:
             return True
@@ -266,24 +266,34 @@ class MicroStructureEngine:
         candidate_bar = s.bars_raw[candidate_idx]
         candidate_ma5 = candidate_bar.cache.get("ma5")
 
-        # 2. 对标“上一时刻包络快照”（避免当前 K 线先刷新再自我放行）
-        prev_max_ma5 = s.gate_prev_leg_max_ma5
-        prev_min_ma5 = s.gate_prev_leg_min_ma5
-        prev_max_price = s.gate_prev_leg_max_price
-        prev_min_price = s.gate_prev_leg_min_price
-        if None in (prev_max_ma5, prev_min_ma5, prev_max_price, prev_min_price):
-            # 冷启动首拍：无历史快照时不阻断
+        # 2. 包络区间口径：
+        # 左边界 = 最近一个已确认转折点；右边界 = 本次候选极值K（而非触发K）。
+        # 这样不会让候选点被“候选之后、触发之前”的走势反向污染。
+        anchor_idx = s.turning_ks[-1].k_index
+        if candidate_idx < anchor_idx:
             return True
+        seg_bars = s.bars_raw[anchor_idx : candidate_idx + 1]
+        if not seg_bars:
+            return True
+
+        seg_ma5 = [b.cache.get("ma5") for b in seg_bars if b.cache.get("ma5") is not None]
+        if not seg_ma5:
+            return True
+
+        seg_max_ma5 = max(seg_ma5)
+        seg_min_ma5 = min(seg_ma5)
+        seg_max_price = max(b.high for b in seg_bars)
+        seg_min_price = min(b.low for b in seg_bars)
 
         # 3. 对标快照包络（候选点口径）
         # 异向找顶：候选点触及/刷新上一时刻最高记录
         # 异向找底：候选点触及/刷新上一时刻最低记录
         if new_mark == Mark.G:
-            ma5_ok = (candidate_ma5 is not None) and (candidate_ma5 >= (prev_max_ma5 - 1e-8))
-            price_ok = candidate_price >= (prev_max_price - 1e-8)
+            ma5_ok = (candidate_ma5 is not None) and (candidate_ma5 >= (seg_max_ma5 - 1e-8))
+            price_ok = candidate_price >= (seg_max_price - 1e-8)
         else:
-            ma5_ok = (candidate_ma5 is not None) and (candidate_ma5 <= (prev_min_ma5 + 1e-8))
-            price_ok = candidate_price <= (prev_min_price + 1e-8)
+            ma5_ok = (candidate_ma5 is not None) and (candidate_ma5 <= (seg_min_ma5 + 1e-8))
+            price_ok = candidate_price <= (seg_min_price + 1e-8)
 
         # 只要 MA5 或价格任一维度触及快照边界，即视为合格候选
         return ma5_ok or price_ok
