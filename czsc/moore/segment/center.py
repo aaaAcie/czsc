@@ -642,6 +642,12 @@ class CenterEngine:
             ok_5k, ka_idx, ur_5k, lr_5k = self._check_5k_overlap_with_idx()
             if ok_5k:
                 s.center_method_found = "5K重叠"
+                # 展示口径同步：
+                # 对于 4K+离开K(第五K) 的成立场景，pending_close 时把右边界扩到首根离开K，
+                # 保证绘图时间区域包含“第五K”的时间。
+                if s.pending_close and s.center_end_k_index + 1 < len(s.bars_raw):
+                    s.center_end_k_index += 1
+                    s.center_end_dt = s.bars_raw[s.center_end_k_index].dt
                 # 【价格确权降级】：Style 不再直接改写实时轨道，除非用户逻辑特别要求
             else:
                 ok_2c, ur_2c, lr_2c = self._check_fan_zheng_liang_chuan_with_price()
@@ -910,7 +916,14 @@ class CenterEngine:
         if confirm_idx < 0:
             return False, -1, 0, 0
 
-        window_bars  = s.bars_raw[search_start : s.center_end_k_index + 1]
+        # 口径修正：
+        # pending_close 阶段 center_end_k_index 冻结在“最后一根在轨K”，
+        # 但 4K+跳空规则需要看到“首根离开K”来完成第五K确权。
+        window_end_idx = s.center_end_k_index
+        if s.pending_close and window_end_idx + 1 < len(s.bars_raw):
+            window_end_idx += 1
+
+        window_bars  = s.bars_raw[search_start : window_end_idx + 1]
 
         # 传入当前中枢线价格（仅保持接口兼容，5K最终确权按时间口径）
         center_line = s.center_lower_rail if s.center_direction == Direction.Up else s.center_upper_rail

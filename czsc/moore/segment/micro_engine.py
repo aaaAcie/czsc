@@ -12,6 +12,7 @@ from datetime import datetime
 from czsc.py.enum import Mark, Direction
 from czsc.py.objects import RawBar
 from ..objects import TurningK, MooreSegment
+from .helpers import DelayedJudgementHelper
 from .scope_utils import build_scope_windows, evaluate_scope_refresh, get_trigger_index
 
 
@@ -22,6 +23,12 @@ class MicroStructureEngine:
         self.s = state
         self.trend = trend_engine
         self.center = center_engine
+        self._delayed_judgement = DelayedJudgementHelper(
+            state,
+            has_center_between=self._has_center_between,
+            reset_locks=self._reset_locks,
+            update_segments=self._update_segments,
+        )
 
     # =========================================================================
     # 公开接口
@@ -583,43 +590,6 @@ class MicroStructureEngine:
         """确认转折点，更新系统状态"""
         s = self.s
 
-        # -----------------------------------------------------------------------
-        # 【滞后审判】实线保护法则
-        # 触发条件：
-        #   1. 当前确立的是异向转折点 C（方向与上一端点相反）
-        #   2. 存在备份端点 B（曾被同向刷新 B' 顶替，且 B 是实线段终点）
-        #   3. 新线段 B'C 是虚线（perfect_struct = False）
-        # 判定：若备份 B 到 C 之间存在有效中枢（BC 是实线） → 恢复 B，丢弃 B'，
-        #       此后 C 以 B 为起点，BC 成为实线段。
-        # 哲学意义：顶底刷新的合法性由刷新后连成的下一段（BC vs B'C）的虚实决定，
-        #           而非刷新前那段（AB vs AB'）—— AB 若为实线，AB' 必然也是实线，
-        #           两者比较无意义。
-        # -----------------------------------------------------------------------
-        if (
-            s.turning_ks
-            and s.turning_ks[-1].mark != final_tk.mark  # C 是异向转折
-            and s.refresh_backup_tk is not None          # 存在备份端点 B
-            and not perfect_struct                        # B'C 是虚线
-        ):
-            backup_b = s.refresh_backup_tk
-            # 检查 BC 是否为实线（区间内有有效中枢）
-            if self._has_center_between(backup_b.k_index, final_tk.k_index):
-                # BC 是实线 → 恢复 B，丢弃 B'
-                s.turning_ks.pop()           # 移除 B'
-                s.turning_ks.append(backup_b)  # 恢复 B
-                perfect_struct = True
-                # 重新计算 has_v（检查 B→C 区间内是否含肉眼可见中枢）
-                all_c = s.all_centers + s.potential_centers
-                has_visible = any(
-                    getattr(c, 'is_visible', False) for c in all_c
-                    if backup_b.k_index <= c.start_k_index <= final_tk.k_index
-                    and not getattr(c, 'is_ghost', False)
-                )
-
-        # 异向确立后，无论是否触发保护，都清零备份（等待下一轮可能的刷新）
-        if s.turning_ks and s.turning_ks[-1].mark != final_tk.mark:
-            s.refresh_backup_tk = None
-
         # ── 常规确立流程 ──────────────────────────────────────────────────────
         final_tk.is_valid = True
         final_tk.is_perfect = perfect_struct
@@ -628,6 +598,7 @@ class MicroStructureEngine:
         if final_tk.cache.get("micro_id") is None:
             s.micro_id_seed += 1
             final_tk.cache["micro_id"] = s.micro_id_seed
+        s.turning_tk_store[final_tk.cache.get("micro_id")] = final_tk
 
         if s.turning_ks and s.turning_ks[-1].mark == final_tk.mark:
             ref_tk = s.turning_ks[-2] if len(s.turning_ks) >= 2 else None
@@ -638,12 +609,13 @@ class MicroStructureEngine:
         final_tk.cache['leg_ma5_extreme'] = self._compute_ma5_extreme(final_tk.mark, start_idx, end_idx)
 
         # 同向替换：实现微观延伸（生长）
+        refreshed_old_tk = None
         if s.turning_ks and s.turning_ks[-1].mark == final_tk.mark:
             old_tk = s.turning_ks[-1]
-            # 【备份机制】：若旧端点是实线，保存备份，供异向转折点出现时的滞后审判使用。
-            # 若旧端点是虚线但已存在备份，保持备份不变（备份始终指向最近一次实线端点）。
-            if old_tk.is_perfect:
-                s.refresh_backup_tk = old_tk
+            refreshed_old_tk = old_tk
+            old_mid = old_tk.cache.get("micro_id")
+            if old_mid is not None:
+                s.turning_tk_store[old_mid] = old_tk
             # 记录同向刷新演变轨迹（用于图层“演变路径”可视化）
             s.refreshed_segments.append(
                 MooreSegment(
@@ -656,6 +628,13 @@ class MicroStructureEngine:
             s.turning_ks.pop()
 
         s.turning_ks.append(final_tk)
+
+        # 延迟结算链：同向刷新先入队，异向确立只推进状态，真实锚点出现后再结算。
+        if refreshed_old_tk is not None:
+            self._delayed_judgement.enqueue_or_advance(refreshed_old_tk, final_tk)
+        else:
+            self._delayed_judgement.enqueue_or_advance(None, final_tk)
+        self._delayed_judgement.resolve_ready()
 
         # 锁定点策略
         self._reset_locks()

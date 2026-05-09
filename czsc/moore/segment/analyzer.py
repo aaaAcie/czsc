@@ -43,7 +43,7 @@ from typing import List, Optional
 from czsc.py.objects import RawBar
 from czsc.py.enum import Mark, Direction
 
-from ..objects import TurningK, MooreCenter, MooreSegment
+from ..objects import TurningK, MooreCenter, MooreSegment, PendingJudgementNode
 from .micro_engine import MicroStructureEngine
 from .center import CenterEngine
 from .trend import TrendEngine
@@ -104,11 +104,17 @@ class SegmentState:
     special_waiting_mark: Optional[Mark] = None
     special_ext_idx_cache: Optional[int] = None
     micro_id_seed: int                  = 0
+    turning_tk_store: dict              = field(default_factory=dict)  # micro_id -> TurningK
     center_id_seed: int                 = 0
     # 【实线保护备份】：同向刷新 B→B' 时，若 B 是实线端点，则将 B 缓存于此；
     # 等待异向转折点 C 出现后，比较 B'C 与 BC 的虚实，若 B'C 是虚线而 BC 是实线，
     # 则恢复 B（滞后审判机制）。
     refresh_backup_tk: Optional['TurningK'] = None
+    pending_judgements: collections.deque = field(default_factory=collections.deque)  # deque[node_id]
+    judgement_nodes: dict = field(default_factory=dict)  # node_id -> PendingJudgementNode
+    judgement_id_seed: int = 0
+    last_resolve_anchor_id: Optional[int] = None
+    debug_judgement_events: list = field(default_factory=list)
     # 异向转折门槛：全时域双向最值包络追踪（实时客观，不依赖于信号触发更新）
     leg_max_ma5: Optional[float] = None
     leg_min_ma5: Optional[float] = None
@@ -678,6 +684,26 @@ class SegmentAnalyzer:
     @property
     def _debug_body_filter(self) -> int:
         return self.state.debug_body_filter
+
+    @property
+    def _debug_pending_judgements(self) -> list:
+        s = self.state
+        out = []
+        for node_id in list(s.pending_judgements):
+            node = s.judgement_nodes.get(node_id)
+            if not node:
+                continue
+            out.append({
+                "id": node.id,
+                "base_id": node.base_id,
+                "candidate_id": node.candidate_id,
+                "resolve_anchor_id": node.resolve_anchor_id,
+                "stage": node.stage,
+                "resolution": node.resolution,
+                "parent_id": node.parent_id,
+                "child_ids": list(node.child_ids),
+            })
+        return out
 
     def _check_actual_perfection(self, tk_start: Optional[TurningK], tk_end: TurningK) -> bool:
         """执行实时的结构完善性检查（Rule 3 的 Live 版本，供宏观审判层调用）

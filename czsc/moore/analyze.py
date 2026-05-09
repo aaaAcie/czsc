@@ -189,3 +189,7 @@ class MooreCZSC:
     @property
     def _debug_body_filter(self) -> int:
         return self.segment_analyzer._debug_body_filter
+
+    @property
+    def _debug_pending_judgements(self) -> list:
+        return self.segment_analyzer._debug_pending_judgements

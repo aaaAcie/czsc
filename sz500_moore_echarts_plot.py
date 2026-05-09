@@ -497,13 +497,13 @@ def plot_moore_structure_echarts(
                    label_opts=opts.LabelOpts(is_show=False),
                    itemstyle_opts=opts.ItemStyleOpts(color="#F39C12"))
         .add_yaxis("MA34", ma34_list, symbol="none", is_smooth=True,
-                   linestyle_opts=opts.LineStyleOpts(width=1.2, color="#2980B9"),
+                   linestyle_opts=opts.LineStyleOpts(width=1.2, color="#FF4081"),
+                   label_opts=opts.LabelOpts(is_show=False),
+                   itemstyle_opts=opts.ItemStyleOpts(color="#FF4081"))
+        .add_yaxis("MA170", ma170_list, symbol="none", is_smooth=True,
+                   linestyle_opts=opts.LineStyleOpts(width=1.4, color="#2980B9"),
                    label_opts=opts.LabelOpts(is_show=False),
                    itemstyle_opts=opts.ItemStyleOpts(color="#2980B9"))
-        .add_yaxis("MA170", ma170_list, symbol="none", is_smooth=True,
-                   linestyle_opts=opts.LineStyleOpts(width=1.4, color="#5D6D7E"),
-                   label_opts=opts.LabelOpts(is_show=False),
-                   itemstyle_opts=opts.ItemStyleOpts(color="#5D6D7E"))
         .set_global_opts(xaxis_opts=opts.AxisOpts(type_="category", is_scale=True))
     )
     overlay_series.append(line_ma)
@@ -633,10 +633,10 @@ def plot_moore_structure_echarts(
                         res += '<br/><span style=\"color:#F39C12\">● MA5: ' + parseFloat(m5).toFixed(2) + '</span>';
                     }
                     if(m34 != null && !isNaN(parseFloat(m34))){
-                        res += '  <span style=\"color:#2980B9\">● MA34: ' + parseFloat(m34).toFixed(2) + '</span>';
+                        res += '  <span style=\"color:#FF4081\">● MA34: ' + parseFloat(m34).toFixed(2) + '</span>';
                     }
                     if(m170 != null && !isNaN(parseFloat(m170))){
-                        res += '  <span style=\"color:#5D6D7E\">● MA170: ' + parseFloat(m170).toFixed(2) + '</span>';
+                        res += '  <span style=\"color:#2980B9\">● MA170: ' + parseFloat(m170).toFixed(2) + '</span>';
                     }
                     return res;
                 }"""),
@@ -943,6 +943,8 @@ if __name__ == "__main__":
         AnalyzeTask("000411", sdt="20160401", edt="20210701", desc="英特集团"),
         AnalyzeTask("000553", sdt="20181015", edt="20210701", desc="安道麦A"),
         AnalyzeTask("300339", sdt="20150415", edt="20210701", desc="润和软件"),
+        # AnalyzeTask("002222", sdt="20220415", edt="20250201", desc="福晶科技"),
+        AnalyzeTask("300490", sdt="20160115", edt="20210701", desc="华自科技"),
     ]
 
     # 🎯 切换这里
