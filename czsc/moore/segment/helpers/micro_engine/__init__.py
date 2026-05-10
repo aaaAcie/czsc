@@ -2,6 +2,7 @@
 """Helpers for micro engine."""
 
 from .candidate_commit import CandidateCommitHelper
+from .cold_start import ColdStartHelper
 from .delayed_judgement import DelayedJudgementHelper
 from .extreme_locator import ExtremeLocatorHelper
 from .refresh_physics import RefreshPhysicsHelper
@@ -12,6 +13,7 @@ from .trigger_gate import TriggerGateHelper
 
 __all__ = [
     "CandidateCommitHelper",
+    "ColdStartHelper",
     "DelayedJudgementHelper",
     "ExtremeLocatorHelper",
     "RefreshPhysicsHelper",

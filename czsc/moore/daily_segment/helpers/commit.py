@@ -14,6 +14,10 @@ from .non_same import try_non_same_candidate
 from .trend import check_global_trend_relationship
 from ..utils import seg_end_price, seg_start_price
 
+# 冷启动提交放宽开关：
+# 仅在 completed_segments 为空（首条日线段尚未提交）时，允许跳过“反向破前枢轴”硬门槛。
+ENABLE_COLD_START_RELAX_PIVOT_BREAK = True
+
 
 @dataclass(frozen=True)
 class WindowCandidate:
@@ -349,9 +353,18 @@ def find_delayed_commit_decision(
                 if not _is_strong_reverse_candidate(reverse, segments, ma34, ma170):
                     best_pending = primary.segments
                     continue
-                if not _reverse_breaks_primary_last_pivot(primary, reverse):
-                    best_pending = primary.segments
-                    continue
+                pivot_break_ok = _reverse_breaks_primary_last_pivot(primary, reverse)
+                if not pivot_break_ok:
+                    is_cold_start = len(completed_segments) == 0
+                    can_relax_cold_start = (
+                        ENABLE_COLD_START_RELAX_PIVOT_BREAK
+                        and is_cold_start
+                        and primary.start_offset == 0
+                        and primary.segments[0].cache.get("is_macro_swallow")
+                    )
+                    if not can_relax_cold_start:
+                        best_pending = primary.segments
+                        continue
 
                 possible_decision = CommitDecision(
                     start_offset=primary.start_offset,
@@ -360,6 +373,8 @@ def find_delayed_commit_decision(
                     pending_segments=reverse.segments,
                     tail_offset=primary.end_offset,
                 )
+                if allow_cold_start and primary.start_offset == 0 and primary.segments[0].cache.get("is_macro_swallow"):
+                    return possible_decision
 
                 confirmers = find_reverse_candidates(
                     segments,

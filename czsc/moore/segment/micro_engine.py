@@ -15,6 +15,7 @@ from ..objects import TurningK, MooreSegment
 from .helpers import (
     DelayedJudgementHelper,
     CandidateCommitHelper,
+    ColdStartHelper,
     TriggerGateHelper,
     ExtremeLocatorHelper,
     ReversalGateHelper,
@@ -42,6 +43,7 @@ class MicroStructureEngine:
             state,
             compute_ma5_extreme=self._compute_ma5_extreme,
         )
+        self._cold_start = ColdStartHelper(state)
         self._trigger_gate = TriggerGateHelper(state)
         self._extreme_locator = ExtremeLocatorHelper(state)
         self._reversal_gate = ReversalGateHelper(state)
@@ -57,6 +59,35 @@ class MicroStructureEngine:
         """顶底探测主循环"""
         s = self.s
         if s.last_ma5 is None: return
+        seed = self._cold_start.try_seed_initial_anchor(bar, k_index)
+        if seed is not None:
+            ext_bar = seed["ext_bar"]
+            seed_tk = TurningK(
+                symbol=ext_bar.symbol,
+                dt=ext_bar.dt,
+                raw_bar=ext_bar,
+                k_index=seed["ext_idx"],
+                trigger_k=seed["trigger_bar"],
+                trigger_k_index=seed["trigger_index"],
+                mark=seed["seed_mark"],
+                price=seed["seed_price"],
+            )
+            seed_tk.cache["cold_start_seed"] = True
+            if not s.turning_ks:
+                self._confirm_candidate(seed_tk, perfect_struct=False, has_visible=False)
+            else:
+                old = s.turning_ks[0]
+                old_mid = old.cache.get("micro_id")
+                if old_mid is not None:
+                    seed_tk.cache["micro_id"] = old_mid
+                    s.turning_tk_store[old_mid] = seed_tk
+                s.turning_ks[0] = seed_tk
+                s.segment_start_extreme = seed_tk.price
+                self._reset_locks()
+                self._update_segments()
+                self.trend.update_trend_state(seed_tk)
+            self._update_leg_realtime_extremes(bar, k_index, ma5)
+            return
 
         # --- 0. 门控快照 ---
         # 先记录“上一时刻包络”，供本根候选做准入校验（先检查，再刷新）。
@@ -406,6 +437,7 @@ class MicroStructureEngine:
         
         self._update_segments()
         self.trend.update_trend_state(final_tk)
+        self._cold_start.on_turning_committed()
 
     def _reset_locks(self):
         """重建锁定点状态：最新点不锁，倒数二/三锁定。"""

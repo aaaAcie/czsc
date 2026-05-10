@@ -632,6 +632,27 @@ def test_600707_daily_segments_match_expected_long_trend_and_swallow():
     assert engine.daily_segments[1].segments[0].cache.get("is_macro_swallow") is True
 
 
+def test_regression_002346_cold_start_keeps_initial_swallow_trend():
+    bars = research.get_raw_bars_origin("002346", sdt="20161201", edt="20210301")
+    if not bars:
+        pytest.skip("no bars for 002346")
+
+    engine = MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+    )
+    label, _ = make_visible_labelers(engine)
+
+    daily_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_segments]
+
+    assert daily_pairs[:2] == [("mV0T", "mV11B"), ("mV11B", "mV14T")]
+    assert engine.daily_segments[0].segments[0].cache.get("is_macro_swallow") is True
+
+
 def test_600707_daily_centers_use_completed_source_and_owner_chain():
     engine = make_600707_engine()
     label, _ = make_visible_labelers(engine)
@@ -821,4 +842,4 @@ def test_002613_daily_segments_match_expected_blue_split():
 
     daily_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_segments]
 
-    assert daily_pairs[:3] == [("V1T", "V18B"), ("V18B", "V23T"), ("V23T", "V30B")]
+    assert daily_pairs[:3] == [("V1T", "V20B"), ("V20B", "V25T"), ("V25T", "V32B")]
