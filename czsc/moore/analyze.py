@@ -54,6 +54,7 @@ class MooreCZSC:
         self.daily_segment_analyzer = DailySegmentAnalyzer(
             self.segment_analyzer.segments,
             bars=self.segment_analyzer.state.bars_raw,
+            micro_segments=self.segment_analyzer.micro_segments,
         )
 
     def update(self, bar: RawBar):
@@ -62,6 +63,7 @@ class MooreCZSC:
         self.daily_segment_analyzer.update(
             self.segment_analyzer.segments,
             bars=self.segment_analyzer.state.bars_raw,
+            micro_segments=self.segment_analyzer.micro_segments,
         )
 
     # =========================================================================
@@ -147,6 +149,14 @@ class MooreCZSC:
     @property
     def daily_centers(self) -> List[DailySegmentCenter]:
         return self.daily_segment_analyzer.daily_centers
+
+    @property
+    def daily_center_source_segments(self) -> List[MooreSegment]:
+        return self.daily_segment_analyzer.daily_center_source_segments
+
+    @property
+    def daily_refined_segments(self) -> List[MooreSegment]:
+        return self.daily_segment_analyzer.refined_segments
 
     @property
     def daily_archived_centers(self) -> List[DailySegmentCenter]:

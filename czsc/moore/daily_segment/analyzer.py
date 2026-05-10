@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import List, Optional, Sequence
 
+from czsc.py.enum import Direction, Mark
 from czsc.py.objects import RawBar
 
 from ..objects import MooreSegment
@@ -44,14 +45,26 @@ from .utils import (
 class DailySegmentAnalyzer:
     """消费 30F 宏观线段构造日线级别线段与中枢。"""
 
-    def __init__(self, segments: Optional[Sequence[MooreSegment]] = None, bars: Optional[Sequence[RawBar]] = None):
+    def __init__(
+        self,
+        segments: Optional[Sequence[MooreSegment]] = None,
+        bars: Optional[Sequence[RawBar]] = None,
+        micro_segments: Optional[Sequence[MooreSegment]] = None,
+    ):
         self.state = DailySegmentState()
         if bars:
             self.state.bars_raw = list(bars)
+        if micro_segments:
+            self.state.micro_segments = list(micro_segments)
         if segments:
-            self.update(list(segments))
+            self.update(list(segments), micro_segments=micro_segments)
 
-    def update(self, segments: Sequence[MooreSegment], bars: Optional[Sequence[RawBar]] = None):
+    def update(
+        self,
+        segments: Sequence[MooreSegment],
+        bars: Optional[Sequence[RawBar]] = None,
+        micro_segments: Optional[Sequence[MooreSegment]] = None,
+    ):
         s = self.state
         sig = tuple(
             (
@@ -65,7 +78,9 @@ class DailySegmentAnalyzer:
         )
         if bars is not None:
             s.bars_raw = list(bars)
-        if sig == s.last_sig and bars is None:
+        if micro_segments is not None:
+            s.micro_segments = list(micro_segments)
+        if sig == s.last_sig and bars is None and micro_segments is None:
             return
         s.last_sig = sig
         s.base_segments = list(segments)
@@ -82,6 +97,14 @@ class DailySegmentAnalyzer:
     @property
     def daily_centers(self) -> List[DailySegmentCenter]:
         return self.state.daily_centers
+
+    @property
+    def daily_center_source_segments(self) -> List[MooreSegment]:
+        return self.state.daily_center_source_segments
+
+    @property
+    def refined_segments(self) -> List[MooreSegment]:
+        return self.state.refined_segments
 
     @property
     def archived_centers(self) -> List[DailySegmentCenter]:
@@ -136,21 +159,276 @@ class DailySegmentAnalyzer:
     def _is_excluded_from_daily_center(self, seg: MooreSegment) -> bool:
         """Hook for daily-center source filtering.
 
-        Today the only default exclusion is the macro swallow segment that has
-        already been promoted into daily-segment evidence.  Callers can extend
-        the mouth by setting ``exclude_from_daily_center`` in segment cache.
+        Callers can extend the mouth by setting ``exclude_from_daily_center`` in
+        segment cache.  Macro swallow segments are not excluded here by default:
+        only swallow segments promoted to a daily segment are expanded at the
+        daily-segment source layer.
         """
-        return bool(seg.cache.get("exclude_from_daily_center") or seg.cache.get("is_macro_swallow"))
+        return bool(seg.cache.get("exclude_from_daily_center"))
 
     def _daily_center_source_segments(self) -> List[MooreSegment]:
         return [seg for seg in self.state.base_segments if not self._is_excluded_from_daily_center(seg)]
 
+    @staticmethod
+    def _turning_id(tk) -> Optional[int]:
+        return tk.cache.get("source_micro_id", tk.cache.get("micro_id"))
+
+    @staticmethod
+    def _clone_source_segment(seg: MooreSegment, cache_updates: Optional[dict] = None) -> MooreSegment:
+        cache = dict(seg.cache)
+        if cache_updates:
+            cache.update(cache_updates)
+        return MooreSegment(
+            symbol=seg.symbol,
+            start_k=seg.start_k,
+            end_k=seg.end_k,
+            direction=seg.direction,
+            bars=list(seg.bars),
+            centers=list(seg.centers),
+            cache=cache,
+        )
+
+    def _micro_segments_between(self, start_id, end_id) -> List[MooreSegment]:
+        if start_id is None or end_id is None:
+            return []
+        segments = []
+        for seg in self.state.micro_segments:
+            sid = self._turning_id(seg.start_k)
+            eid = self._turning_id(seg.end_k)
+            if sid is None or eid is None:
+                continue
+            lo = min(start_id, end_id)
+            hi = max(start_id, end_id)
+            if lo <= sid and eid <= hi:
+                segments.append(seg)
+        return sorted(segments, key=lambda seg: (seg_start_index(seg), seg_end_index(seg)))
+
+    def _expand_daily_swallow_segment(self, seg: MooreSegment) -> List[MooreSegment]:
+        source_segments = self._micro_segments_between(self._turning_id(seg.start_k), self._turning_id(seg.end_k))
+        if not source_segments:
+            return [self._clone_source_segment(seg)]
+        owner = (seg_start_index(seg), seg_end_index(seg))
+        return [
+            self._clone_source_segment(
+                source,
+                {
+                    "source_for_daily_center": "expanded_from_swallow",
+                    "expanded_from_macro_segment": owner,
+                },
+            )
+            for source in source_segments
+        ]
+
     def _daily_segment_center_source_segments(self, daily_segment: DailySegment) -> List[MooreSegment]:
-        return [seg for seg in daily_segment.segments if not self._is_excluded_from_daily_center(seg)]
+        source_segments: List[MooreSegment] = []
+        expand_daily_swallow = bool(daily_segment.cache.get("from_macro_swallow"))
+        for seg in daily_segment.segments:
+            if self._is_excluded_from_daily_center(seg):
+                continue
+            if expand_daily_swallow and seg.cache.get("is_macro_swallow"):
+                source_segments.extend(self._expand_daily_swallow_segment(seg))
+            else:
+                source_segments.append(seg)
+        return sorted(source_segments, key=lambda seg: (seg_start_index(seg), seg_end_index(seg)))
 
     @staticmethod
     def _center_segment_keys(center: DailySegmentCenter) -> set:
         return {(seg_start_index(seg), seg_end_index(seg)) for seg in center.segments}
+
+    @staticmethod
+    def _tk_key(tk) -> tuple:
+        return (tk.k_index, tk.dt, tk.price, tk.mark.value)
+
+    @classmethod
+    def _seg_key(cls, seg: MooreSegment) -> tuple:
+        return (cls._tk_key(seg.start_k), cls._tk_key(seg.end_k))
+
+    @staticmethod
+    def _turning_range(seg: MooreSegment) -> tuple:
+        start = turning_index(seg.start_k)
+        end = turning_index(seg.end_k)
+        return (min(start, end), max(start, end))
+
+    @staticmethod
+    def _desired_owner_mark(point_name: str, trend_direction: Direction) -> Mark:
+        down_marks = {"A": Mark.D, "B": Mark.G, "C": Mark.D, "D": Mark.G}
+        up_marks = {"A": Mark.G, "B": Mark.D, "C": Mark.G, "D": Mark.D}
+        return (down_marks if trend_direction == Direction.Down else up_marks)[point_name]
+
+    def _owner_endpoint_for_point(
+        self,
+        point_name: str,
+        point: tuple,
+        source_segments: Sequence[MooreSegment],
+        trend_direction: Direction,
+    ) -> Optional[dict]:
+        idx = point[0]
+        desired_mark = self._desired_owner_mark(point_name, trend_direction)
+        matches = []
+        for seg in source_segments:
+            left, right = self._turning_range(seg)
+            if not (left <= idx <= right):
+                continue
+            for side, tk in (("start", seg.start_k), ("end", seg.end_k)):
+                if tk.mark == desired_mark:
+                    matches.append((seg, side, tk))
+        if not matches:
+            return None
+        seg, side, tk = min(matches, key=lambda item: abs(turning_index(item[2]) - idx))
+        return {
+            "point": point_name,
+            "owner_endpoint": self._tk_key(tk),
+            "owner_endpoint_index": turning_index(tk),
+            "owner_endpoint_side": side,
+            "owner_segment": self._seg_key(seg),
+        }
+
+    def _segment_between_endpoints(self, start_tk, end_tk, source_segments: Sequence[MooreSegment]) -> Optional[MooreSegment]:
+        start_key = self._tk_key(start_tk)
+        end_key = self._tk_key(end_tk)
+        for seg in source_segments:
+            if self._tk_key(seg.start_k) == start_key and self._tk_key(seg.end_k) == end_key:
+                return seg
+        return None
+
+    def _owner_chain_evidence(
+        self,
+        result: dict,
+        source_segments: Sequence[MooreSegment],
+        trend_direction: Direction,
+    ) -> dict:
+        points = result.get("points") or {}
+        point_owners = {}
+        owner_chain = []
+        for point_name in ("A", "B", "C", "D"):
+            point = points.get(point_name)
+            if point is None:
+                continue
+            owner = self._owner_endpoint_for_point(point_name, point, source_segments, trend_direction)
+            if owner is None:
+                point_owners[point_name] = None
+                continue
+            point_owners[point_name] = owner
+            owner_chain.append(owner["owner_endpoint"])
+
+        owner_keys = [owner.get("owner_endpoint") for owner in point_owners.values() if owner]
+        continuous = len(owner_keys) == len(point_owners) and len(owner_keys) >= 2
+        if continuous:
+            for left, right in zip(owner_keys, owner_keys[1:]):
+                if not any(self._tk_key(seg.start_k) == left and self._tk_key(seg.end_k) == right for seg in source_segments):
+                    continuous = False
+                    break
+
+        return {
+            "point_owners": point_owners,
+            "owner_chain": owner_chain,
+            "owner_chain_valid": continuous,
+        }
+
+    def _bars_between_tks(self, start_tk, end_tk) -> List[RawBar]:
+        left = min(start_tk.k_index, end_tk.k_index)
+        right = max(start_tk.k_index, end_tk.k_index)
+        return [
+            bar
+            for idx, bar in enumerate(self.state.bars_raw)
+            if left <= getattr(bar, "id", idx) <= right
+        ]
+
+    def _make_refined_segment(self, start_tk, end_tk, source_result: dict) -> MooreSegment:
+        direction = Direction.Up if end_tk.price >= start_tk.price else Direction.Down
+        return MooreSegment(
+            symbol=start_tk.symbol,
+            start_k=start_tk,
+            end_k=end_tk,
+            direction=direction,
+            bars=self._bars_between_tks(start_tk, end_tk),
+            cache={
+                "source": "daily_segment_owner_chain_repair",
+                "repair_reason": "missing_continuous_owner_segment_for_badc",
+                "source_center_key": (
+                    seg_start_index(source_result["segments"][0]),
+                    seg_end_index(source_result["segments"][-1]),
+                    round(source_result["high"], 8),
+                    round(source_result["low"], 8),
+                ),
+            },
+        )
+
+    def _candidate_owner_chain_repair(
+        self,
+        result: dict,
+        source_segments: Sequence[MooreSegment],
+        trend_direction: Direction,
+    ) -> Optional[dict]:
+        if result.get("overlap_type") != 3 or not {"A", "B", "C", "D"} <= set(result.get("points", {})):
+            return None
+        segs = result.get("segments") or []
+        if len(segs) < 5:
+            return None
+
+        a_tk = segs[0].end_k
+        b_tk = segs[1].end_k
+        d_owner = self._owner_endpoint_for_point("D", result["points"]["D"], source_segments, trend_direction)
+        d_tk = None
+        if d_owner is not None:
+            d_key = d_owner["owner_endpoint"]
+            for seg in source_segments:
+                if self._tk_key(seg.start_k) == d_key:
+                    d_tk = seg.start_k
+                    break
+                if self._tk_key(seg.end_k) == d_key:
+                    d_tk = seg.end_k
+                    break
+        if d_tk is None:
+            d_tk = segs[-2].end_k
+
+        c_mark = self._desired_owner_mark("C", trend_direction)
+        b_idx = turning_index(b_tk)
+        d_idx = turning_index(d_tk)
+        lo, hi = sorted((b_idx, d_idx))
+        candidates = []
+        for seg in source_segments:
+            for tk in (seg.start_k, seg.end_k):
+                idx = turning_index(tk)
+                if lo < idx < hi and tk.mark == c_mark:
+                    candidates.append(tk)
+        if not candidates:
+            return None
+        c_tk = min(candidates, key=turning_index)
+
+        refined_segment = None
+        if self._segment_between_endpoints(c_tk, d_tk, source_segments) is None:
+            refined_segment = self._make_refined_segment(c_tk, d_tk, result)
+
+        owner_chain = [self._tk_key(tk) for tk in (a_tk, b_tk, c_tk, d_tk)]
+        return {
+            "source": "daily_segment_owner_chain_repair",
+            "source_segments_kind": "owner_chain_repair",
+            "repair_reason": "missing_continuous_owner_segment_for_badc" if refined_segment else "",
+            "point_owners": {
+                "A": {"owner_endpoint": self._tk_key(a_tk)},
+                "B": {"owner_endpoint": self._tk_key(b_tk)},
+                "C": {"owner_endpoint": self._tk_key(c_tk), "inferred": True},
+                "D": {"owner_endpoint": self._tk_key(d_tk)},
+            },
+            "owner_chain": owner_chain,
+            "owner_chain_valid": refined_segment is None,
+            "refined_segments": [refined_segment] if refined_segment else [],
+        }
+
+    @staticmethod
+    def _compact_repair_source_segments(source_segments: Sequence[MooreSegment]) -> List[MooreSegment]:
+        """Build a compact diagnostic source for candidates hidden by swallows.
+
+        This is intentionally separate from the official daily-center source
+        sequence.  It lets the center layer explain an older/failed compact
+        candidate and derive refined segments without mutating 30F facts.
+        """
+        return [
+            seg
+            for seg in source_segments
+            if not seg.cache.get("is_macro_swallow") and not seg.cache.get("exclude_from_daily_center")
+        ]
 
     @staticmethod
     def _center_generation_rank(center: DailySegmentCenter) -> tuple:
@@ -202,14 +480,27 @@ class DailySegmentAnalyzer:
     def _rebuild_daily_centers(self):
         s = self.state
         centers: List[DailySegmentCenter] = []
+        s.daily_center_source_segments = []
+        s.refined_segments = []
         seen = set()
+        refined_seen = set()
         for daily_segment in s.completed_segments:
             source_segments = self._daily_segment_center_source_segments(daily_segment)
+            s.daily_center_source_segments.extend(source_segments)
             for start in range(max(0, len(source_segments) - 3)):
                 result = find_center(source_segments[start:], s.ma34, trend_direction=daily_segment.direction)
                 if not result:
                     continue
                 seg_slice = result["segments"]
+                owner_evidence = self._owner_chain_evidence(result, source_segments, daily_segment.direction)
+                repair_evidence = self._candidate_owner_chain_repair(result, source_segments, daily_segment.direction)
+                if repair_evidence:
+                    for refined in repair_evidence.get("refined_segments", []):
+                        refined_key = self._seg_key(refined)
+                        if refined_key in refined_seen:
+                            continue
+                        refined_seen.add(refined_key)
+                        s.refined_segments.append(refined)
                 key = (
                     seg_start_index(seg_slice[0]),
                     seg_end_index(seg_slice[-1]),
@@ -232,13 +523,54 @@ class DailySegmentAnalyzer:
                         cache={
                             "identity_key": key,
                             "source": "daily_segment_internal",
+                            "source_segments_kind": "expanded_continuous_30f",
                             "daily_segment_direction": daily_segment.direction.value,
                             "generation_index": max(point[0] for point in result["points"].values()),
                             "third_entry_index": self._third_segment_entry_index(result, s.ma34),
-                            "excluded_reasons": ("is_macro_swallow", "exclude_from_daily_center"),
+                            "expanded_segments": [
+                                self._seg_key(seg)
+                                for seg in source_segments
+                                if seg.cache.get("source_for_daily_center") == "expanded_from_swallow"
+                            ],
+                            **owner_evidence,
+                            "repair": repair_evidence,
+                            "refined_segments": [
+                                self._seg_key(seg)
+                                for seg in (repair_evidence or {}).get("refined_segments", [])
+                            ],
+                            "repair_reason": (repair_evidence or {}).get("repair_reason", ""),
+                            "excluded_reasons": ("exclude_from_daily_center",),
                         },
                     )
                 )
+
+            repair_source_segments = self._compact_repair_source_segments(source_segments)
+            if repair_source_segments and repair_source_segments != list(source_segments):
+                repair_seen = set()
+                for start in range(max(0, len(repair_source_segments) - 3)):
+                    result = find_center(repair_source_segments[start:], s.ma34, trend_direction=daily_segment.direction)
+                    if not result:
+                        continue
+                    repair_key = (
+                        seg_start_index(result["segments"][0]),
+                        seg_end_index(result["segments"][-1]),
+                        round(result["high"], 8),
+                        round(result["low"], 8),
+                        result["overlap_type"],
+                        result["status"],
+                    )
+                    if repair_key in repair_seen:
+                        continue
+                    repair_seen.add(repair_key)
+                    repair_evidence = self._candidate_owner_chain_repair(result, source_segments, daily_segment.direction)
+                    if not repair_evidence:
+                        continue
+                    for refined in repair_evidence.get("refined_segments", []):
+                        refined_key = self._seg_key(refined)
+                        if refined_key in refined_seen:
+                            continue
+                        refined_seen.add(refined_key)
+                        s.refined_segments.append(refined)
 
         type3 = [c for c in centers if c.overlap_type == 3]
         for c in centers:

@@ -189,6 +189,9 @@ def plot_moore_structure_echarts(
     daily_centers = getattr(engine, "daily_centers", [])
     daily_active_center = getattr(engine, "daily_active_center", getattr(engine, "higher_active_center", None))
     daily_archived_centers = getattr(engine, "daily_archived_centers", getattr(engine, "higher_archived_centers", []))
+    daily_refined_segments = getattr(engine, "daily_refined_segments", None)
+    if daily_refined_segments is None:
+        daily_refined_segments = getattr(getattr(engine, "daily_segment_analyzer", None), "refined_segments", [])
 
     # --- 【增压逻辑】：中枢层级过滤 ---
     # 1. 微观过滤：排除已被宏观审计拆解（进入幽灵仓）的微观中枢
@@ -344,6 +347,30 @@ def plot_moore_structure_echarts(
     micro_unswallowed = [s for s in micro_segments if not _is_sw(s)]
     macro_all    = [s for s in macro_segments]         # 宏观全部，不区分吸噬与否
     macro_swallow = [s for s in macro_segments if s.cache.get("is_macro_swallow", False)]  # 仅用于宽度计算
+
+    def _tk_key(tk):
+        return (tk.k_index, tk.dt, tk.price)
+
+    refined_ranges = []
+    refined_endpoint_keys = set()
+    for seg in daily_refined_segments:
+        left = min(seg.start_k.k_index, seg.end_k.k_index)
+        right = max(seg.start_k.k_index, seg.end_k.k_index)
+        refined_ranges.append((left, right))
+        refined_endpoint_keys.add((_tk_key(seg.start_k), _tk_key(seg.end_k)))
+
+    def _is_replaced_by_refined(seg):
+        if not refined_ranges:
+            return False
+        seg_key = (_tk_key(seg.start_k), _tk_key(seg.end_k))
+        if seg_key in refined_endpoint_keys:
+            return False
+        left = min(seg.start_k.k_index, seg.end_k.k_index)
+        right = max(seg.start_k.k_index, seg.end_k.k_index)
+        return any(ref_left <= left and right <= ref_right for ref_left, ref_right in refined_ranges)
+
+    macro_display = [seg for seg in macro_all if not _is_replaced_by_refined(seg)]
+    macro_display.extend(daily_refined_segments)
 
     # 只要存在幽灵数据就展示对应叠层，不再因为存在吞噬映射而隐藏证据。
     show_ghost_overlay = True
@@ -521,14 +548,17 @@ def plot_moore_structure_echarts(
     # 宏观线段（全部合并，黑色，吞噬段线宽略大）
     def _macro_all_data():
         data = []
-        for seg in macro_all:
+        for seg in macro_display:
             is_sw = seg.cache.get("is_macro_swallow", False)
-            tp = "solid" if seg.is_perfect else "dashed"
-            w = 4 if is_sw else 2.5
+            is_refined = seg.cache.get("source") == "daily_segment_owner_chain_repair"
+            tp = "solid" if is_refined or seg.is_perfect else "dashed"
+            color = "#D35400" if is_refined else "#000000"
+            w = 4 if is_sw or is_refined else 2.5
+            opacity = 0.96 if is_refined else 0.92
             data.append([
                 {"coord": [_dt_str(seg.start_k.dt), seg.start_k.price],
                  "symbol": "none",
-                 "lineStyle": {"color": "#000000", "width": w, "type": tp, "opacity": 0.92}},
+                 "lineStyle": {"color": color, "width": w, "type": tp, "opacity": opacity}},
                 {"coord": [_dt_str(seg.end_k.dt), seg.end_k.price], "symbol": "none"},
             ])
         return data
@@ -1003,7 +1033,7 @@ if __name__ == "__main__":
         fallback_daily_center = daily_active_center or (daily_archived_centers[-1] if daily_archived_centers else None)
         debug_daily_centers = daily_centers or ([fallback_daily_center] if fallback_daily_center else [])
         if debug_daily_centers:
-            center_source = "filtered_30f" if daily_centers else ("active" if daily_active_center else "archived_last")
+            center_source = "daily_center_source_30f" if daily_centers else ("active" if daily_active_center else "archived_last")
             print(
                 f"DailyCenters: {center_source} count={len(debug_daily_centers)}"
             )

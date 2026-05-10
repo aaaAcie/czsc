@@ -95,6 +95,40 @@ def set_ma34(analyzer: DailySegmentAnalyzer, values: dict[int, float], size: int
         analyzer.state.ma34[idx] = value
 
 
+def make_600707_engine() -> MooreCZSC:
+    bars = research.get_raw_bars_origin("600707", sdt="20140601", edt="20210820")
+    if not bars:
+        pytest.skip("no bars for 600707")
+    return MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+    )
+
+
+def make_visible_labelers(engine: MooreCZSC, prefix: str = "mV"):
+    display_tks = getattr(engine, "micro_turning_ks", engine.turning_ks)
+    label_by_key = {
+        (tk.k_index, tk.dt, tk.price): f"{prefix}{i}{'T' if tk.mark == Mark.G else 'B'}"
+        for i, tk in enumerate(display_tks)
+    }
+    label_by_owner_key = {
+        (tk.k_index, tk.dt, tk.price, tk.mark.value): f"{prefix}{i}{'T' if tk.mark == Mark.G else 'B'}"
+        for i, tk in enumerate(display_tks)
+    }
+
+    def label(tk):
+        return label_by_key[(tk.k_index, tk.dt, tk.price)]
+
+    def owner_label(key):
+        return label_by_owner_key[key]
+
+    return label, owner_label
+
+
 def test_slice_segments_from_anchor_dual_key():
     seg1 = make_seg(0, 2, Direction.Up, 10, 12)
     seg2 = make_seg(3, 5, Direction.Down, 12, 11)
@@ -461,6 +495,44 @@ def test_swallow_segment_can_also_participate_in_ordinary_window():
     assert analyzer.state.current_segments == [swallow, seg2, seg3, break_seg]
 
 
+def test_daily_center_source_expands_qualified_daily_swallow_only():
+    swallow = make_seg(0, 30, Direction.Up, 10, 13, start_turning_idx=0, end_turning_idx=30)
+    swallow.cache["is_macro_swallow"] = True
+    swallow.start_k.cache["micro_id"] = 1
+    swallow.end_k.cache["micro_id"] = 4
+
+    micro_12 = make_seg(0, 10, Direction.Up, 10, 11, start_turning_idx=0, end_turning_idx=10)
+    micro_23 = make_seg(10, 20, Direction.Down, 11, 10.5, start_turning_idx=10, end_turning_idx=20)
+    micro_34 = make_seg(20, 30, Direction.Up, 10.5, 13, start_turning_idx=20, end_turning_idx=30)
+    for seg, start_id, end_id in [(micro_12, 1, 2), (micro_23, 2, 3), (micro_34, 3, 4)]:
+        seg.start_k.cache["micro_id"] = start_id
+        seg.end_k.cache["micro_id"] = end_id
+
+    analyzer = DailySegmentAnalyzer(micro_segments=[micro_12, micro_23, micro_34])
+    daily_swallow = DailySegment(
+        symbol="TEST.DAILY",
+        direction=Direction.Up,
+        start_seg=swallow,
+        end_seg=swallow,
+        segments=[swallow],
+        cache={"from_macro_swallow": True},
+    )
+    ordinary = DailySegment(
+        symbol="TEST.DAILY",
+        direction=Direction.Up,
+        start_seg=swallow,
+        end_seg=swallow,
+        segments=[swallow],
+    )
+
+    expanded = analyzer._daily_segment_center_source_segments(daily_swallow)
+    kept = analyzer._daily_segment_center_source_segments(ordinary)
+
+    assert [(seg.start_k.cache["micro_id"], seg.end_k.cache["micro_id"]) for seg in expanded] == [(1, 2), (2, 3), (3, 4)]
+    assert all(seg.cache["source_for_daily_center"] == "expanded_from_swallow" for seg in expanded)
+    assert kept == [swallow]
+
+
 def test_continuity_break_blocks_later_daily_segment_from_skipping_gap():
     first = [
         make_seg(0, 1, Direction.Up, 10, 12, start_turning_idx=10, end_turning_idx=20),
@@ -550,26 +622,8 @@ def test_delayed_confirmation_keeps_best_endpoint_until_reverse_daily_candidate_
 
 
 def test_600707_daily_segments_match_expected_long_trend_and_swallow():
-    bars = research.get_raw_bars_origin("600707", sdt="20140601", edt="20210820")
-    if not bars:
-        pytest.skip("no bars for 600707")
-
-    engine = MooreCZSC(
-        bars,
-        ma34_cross_as_valid_gate=True,
-        ma34_cross_expand_one_k=False,
-        audit_link_rounds=3,
-        enable_pre_round=True,
-        replay_centers_after_macro_swallow=False,
-    )
-    display_tks = getattr(engine, "micro_turning_ks", engine.turning_ks)
-    label_by_key = {
-        (tk.k_index, tk.dt, tk.price): f"mV{i}{'T' if tk.mark == Mark.G else 'B'}"
-        for i, tk in enumerate(display_tks)
-    }
-
-    def label(tk):
-        return label_by_key[(tk.k_index, tk.dt, tk.price)]
+    engine = make_600707_engine()
+    label, _ = make_visible_labelers(engine)
 
     daily_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_segments]
 
@@ -578,68 +632,45 @@ def test_600707_daily_segments_match_expected_long_trend_and_swallow():
     assert engine.daily_segments[1].segments[0].cache.get("is_macro_swallow") is True
 
 
-def test_600707_daily_centers_use_filtered_30f_segments():
-    bars = research.get_raw_bars_origin("600707", sdt="20140601", edt="20210820")
-    if not bars:
-        pytest.skip("no bars for 600707")
-
-    engine = MooreCZSC(
-        bars,
-        ma34_cross_as_valid_gate=True,
-        ma34_cross_expand_one_k=False,
-        audit_link_rounds=3,
-        enable_pre_round=True,
-        replay_centers_after_macro_swallow=False,
-    )
-    display_tks = getattr(engine, "micro_turning_ks", engine.turning_ks)
-    label_by_key = {
-        (tk.k_index, tk.dt, tk.price): f"mV{i}{'T' if tk.mark == Mark.G else 'B'}"
-        for i, tk in enumerate(display_tks)
-    }
-
-    def label(tk):
-        return label_by_key[(tk.k_index, tk.dt, tk.price)]
+def test_600707_daily_centers_use_completed_source_and_owner_chain():
+    engine = make_600707_engine()
+    label, _ = make_visible_labelers(engine)
 
     centers = engine.daily_centers
     assert centers
     first = centers[0]
 
-    assert (label(first.segments[0].start_k), label(first.segments[-1].end_k)) == ("mV1T", "mV9T")
+    assert (label(first.segments[0].start_k), label(first.segments[-1].end_k)) == ("mV1T", "mV8B")
     assert first.overlap_type == 3
     assert first.status == "FINAL"
     assert round(first.low, 3) == 11.431
     assert round(first.high, 3) == 11.875
     assert round(first.points["A"][1], 3) == 11.431
     assert round(first.points["B"][1], 3) == 11.875
-    assert all(not seg.cache.get("is_macro_swallow") for seg in first.segments)
+    assert first.cache["source_segments_kind"] == "expanded_continuous_30f"
+
+
+def test_regression_600707_direct_center_owner_chain_stays_v14_v15_v18_v19():
+    engine = make_600707_engine()
+    _, owner_label = make_visible_labelers(engine)
+
+    # 直接链回归：最终 [8.046, 8.160] 必须继续由已有连续 owner 链生成。
+    direct = next(c for c in engine.daily_centers if round(c.low, 3) == 8.046 and round(c.high, 3) == 8.160)
+    assert direct.overlap_type == 3
+    assert direct.status == "FINAL"
+    assert direct.cache["owner_chain_valid"] is True
+    assert [owner_label(key) for key in direct.cache["owner_chain"]] == ["mV14B", "mV15T", "mV18B", "mV19T"]
+    assert any(seg.cache.get("is_macro_swallow") for seg in direct.segments)
 
 
 def test_600707_daily_centers_follow_parent_daily_segment_direction():
-    bars = research.get_raw_bars_origin("600707", sdt="20140601", edt="20210820")
-    if not bars:
-        pytest.skip("no bars for 600707")
-
-    engine = MooreCZSC(
-        bars,
-        ma34_cross_as_valid_gate=True,
-        ma34_cross_expand_one_k=False,
-        audit_link_rounds=3,
-        enable_pre_round=True,
-        replay_centers_after_macro_swallow=False,
-    )
-    display_tks = getattr(engine, "micro_turning_ks", engine.turning_ks)
-    label_by_key = {
-        (tk.k_index, tk.dt, tk.price): f"mV{i}{'T' if tk.mark == Mark.G else 'B'}"
-        for i, tk in enumerate(display_tks)
-    }
-
-    def label(tk):
-        return label_by_key[(tk.k_index, tk.dt, tk.price)]
+    engine = make_600707_engine()
+    label, _ = make_visible_labelers(engine)
 
     center = next(
         c
         for c in engine.daily_centers
-        if (label(c.segments[0].start_k), label(c.segments[-1].end_k)) == ("mV1T", "mV9T")
+        if (label(c.segments[0].start_k), label(c.segments[-1].end_k)) == ("mV1T", "mV8B")
     )
 
     assert center.cache["daily_segment_direction"] == Direction.Down.value
@@ -647,34 +678,47 @@ def test_600707_daily_centers_follow_parent_daily_segment_direction():
 
 
 def test_600707_daily_centers_drop_overlapping_sliding_derivatives():
-    bars = research.get_raw_bars_origin("600707", sdt="20140601", edt="20210820")
-    if not bars:
-        pytest.skip("no bars for 600707")
-
-    engine = MooreCZSC(
-        bars,
-        ma34_cross_as_valid_gate=True,
-        ma34_cross_expand_one_k=False,
-        audit_link_rounds=3,
-        enable_pre_round=True,
-        replay_centers_after_macro_swallow=False,
-    )
-    display_tks = getattr(engine, "micro_turning_ks", engine.turning_ks)
-    label_by_key = {
-        (tk.k_index, tk.dt, tk.price): f"mV{i}{'T' if tk.mark == Mark.G else 'B'}"
-        for i, tk in enumerate(display_tks)
-    }
-
-    def label(tk):
-        return label_by_key[(tk.k_index, tk.dt, tk.price)]
+    engine = make_600707_engine()
+    label, _ = make_visible_labelers(engine)
 
     spans = [(label(c.segments[0].start_k), label(c.segments[-1].end_k)) for c in engine.daily_centers]
 
-    assert ("mV1T", "mV9T") in spans
-    assert ("mV10B", "mV24B") in spans
+    assert ("mV1T", "mV8B") in spans
+    assert ("mV11T", "mV20B") in spans
     assert ("mV9T", "mV20B") not in spans
     assert ("mV2B", "mV10B") not in spans
     assert ("mV3T", "mV11T") not in spans
+
+
+def test_regression_600707_candidate_owner_repair_infers_v14_to_v19_without_mutating_30f():
+    engine = make_600707_engine()
+    label, owner_label = make_visible_labelers(engine)
+    analyzer = engine.daily_segment_analyzer
+    daily_segment = engine.daily_segments[0]
+    full_source = analyzer._daily_segment_center_source_segments(daily_segment)
+    compact_source = analyzer._compact_repair_source_segments(full_source)
+
+    # 反推链回归：若 compact 候选 [8.466, 8.629] 被拿来解释，
+    # 必须归因到 mV10B -> mV11T -> mV14B -> mV19T，并只生成日线层 refined segment。
+    target_result = None
+    for start in range(max(0, len(compact_source) - 3)):
+        result = find_center(compact_source[start:], analyzer.state.ma34, trend_direction=daily_segment.direction)
+        if result and round(result["low"], 3) == 8.466 and round(result["high"], 3) == 8.629:
+            target_result = result
+            break
+
+    assert target_result is not None
+    repair = analyzer._candidate_owner_chain_repair(target_result, full_source, daily_segment.direction)
+
+    assert repair is not None
+    assert repair["source_segments_kind"] == "owner_chain_repair"
+    assert repair["repair_reason"] == "missing_continuous_owner_segment_for_badc"
+    assert [owner_label(key) for key in repair["owner_chain"]] == ["mV10B", "mV11T", "mV14B", "mV19T"]
+    assert [(label(seg.start_k), label(seg.end_k)) for seg in repair["refined_segments"]] == [("mV14B", "mV19T")]
+
+    raw_30f_spans = {(label(seg.start_k), label(seg.end_k)) for seg in engine.segments}
+    assert ("mV14B", "mV19T") not in raw_30f_spans
+    assert ("mV14B", "mV19T") in {(label(seg.start_k), label(seg.end_k)) for seg in analyzer.refined_segments}
 
 
 def test_overlapping_daily_centers_keep_first_generated_type3():
