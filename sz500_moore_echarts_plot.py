@@ -954,14 +954,14 @@ if __name__ == "__main__":
         AnalyzeTask("000993", sdt="20190515",edt="20200920", desc="闽东电力"),
         AnalyzeTask("002286", sdt="20200328", edt="20200810", desc="保龄宝"),
         AnalyzeTask("300428", sdt="20200108", edt="20200520", desc="四通新材"),
-        AnalyzeTask("002613", sdt="20150801", edt="20210820", desc="北玻股份"),
         AnalyzeTask("002772", sdt="20160401", edt="20210701", desc="众兴菌业"),
         AnalyzeTask("000411", sdt="20160401", edt="20210701", desc="英特集团"),
         AnalyzeTask("000553", sdt="20181015", edt="20210701", desc="安道麦A"),
         AnalyzeTask("300339", sdt="20150415", edt="20210701", desc="润和软件"),
+        AnalyzeTask("002613", sdt="20160801", edt="20210820", desc="北玻股份"),
         AnalyzeTask("600707", sdt="20140601", edt="20210820", desc="彩虹股份"),
-        # AnalyzeTask("002222", sdt="20220415", edt="20250201", desc="福晶科技"),
         AnalyzeTask("300490", sdt="20160115", edt="20210701", desc="华自科技"),
+        # AnalyzeTask("002222", sdt="20220415", edt="20250201", desc="福晶科技"),
     ]
 
     # 🎯 切换这里

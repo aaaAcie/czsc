@@ -3,6 +3,11 @@
 
 from ....objects import PendingJudgementNode
 
+# 本地实验开关：是否启用异向 C->D 回流 B' 分支。
+# True: 开启异向分支（会触发 rollback_c_and_promote_d_to_b_prime）
+# False: 关闭异向分支（仅走同向延迟结算主干）
+ENABLE_REVERSAL_FALLBACK = False
+
 
 class DelayedJudgementHelper:
     def __init__(self, state, has_center_between, reset_locks, update_segments):
@@ -162,7 +167,7 @@ class DelayedJudgementHelper:
                 if a_tk is not None:
                     node.ad_perfect = self._has_center_between(a_tk.k_index, d_tk.k_index)
 
-            if (node.cd_perfect is False) and (node.ad_perfect is True):
+            if ENABLE_REVERSAL_FALLBACK and (node.cd_perfect is False) and (node.ad_perfect is True):
                 node.resolution = "rollback_c_and_promote_d_to_b_prime"
                 self._apply_rollback_c_promote_d(node)
                 changed = True
@@ -187,6 +192,23 @@ class DelayedJudgementHelper:
         for node_id in list(s.pending_judgements):
             node = s.judgement_nodes.get(node_id)
             if not node or node.stage != "ready_resolve" or node.resolve_anchor_id is None:
+                continue
+
+            # 异向分支开启且已在 wait_reversal_eval 阶段完成结构改写时，
+            # 这里直接收口，避免再走一轮 rollback_base/keep_candidate 导致重复回写。
+            if ENABLE_REVERSAL_FALLBACK and node.d_candidate_id is not None and node.resolution == "rollback_c_and_promote_d_to_b_prime":
+                anchor_tk = self._get_tk_by_id(node.resolve_anchor_id)
+                node.stage = "resolved"
+                if anchor_tk is not None:
+                    node.resolved_k_idx = anchor_tk.k_index
+                    node.resolved_dt = anchor_tk.dt
+                s.debug_judgement_events.append({
+                    "event": "resolved",
+                    "node_id": node.id,
+                    "resolution": node.resolution,
+                    "resolve_anchor_id": node.resolve_anchor_id,
+                    "dt": anchor_tk.dt if anchor_tk is not None else None,
+                })
                 continue
 
             if s.last_resolve_anchor_id == node.resolve_anchor_id:
@@ -240,12 +262,26 @@ class DelayedJudgementHelper:
         """C-D 不完美且 A-D 完美：撤销 C，D 回流为 B'。"""
         c_idx, c_tk = self._find_tk_in_turnings(node.resolve_anchor_id)
         d_idx, d_tk = self._find_tk_in_turnings(node.d_candidate_id)
+        bp_idx, bp_tk = self._find_tk_in_turnings(node.candidate_id)
         if c_idx < 0 or d_idx < 0 or c_tk is None or d_tk is None:
             return
 
-        if c_idx < d_idx:
+        # 1) 先移除 C（异向待定点）
+        if c_idx >= 0:
             self.s.turning_ks.pop(c_idx)
-            d_idx -= 1
+            if d_idx > c_idx:
+                d_idx -= 1
+            if bp_idx > c_idx:
+                bp_idx -= 1
 
+        # 2) 若链上已有 B'（candidate），用 D 直接覆盖 B'，避免同向相邻残留。
+        #    否则保留 D 在原位（仅更新节点 candidate_id）。
+        if bp_idx >= 0:
+            self.s.turning_ks[bp_idx] = d_tk
+            # 若 D 还在其他位置，移除其原位置，保证链唯一。
+            if d_idx != bp_idx and 0 <= d_idx < len(self.s.turning_ks):
+                self.s.turning_ks.pop(d_idx)
+
+        # 3) 节点 candidate 改指向 D
         node.candidate_id = node.d_candidate_id
         self.s.turning_tk_store[node.d_candidate_id] = d_tk

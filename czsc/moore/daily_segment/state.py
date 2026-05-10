@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 from ..objects import MooreSegment
 from czsc.py.objects import RawBar
@@ -30,6 +30,6 @@ class DailySegmentState:
     anchor_dt: Optional[datetime] = None
     anchor_completed_segments: List[DailySegment] = field(default_factory=list)
 
-    last_sig: Optional[Tuple[Tuple[datetime, datetime, bool], ...]] = None
+    last_sig: Optional[tuple] = None
     pending_anchor_snapshot: bool = False
     continuity_broken: bool = False

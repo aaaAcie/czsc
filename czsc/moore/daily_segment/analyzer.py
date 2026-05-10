@@ -4,11 +4,31 @@ from __future__ import annotations
 
 from typing import List, Optional, Sequence
 
-from czsc.py.enum import Direction
 from czsc.py.objects import RawBar
 
 from ..objects import MooreSegment
-from .center_algo import find_center
+from .centers.algo import find_center
+from .helpers.commit import (
+    CommitDecision,
+    find_delayed_commit_decision,
+    is_valid_regular_window,
+    select_valid_daily_window,
+    should_commit_leading_swallow,
+)
+from .helpers.continuity import check_daily_segment_continuity
+from .helpers.cold_start import find_cold_start_decision
+from .helpers.extension import is_extension_same_trend
+from .helpers.ma_cross import (
+    check_ma_cross_correlation,
+    has_ma_cross_between,
+    ma_relation_state_at,
+    ma_relation_state_for_tk,
+    ma_relation_state_from_values,
+    ma_reverses_against_window,
+    turning_index,
+)
+from .helpers.non_same import try_non_same_candidate
+from .helpers.trend import check_global_trend_relationship
 from .objects import DailySegment, DailySegmentCenter
 from .state import DailySegmentState
 from .utils import (
@@ -16,9 +36,7 @@ from .utils import (
     clone_completed_segments_snapshot,
     collect_bars_by_index,
     seg_end_index,
-    seg_end_price,
     seg_start_index,
-    seg_start_price,
     slice_segments_from_anchor,
 )
 
@@ -39,8 +57,8 @@ class DailySegmentAnalyzer:
             (
                 seg.start_k.k_index,
                 seg.end_k.k_index,
-                self._turning_index(seg.start_k),
-                self._turning_index(seg.end_k),
+                turning_index(seg.start_k),
+                turning_index(seg.end_k),
                 bool(seg.cache.get("is_macro_swallow")),
             )
             for seg in segments
@@ -128,12 +146,6 @@ class DailySegmentAnalyzer:
 
     def _process_new_segment(self, new_seg: MooreSegment):
         s = self.state
-
-        if new_seg.cache.get("is_macro_swallow"):
-            if self._check_daily_segment_continuity([new_seg]):
-                self._reset_runtime_state()
-                self._commit_swallow_segment_directly(new_seg)
-                return
 
         if not s.current_segments and s.pending_anchor_snapshot:
             self._advance_anchor_snapshot(new_seg)
@@ -251,6 +263,7 @@ class DailySegmentAnalyzer:
                 end_seg=segments[-1],
                 segments=list(segments),
                 centers=centers,
+                cache={"from_macro_swallow": True} if len(segments) == 1 and segments[0].cache.get("is_macro_swallow") else {},
             )
         )
         self.state.continuity_broken = False
@@ -260,17 +273,14 @@ class DailySegmentAnalyzer:
         segments: Sequence[MooreSegment],
         previous_end_k=None,
     ) -> List[MooreSegment]:
-        if self.state.continuity_broken or len(segments) < 3:
-            return []
-
-        chosen: List[MooreSegment] = []
-        max_len = len(segments) if len(segments) % 2 == 1 else len(segments) - 1
-        for window_len in range(3, max_len + 1, 2):
-            window = list(segments[:window_len])
-            next_seg = segments[window_len] if window_len < len(segments) else None
-            if self._is_valid_daily_window(window, next_seg=next_seg, previous_end_k=previous_end_k):
-                chosen = window
-        return chosen
+        return select_valid_daily_window(
+            segments,
+            self.state.completed_segments,
+            self.state.ma34,
+            self.state.ma170,
+            continuity_broken=self.state.continuity_broken,
+            previous_end_k=previous_end_k,
+        )
 
     def _is_valid_daily_window(
         self,
@@ -278,21 +288,27 @@ class DailySegmentAnalyzer:
         next_seg: Optional[MooreSegment] = None,
         previous_end_k=None,
     ) -> bool:
-        return (
-            self._check_daily_segment_continuity(window, previous_end_k=previous_end_k)
-            and self._check_global_trend_relationship(window)
-            and self._check_ma_cross_correlation(window, self.state.ma34, self.state.ma170, next_seg)
+        return is_valid_regular_window(
+            window,
+            self.state.ma34,
+            self.state.ma170,
+            lag_segment=next_seg,
+            completed_segments=self.state.completed_segments,
+            previous_end_k=previous_end_k,
         )
 
     def _commit_ready_daily_segments(self):
         s = self.state
         while True:
-            commit_segments = self._find_confirmed_daily_window(s.current_segments)
-            if not commit_segments:
+            decision = self._find_commit_decision(s.current_segments)
+            if not decision:
+                return
+            if not decision.segments:
+                s.pending_daily_segments = decision.pending_segments
                 return
 
-            tail = list(s.current_segments[len(commit_segments):])
-            self._append_daily_segment(commit_segments)
+            tail = list(s.current_segments[decision.next_tail_offset:])
+            self._append_daily_segment(decision.segments)
             s.current_segments = tail
             s.pending_daily_segments = []
             self._reset_daily_center_state()
@@ -304,88 +320,51 @@ class DailySegmentAnalyzer:
                 s.anchor_dt = None
                 s.pending_anchor_snapshot = True
 
+    def _find_commit_decision(self, segments: Sequence[MooreSegment]) -> Optional[CommitDecision]:
+        if self.state.continuity_broken:
+            return None
+        if not self.state.completed_segments and len(segments) >= 3:
+            return find_cold_start_decision(segments, self.state.ma34, self.state.ma170)
+        if self.state.completed_segments and should_commit_leading_swallow(
+            segments,
+            self.state.completed_segments,
+            self.state.ma34,
+            self.state.ma170,
+        ):
+            return CommitDecision(0, 1, [segments[0]], [])
+        if len(segments) < 3:
+            return None
+        return find_delayed_commit_decision(
+            segments,
+            self.state.completed_segments,
+            self.state.ma34,
+            self.state.ma170,
+            continuity_broken=self.state.continuity_broken,
+            allow_cold_start=False,
+        )
+
     def _find_confirmed_daily_window(self, segments: Sequence[MooreSegment]) -> List[MooreSegment]:
-        self.state.pending_daily_segments = []
-        if self.state.continuity_broken or len(segments) < 3:
+        decision = self._find_commit_decision(segments)
+        if not decision:
+            self.state.pending_daily_segments = []
             return []
-
-        non_same_window = self._try_non_same_processing(segments)
-        if non_same_window:
-            return non_same_window
-
-        max_len = len(segments) if len(segments) % 2 == 1 else len(segments) - 1
-        for window_len in range(3, max_len + 1, 2):
-            window = list(segments[:window_len])
-            next_seg = segments[window_len] if window_len < len(segments) else None
-            if not self._is_valid_daily_window(window, next_seg=next_seg):
-                continue
-
-            self.state.pending_daily_segments = window
-            next_two = list(segments[window_len : window_len + 2])
-            if len(next_two) < 2:
-                return []
-
-            if not self._is_extension_same_trend(window, next_two):
-                return window
-        return []
+        self.state.pending_daily_segments = decision.pending_segments
+        return decision.segments
 
     def _try_non_same_processing(self, segments: Sequence[MooreSegment]) -> List[MooreSegment]:
         """反向趋势以虚线 30F 线段开头时，尝试 idx-1 到 idx+2 直连。"""
         if len(segments) < 3 or not self.state.completed_segments:
             return []
-
-        first = segments[0]
-        prev_daily = self.state.completed_segments[-1]
-        if first.direction == prev_daily.direction:
+        if not self._check_daily_segment_continuity(segments[:3]):
             return []
-        if first.is_perfect:
-            return []
-
-        window = list(segments[:3])
-        if not self._check_daily_segment_continuity(window):
-            return []
-        if not self._ma34_reverses_against_window(window):
-            return []
-        return window
+        return try_non_same_candidate(segments, self.state.completed_segments[-1].direction, self.state.ma34)
 
     def _ma34_reverses_against_window(self, window: Sequence[MooreSegment]) -> bool:
-        if not window or not self.state.ma34:
-            return False
-
-        start_price = seg_start_price(window[0])
-        end_price = seg_end_price(window[-1])
-        if end_price == start_price:
-            return False
-
-        start_idx = self._turning_index(window[0].start_k)
-        end_idx = self._turning_index(window[-1].end_k)
-        if start_idx > end_idx:
-            start_idx, end_idx = end_idx, start_idx
-
-        vals = [
-            self.state.ma34[idx]
-            for idx in range(start_idx, end_idx + 1)
-            if 0 <= idx < len(self.state.ma34) and self.state.ma34[idx] is not None
-        ]
-        if len(vals) < 2:
-            return False
-
-        if end_price > start_price:
-            return any(curr < prev for prev, curr in zip(vals, vals[1:]))
-        return any(curr > prev for prev, curr in zip(vals, vals[1:]))
+        return ma_reverses_against_window(window, self.state.ma34)
 
     @staticmethod
     def _is_extension_same_trend(window: Sequence[MooreSegment], next_two: Sequence[MooreSegment]) -> bool:
-        if not window or len(next_two) < 2:
-            return False
-        direction = window[0].direction
-        current_end = seg_end_price(window[-1])
-        extended_end = seg_end_price(next_two[-1])
-        if direction == Direction.Up:
-            return extended_end >= current_end
-        if direction == Direction.Down:
-            return extended_end <= current_end
-        return False
+        return is_extension_same_trend(window, next_two)
 
     def _reset_daily_center_state(self):
         s = self.state
@@ -439,36 +418,14 @@ class DailySegmentAnalyzer:
         self.state.pending_anchor_snapshot = True
 
     def _check_daily_segment_continuity(self, segments: Sequence[MooreSegment], previous_end_k=None) -> bool:
-        if not segments:
-            return False
-        if previous_end_k is not None:
-            curr_start = segments[0].start_k
-            return previous_end_k.k_index == curr_start.k_index and previous_end_k.dt == curr_start.dt
-        if not self.state.completed_segments:
-            return True
-        prev_daily = self.state.completed_segments[-1]
-        if prev_daily.cache.get("from_macro_swallow") and prev_daily.segments[0] is segments[0]:
-            return True
-        prev_end = self.state.completed_segments[-1].end_seg.end_k
-        curr_start = segments[0].start_k
-        return prev_end.k_index == curr_start.k_index and prev_end.dt == curr_start.dt
+        return check_daily_segment_continuity(
+            segments,
+            self.state.completed_segments,
+            previous_end_k=previous_end_k,
+        )
 
     def _check_global_trend_relationship(self, segments: Sequence[MooreSegment]) -> bool:
-        if not segments:
-            return False
-        daily_dir = segments[0].direction
-        start_p = seg_start_price(segments[0])
-        end_p = seg_end_price(segments[-1])
-        endpoints = []
-        for seg in segments:
-            endpoints.extend([seg_start_price(seg), seg_end_price(seg)])
-        global_max = max(endpoints)
-        global_min = min(endpoints)
-        if daily_dir == Direction.Up:
-            return start_p == global_min and endpoints.count(global_min) == 1 and end_p >= global_max
-        if daily_dir == Direction.Down:
-            return start_p == global_max and endpoints.count(global_max) == 1 and end_p <= global_min
-        return False
+        return check_global_trend_relationship(segments)
 
     def _check_ma_cross_correlation(
         self,
@@ -477,61 +434,27 @@ class DailySegmentAnalyzer:
         ma_slow,
         lag_segment: Optional[MooreSegment] = None,
     ) -> bool:
-        if not segments:
-            return False
-
-        start_idx = self._turning_index(segments[0].start_k)
-        end_tk = lag_segment.end_k if lag_segment is not None else segments[-1].end_k
-        end_idx = self._turning_index(end_tk)
-        return self._has_ma_cross_between(start_idx, end_idx, ma_fast, ma_slow)
+        return check_ma_cross_correlation(segments, ma_fast, ma_slow, lag_segment)
 
     @classmethod
     def _has_ma_cross_between(cls, start_idx: int, end_idx: int, ma_fast, ma_slow) -> bool:
-        if start_idx > end_idx:
-            start_idx, end_idx = end_idx, start_idx
-        prev_state = 0
-        for idx in range(start_idx, end_idx + 1):
-            state = cls._ma_relation_state_at(idx, ma_fast, ma_slow)
-            if state == 0:
-                continue
-            if prev_state != 0 and state != prev_state:
-                return True
-            prev_state = state
-        return False
+        return has_ma_cross_between(start_idx, end_idx, ma_fast, ma_slow)
 
     @staticmethod
     def _turning_index(tk) -> int:
-        return tk.turning_k_index if tk.turning_k_index is not None else tk.k_index
+        return turning_index(tk)
 
     @classmethod
     def _ma_relation_state_for_tk(cls, tk, ma_fast, ma_slow) -> int:
-        for bar in (getattr(tk, "turning_k", None), getattr(tk, "trigger_k", None), getattr(tk, "raw_bar", None)):
-            if bar is None:
-                continue
-            fast = bar.cache.get("ma34")
-            slow = bar.cache.get("ma170")
-            state = cls._ma_relation_state_from_values(fast, slow)
-            if state != 0:
-                return state
-        return cls._ma_relation_state_at(cls._turning_index(tk), ma_fast, ma_slow)
+        return ma_relation_state_for_tk(tk, ma_fast, ma_slow)
 
     @staticmethod
     def _ma_relation_state_at(idx: int, ma_fast, ma_slow) -> int:
-        if idx < 0 or idx >= len(ma_fast) or idx >= len(ma_slow):
-            return 0
-        fast = ma_fast[idx]
-        slow = ma_slow[idx]
-        return DailySegmentAnalyzer._ma_relation_state_from_values(fast, slow)
+        return ma_relation_state_at(idx, ma_fast, ma_slow)
 
     @staticmethod
     def _ma_relation_state_from_values(fast, slow) -> int:
-        if fast is None or slow is None:
-            return 0
-        if fast > slow:
-            return 1
-        if fast < slow:
-            return -1
-        return 0
+        return ma_relation_state_from_values(fast, slow)
 
 
 # 兼容旧命名

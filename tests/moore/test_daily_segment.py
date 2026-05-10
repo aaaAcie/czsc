@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 from datetime import datetime, timedelta
 
+import pytest
+
+from czsc.connectors import research
 from czsc.moore.analyze import MooreCZSC
 from czsc.moore.daily_segment import DailySegment, DailySegmentAnalyzer
-from czsc.moore.daily_segment.center_algo import find_b_point, find_d_point
+from czsc.moore.daily_segment.center_algo import find_b_point, find_center, find_d_point
 from czsc.moore.daily_segment.utils import slice_segments_from_anchor
 from czsc.moore.objects import MooreSegment, TurningK
 from czsc.py.enum import Direction, Freq, Mark
@@ -137,14 +140,29 @@ def test_find_b_and_d_respect_structure_boundaries():
     assert d_val == 6
 
 
+def test_center_algo_legacy_import_path_stays_compatible():
+    assert callable(find_center)
+
+
 def test_swallow_segment_direct_commit_and_moore_aliases():
+    prev = make_seg(20, 30, Direction.Down, 12, 10)
     swallow = make_seg(30, 33, Direction.Up, 10, 15)
     swallow.cache["is_macro_swallow"] = True
 
-    analyzer = DailySegmentAnalyzer([swallow])
-    assert len(analyzer.daily_segments) == 1
-    assert analyzer.daily_segments[0].segments == [swallow]
-    assert analyzer.daily_segments[0].cache["from_macro_swallow"] is True
+    analyzer = DailySegmentAnalyzer()
+    analyzer.state.completed_segments = [
+        DailySegment(
+            symbol="TEST.DAILY",
+            direction=Direction.Down,
+            start_seg=prev,
+            end_seg=prev,
+            segments=[prev],
+        )
+    ]
+    analyzer._process_new_segment(swallow)
+    assert len(analyzer.daily_segments) == 2
+    assert analyzer.daily_segments[-1].segments == [swallow]
+    assert analyzer.daily_segments[-1].cache["from_macro_swallow"] is True
     assert analyzer.state.current_segments == []
 
     engine = MooreCZSC([])
@@ -274,10 +292,9 @@ def test_live_processing_locks_ready_segment_and_restarts_from_its_endpoint():
     for seg in segs[3:]:
         analyzer._process_new_segment(seg)
 
-    assert len(analyzer.daily_segments) == 1
-    assert analyzer.daily_segments[0].segments == segs[:3]
-    assert analyzer.state.current_segments == segs[3:6]
-    assert analyzer.state.pending_daily_segments == segs[3:6]
+    assert analyzer.daily_segments == []
+    assert analyzer.state.current_segments == segs
+    assert analyzer.state.pending_daily_segments == segs[:3]
 
 
 def test_breaking_lag_segment_can_confirm_previous_window_before_reset():
@@ -314,13 +331,12 @@ def test_live_processing_extends_by_two_until_reverse_trend_forms():
     for seg in segs:
         analyzer._process_new_segment(seg)
 
-    assert len(analyzer.daily_segments) == 1
-    assert analyzer.daily_segments[0].segments == segs[:5]
-    assert analyzer.state.current_segments == segs[5:]
-    assert analyzer.state.pending_daily_segments == segs[5:]
+    assert analyzer.daily_segments == []
+    assert analyzer.state.current_segments == segs
+    assert analyzer.state.pending_daily_segments
 
 
-def test_non_same_processing_directly_connects_reverse_dashed_start_to_idx_plus_2_on_ma34_reversal():
+def test_non_same_processing_marks_reverse_dashed_start_as_pending_candidate():
     prev = make_seg(0, 3, Direction.Up, 10, 15, start_turning_idx=10, end_turning_idx=30)
     reverse_dashed = make_seg(3, 4, Direction.Down, 15, 14, start_turning_idx=30, end_turning_idx=40)
     middle = make_seg(4, 5, Direction.Up, 14, 16, start_turning_idx=40, end_turning_idx=50)
@@ -344,11 +360,31 @@ def test_non_same_processing_directly_connects_reverse_dashed_start_to_idx_plus_
 
     analyzer._process_new_segment(end)
 
-    assert len(analyzer.daily_segments) == 2
-    assert analyzer.daily_segments[-1].segments == [reverse_dashed, middle, end]
-    assert analyzer.daily_segments[-1].start_seg is reverse_dashed
-    assert analyzer.daily_segments[-1].end_seg is end
-    assert analyzer.state.current_segments == []
+    assert len(analyzer.daily_segments) == 1
+    assert analyzer.state.pending_daily_segments == [reverse_dashed, middle, end]
+    assert analyzer.state.current_segments == [reverse_dashed, middle, end]
+
+
+def test_non_same_processing_can_confirm_previous_long_trend_as_reverse_candidate():
+    up = [
+        make_seg(0, 1, Direction.Up, 10, 12, start_turning_idx=10, end_turning_idx=20),
+        make_seg(1, 2, Direction.Down, 12, 11, start_turning_idx=20, end_turning_idx=30),
+        make_seg(2, 3, Direction.Up, 11, 15, start_turning_idx=30, end_turning_idx=40),
+    ]
+    reverse_dashed = make_seg(3, 4, Direction.Down, 15, 14, start_turning_idx=40, end_turning_idx=50)
+    middle = make_seg(4, 5, Direction.Up, 14, 16, start_turning_idx=50, end_turning_idx=60)
+    end = make_seg(5, 6, Direction.Down, 16, 13, start_turning_idx=60, end_turning_idx=70)
+
+    analyzer = make_analyzer_with_ma({10: 1, 40: -1})
+    set_ma34(analyzer, {10: 11, 40: 9, 50: 10, 60: 12, 70: 8})
+    analyzer.state.ma170 = [10] * 240
+
+    for seg in [*up, reverse_dashed, middle, end]:
+        analyzer._process_new_segment(seg)
+
+    assert analyzer.daily_segments == []
+    assert analyzer.state.current_segments == [*up, reverse_dashed, middle, end]
+    assert analyzer.state.pending_daily_segments[:3] == up
 
 
 def test_non_same_processing_requires_dashed_reverse_start():
@@ -402,9 +438,9 @@ def test_swallow_segment_can_also_participate_in_ordinary_window():
     for seg in [swallow, seg2, seg3, break_seg]:
         analyzer._process_new_segment(seg)
 
-    assert len(analyzer.daily_segments) == 1
-    assert analyzer.daily_segments[0].segments == [swallow]
-    assert analyzer.state.current_segments == [seg2, seg3, break_seg]
+    assert analyzer.daily_segments == []
+    assert analyzer.state.pending_daily_segments == [swallow, seg2, seg3]
+    assert analyzer.state.current_segments == [swallow, seg2, seg3, break_seg]
 
 
 def test_continuity_break_blocks_later_daily_segment_from_skipping_gap():
@@ -429,3 +465,123 @@ def test_continuity_break_blocks_later_daily_segment_from_skipping_gap():
     assert not analyzer._commit_segments_if_valid(failed)
     analyzer.state.continuity_broken = True
     assert not analyzer._commit_segments_if_valid(later)
+
+
+def test_cold_start_skips_warmup_segments_and_waits_for_reverse_confirmation():
+    warmup = make_seg(0, 1, Direction.Up, 9, 11, start_turning_idx=10, end_turning_idx=20)
+    down = [
+        make_seg(1, 2, Direction.Down, 11, 8, start_turning_idx=20, end_turning_idx=30),
+        make_seg(2, 3, Direction.Up, 8, 9, start_turning_idx=30, end_turning_idx=40),
+        make_seg(3, 4, Direction.Down, 9, 6, start_turning_idx=40, end_turning_idx=50),
+    ]
+    up = [
+        make_seg(4, 5, Direction.Up, 6, 7, start_turning_idx=50, end_turning_idx=60),
+        make_seg(5, 6, Direction.Down, 7, 6.5, start_turning_idx=60, end_turning_idx=70),
+        make_seg(6, 7, Direction.Up, 6.5, 12, start_turning_idx=70, end_turning_idx=80),
+    ]
+    analyzer = make_analyzer_with_ma({20: 1, 50: -1, 60: -1, 80: 1})
+
+    for seg in [warmup, *down]:
+        analyzer._process_new_segment(seg)
+    assert analyzer.daily_segments == []
+
+    for seg in up:
+        analyzer._process_new_segment(seg)
+
+    assert analyzer.daily_segments == []
+    assert analyzer.state.current_segments == [warmup, *down, *up]
+    assert analyzer.state.pending_daily_segments == down
+
+
+def test_delayed_confirmation_keeps_best_endpoint_until_reverse_daily_candidate_forms():
+    prev = make_seg(0, 1, Direction.Up, 5, 10, start_turning_idx=10, end_turning_idx=20)
+    down = [
+        make_seg(1, 2, Direction.Down, 10, 7, start_turning_idx=20, end_turning_idx=30),
+        make_seg(2, 3, Direction.Up, 7, 8, start_turning_idx=30, end_turning_idx=40),
+        make_seg(3, 4, Direction.Down, 8, 6, start_turning_idx=40, end_turning_idx=50),
+        make_seg(4, 5, Direction.Up, 6, 7, start_turning_idx=50, end_turning_idx=60),
+        make_seg(5, 6, Direction.Down, 7, 4, start_turning_idx=60, end_turning_idx=70),
+    ]
+    up = [
+        make_seg(6, 7, Direction.Up, 4, 5, start_turning_idx=70, end_turning_idx=80),
+        make_seg(7, 8, Direction.Down, 5, 4.5, start_turning_idx=80, end_turning_idx=90),
+        make_seg(8, 9, Direction.Up, 4.5, 11, start_turning_idx=90, end_turning_idx=100),
+    ]
+    analyzer = make_analyzer_with_ma({20: 1, 50: -1, 70: -1, 100: 1})
+    analyzer.state.completed_segments = [
+        DailySegment(
+            symbol="TEST.DAILY",
+            direction=Direction.Up,
+            start_seg=prev,
+            end_seg=prev,
+            segments=[prev],
+        )
+    ]
+
+    for seg in down:
+        analyzer._process_new_segment(seg)
+    assert len(analyzer.daily_segments) == 1
+    assert analyzer.state.pending_daily_segments == down
+
+    for seg in up:
+        analyzer._process_new_segment(seg)
+
+    assert len(analyzer.daily_segments) == 1
+    assert analyzer.state.current_segments == down + up
+    assert analyzer.state.pending_daily_segments == down
+
+
+def test_600707_daily_segments_match_expected_long_trend_and_swallow():
+    bars = research.get_raw_bars_origin("600707", sdt="20140601", edt="20210820")
+    if not bars:
+        pytest.skip("no bars for 600707")
+
+    engine = MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+    )
+    display_tks = getattr(engine, "micro_turning_ks", engine.turning_ks)
+    label_by_key = {
+        (tk.k_index, tk.dt, tk.price): f"mV{i}{'T' if tk.mark == Mark.G else 'B'}"
+        for i, tk in enumerate(display_tks)
+    }
+
+    def label(tk):
+        return label_by_key[(tk.k_index, tk.dt, tk.price)]
+
+    daily_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_segments]
+
+    assert daily_pairs[:2] == [("mV1T", "mV36B"), ("mV36B", "mV43T")]
+    assert ("mV4B", "mV6T") not in daily_pairs
+    assert engine.daily_segments[1].segments[0].cache.get("is_macro_swallow") is True
+
+
+def test_002613_daily_segments_match_expected_blue_split():
+    bars = research.get_raw_bars_origin("002613", sdt="20160801", edt="20210820")
+    if not bars:
+        pytest.skip("no bars for 002613")
+
+    engine = MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+    )
+    display_tks = getattr(engine, "micro_turning_ks", engine.turning_ks)
+    label_by_key = {
+        (tk.k_index, tk.dt, tk.price): f"V{i}{'T' if tk.mark == Mark.G else 'B'}"
+        for i, tk in enumerate(display_tks)
+    }
+
+    def label(tk):
+        return label_by_key[(tk.k_index, tk.dt, tk.price)]
+
+    daily_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_segments]
+
+    assert daily_pairs[:3] == [("V1T", "V18B"), ("V18B", "V23T"), ("V23T", "V30B")]
