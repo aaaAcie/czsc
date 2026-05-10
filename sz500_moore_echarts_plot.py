@@ -955,6 +955,49 @@ def plot_moore_structure_echarts(
                 }});
                 legendGuard = false;
             }}, 50);
+
+            // 获取数据最大索引
+            var currentDataIndex = -1;
+            var maxDataIndex = 0;
+            var opt = chart.getOption();
+            if (opt.xAxis && opt.xAxis[0] && opt.xAxis[0].data) {{
+                maxDataIndex = opt.xAxis[0].data.length - 1;
+            }}
+
+            // 监听鼠标在图表上的移动，更新当前的 K 线索引
+            chart.getZr().on('mousemove', function(params) {{
+                var pointInPixel = [params.offsetX, params.offsetY];
+                if (chart.containPixel('grid', pointInPixel)) {{
+                    var pointInGrid = chart.convertFromPixel({{xAxisIndex: 0, yAxisIndex: 0}}, pointInPixel);
+                    if (pointInGrid) {{
+                        currentDataIndex = Math.round(pointInGrid[0]);
+                    }}
+                }}
+            }});
+
+            // 监听键盘左右方向键，逐根 K 线移动十字光标（Tooltip）
+            document.addEventListener('keydown', function(e) {{
+                if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {{
+                    if (currentDataIndex === -1) {{
+                        currentDataIndex = maxDataIndex;
+                    }}
+                    
+                    if (e.key === 'ArrowLeft') {{
+                        currentDataIndex = Math.max(0, currentDataIndex - 1);
+                    }} else if (e.key === 'ArrowRight') {{
+                        currentDataIndex = Math.min(maxDataIndex, currentDataIndex + 1);
+                    }}
+                    
+                    chart.dispatchAction({{
+                        type: 'showTip',
+                        seriesIndex: 0,
+                        dataIndex: currentDataIndex
+                    }});
+                    
+                    // 防止按键导致浏览器页面滚动
+                    e.preventDefault();
+                }}
+            }});
         }}, 500);
     }})();
     """
