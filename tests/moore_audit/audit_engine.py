@@ -11,6 +11,7 @@
 """
 import argparse
 import collections
+import json
 import os
 import sys
 from datetime import datetime
@@ -118,6 +119,7 @@ def unified_audit(
     audit_link_rounds: int = 5,
     ma34_cross_as_valid_gate: bool = True,
     replay_centers_after_macro_swallow: bool = True,
+    emit_json: bool = False,
 ):
     """
     统一审计逻辑入口
@@ -247,11 +249,177 @@ def unified_audit(
         if seg_start and seg_end:
             _audit_target_segment(engine, seg_start, seg_end)
 
+        if emit_json:
+            payload = build_audit_payload(
+                engine=engine,
+                symbol=symbol,
+                sdt=sdt,
+                edt=edt,
+                audit_link_rounds=audit_link_rounds,
+                ma34_cross_as_valid_gate=ma34_cross_as_valid_gate,
+                replay_centers_after_macro_swallow=replay_centers_after_macro_swallow,
+            )
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+            return payload
+
     finally:
         mod_center.CenterEngine.update = orig_center["update"]
         print(f"\n{'='*120}")
         print(" ✅ 审计分析报告生成完毕")
         print(f"{'='*120}\n")
+
+
+def _fmt_dt_or_none(dt):
+    return dt.strftime("%Y-%m-%d") if dt else None
+
+
+def _turning_to_dict(tk):
+    return {
+        "dt": _fmt_dt_or_none(tk.dt),
+        "mark": tk.mark.name,
+        "price": float(tk.price),
+        "k_index": int(tk.k_index),
+        "source_micro_id": tk.cache.get("source_micro_id"),
+        "micro_id": tk.cache.get("micro_id"),
+        "trigger_dt": _fmt_dt_or_none(tk.trigger_k.dt if tk.trigger_k else None),
+        "trigger_k_index": int(tk.turning_k_index if tk.turning_k_index is not None else -1),
+        "is_valid": bool(tk.is_valid),
+        "is_perfect": bool(tk.is_perfect),
+        "maybe_is_fake": bool(tk.maybe_is_fake),
+    }
+
+
+def _center_to_dict(c):
+    return {
+        "start_dt": _fmt_dt_or_none(c.start_dt),
+        "end_dt": _fmt_dt_or_none(c.end_dt),
+        "confirm_dt": _fmt_dt_or_none(c.confirm_k.dt if c.confirm_k else None),
+        "anchor_k0_dt": _fmt_dt_or_none(c.anchor_k0.dt if getattr(c, "anchor_k0", None) else None),
+        "method": getattr(c, "method", None),
+        "direction": c.direction.name if c.direction else None,
+        "upper_rail": float(c.upper_rail),
+        "lower_rail": float(c.lower_rail),
+        "is_ghost": bool(getattr(c, "is_ghost", False)),
+        "is_visible": bool(getattr(c, "is_visible", False)),
+        "start_k_index": int(c.start_k_index),
+        "end_k_index": int(c.end_k_index),
+    }
+
+
+def build_audit_payload(
+    engine: MooreCZSC,
+    symbol: str,
+    sdt: str,
+    edt: str,
+    audit_link_rounds: int,
+    ma34_cross_as_valid_gate: bool,
+    replay_centers_after_macro_swallow: bool,
+) -> dict:
+    s = engine.segment_analyzer.state
+    debug_macro_sync = getattr(engine.segment_analyzer, "_debug_macro_sync_state", {})
+    macro_turning = getattr(engine, "macro_turning_ks", None) or engine.turning_ks
+    macro_segments = getattr(engine, "macro_segments", None) or engine.segments
+    return {
+        "meta": {
+            "symbol": symbol,
+            "sdt": sdt,
+            "edt": edt,
+            "audit_link_rounds": audit_link_rounds,
+            "ma34_cross_as_valid_gate": ma34_cross_as_valid_gate,
+            "replay_centers_after_macro_swallow": replay_centers_after_macro_swallow,
+        },
+        "counts": {
+            "micro_turning": len(engine.micro_turning_ks),
+            "macro_turning": len(macro_turning),
+            "micro_segments": len(engine.micro_segments),
+            "macro_segments": len(macro_segments),
+            "micro_centers": len(engine.micro_centers),
+            "macro_centers": len(engine.macro_centers),
+            "ghost_centers": len(engine.ghost_centers),
+            "pending_queue": len(s.pending_judgements),
+            "judgement_nodes": len(s.judgement_nodes),
+            "delayed_events": len(s.debug_judgement_events),
+        },
+        "turning": {
+            "micro": [_turning_to_dict(tk) for tk in engine.micro_turning_ks],
+            "macro": [_turning_to_dict(tk) for tk in macro_turning],
+        },
+        "segments": {
+            "micro": [
+                {
+                    "sdt": _fmt_dt_or_none(seg.sdt),
+                    "edt": _fmt_dt_or_none(seg.edt),
+                    "direction": seg.direction.name,
+                    "is_perfect": bool(seg.is_perfect),
+                    "centers_count": len(seg.centers),
+                }
+                for seg in engine.micro_segments
+            ],
+            "macro": [
+                {
+                    "sdt": _fmt_dt_or_none(seg.sdt),
+                    "edt": _fmt_dt_or_none(seg.edt),
+                    "direction": seg.direction.name,
+                    "is_perfect": bool(seg.is_perfect),
+                    "centers_count": len(seg.centers),
+                }
+                for seg in macro_segments
+            ],
+        },
+        "centers": {
+            "micro": [_center_to_dict(c) for c in engine.micro_centers],
+            "macro": [_center_to_dict(c) for c in engine.macro_centers],
+            "ghost": [_center_to_dict(c) for c in engine.ghost_centers],
+        },
+        "delayed": {
+            "events": [
+                {
+                    **{
+                        k: v for k, v in ev.items() if k != "dt"
+                    },
+                    "dt": _fmt_dt_or_none(ev.get("dt")),
+                }
+                for ev in s.debug_judgement_events
+            ],
+            "reversal_events": [
+                {
+                    "event": ev.get("event"),
+                    "node_id": ev.get("node_id"),
+                    "A_id": ev.get("A_id"),
+                    "B_id": ev.get("B_id"),
+                    "C_id": ev.get("C_id"),
+                    "D_id": ev.get("D_id"),
+                    "CD_perfect": ev.get("CD_perfect"),
+                    "AD_perfect": ev.get("AD_perfect"),
+                    "resolution": ev.get("resolution"),
+                    "dt": _fmt_dt_or_none(ev.get("dt")),
+                }
+                for ev in s.debug_judgement_events
+                if ev.get("event") == "reversal_eval"
+            ],
+            "nodes": [
+                {
+                    "id": node.id,
+                    "base_id": node.base_id,
+                    "candidate_id": node.candidate_id,
+                    "resolve_anchor_id": node.resolve_anchor_id,
+                    "stage": node.stage,
+                    "resolution": node.resolution,
+                    "parent_id": node.parent_id,
+                    "child_ids": list(node.child_ids),
+                    "created_dt": _fmt_dt_or_none(node.created_dt),
+                    "resolved_dt": _fmt_dt_or_none(node.resolved_dt),
+                    "a_id": getattr(node, "a_id", None),
+                    "c_candidate_id": getattr(node, "c_candidate_id", None),
+                    "d_candidate_id": getattr(node, "d_candidate_id", None),
+                    "cd_perfect": getattr(node, "cd_perfect", None),
+                    "ad_perfect": getattr(node, "ad_perfect", None),
+                }
+                for node in s.judgement_nodes.values()
+            ],
+        },
+        "macro_sync": debug_macro_sync,
+    }
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="摩尔缠论统一审计引擎")
@@ -271,6 +439,7 @@ if __name__ == '__main__':
         action='store_true',
         help='命中宏观吞噬后，不重播吞噬窗口中枢'
     )
+    gen.add_argument('--json', action='store_true', help='输出结构化 JSON（保留文本审计输出）')
     args = parser.parse_args()
 
     if args.command == 'scan_300371':
@@ -283,6 +452,7 @@ if __name__ == '__main__':
             audit_link_rounds=args.audit_link_rounds,
             ma34_cross_as_valid_gate=args.ma34_cross_as_valid_gate,
             replay_centers_after_macro_swallow=not args.disable_replay_centers_after_macro_swallow,
+            emit_json=args.json,
         )
     else:
         parser.print_help()

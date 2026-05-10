@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """延迟结算链 helper：维护待定队列与节点结算。"""
 
-from ...objects import PendingJudgementNode
+from ....objects import PendingJudgementNode
 
 
 class DelayedJudgementHelper:
@@ -23,6 +23,9 @@ class DelayedJudgementHelper:
             return tk
         return self.s.turning_tk_store.get(micro_id)
 
+    def get_tk_by_id(self, micro_id: int):
+        return self._get_tk_by_id(micro_id)
+
     def _find_node_by_candidate(self, candidate_id: int):
         s = self.s
         for node_id in reversed(list(s.pending_judgements)):
@@ -31,6 +34,25 @@ class DelayedJudgementHelper:
                 continue
             if node.candidate_id == candidate_id:
                 return node
+        return None
+
+    def _find_prev_turning_id(self, micro_id: int):
+        idx, _ = self._find_tk_in_turnings(micro_id)
+        if idx <= 0:
+            return None
+        prev = self.s.turning_ks[idx - 1]
+        return prev.cache.get("micro_id")
+
+    def get_reversal_fallback_ref_id(self, c_id: int):
+        """当 C 路径初判失败时，返回 A->D 复判所需的 A 点 ID。"""
+        s = self.s
+        for node_id in reversed(list(s.pending_judgements)):
+            node = s.judgement_nodes.get(node_id)
+            if not node or node.stage in ("resolved", "cancelled"):
+                continue
+            if node.c_candidate_id != c_id:
+                continue
+            return self._find_prev_turning_id(node.base_id)
         return None
 
     def enqueue_or_advance(self, refreshed_old_tk, final_tk):
@@ -102,18 +124,66 @@ class DelayedJudgementHelper:
                 node.c_candidate_id = final_id
                 continue
 
-            node.resolve_anchor_id = node.c_candidate_id
-            node.stage = "ready_resolve"
+            node.resolve_anchor_id = node.c_candidate_id  # C real
+            node.d_candidate_id = final_id               # D
+            node.a_id = self._find_prev_turning_id(node.candidate_id)
+            node.stage = "wait_reversal_eval"
             s.debug_judgement_events.append({
                 "event": "anchor_real",
                 "node_id": node_id,
                 "resolve_anchor_id": node.resolve_anchor_id,
+                "d_id": node.d_candidate_id,
+                "a_id": node.a_id,
                 "dt": final_tk.dt,
             })
 
     def resolve_ready(self):
         s = self.s
         changed = False
+
+        for node_id in list(s.pending_judgements):
+            node = s.judgement_nodes.get(node_id)
+            if not node or node.stage != "wait_reversal_eval":
+                continue
+            if node.resolve_anchor_id is None or node.d_candidate_id is None:
+                node.stage = "cancelled"
+                continue
+
+            c_tk = self._get_tk_by_id(node.resolve_anchor_id)
+            d_tk = self._get_tk_by_id(node.d_candidate_id)
+            if c_tk is None or d_tk is None:
+                node.stage = "cancelled"
+                continue
+
+            node.cd_perfect = self._has_center_between(c_tk.k_index, d_tk.k_index)
+            node.ad_perfect = False
+            if node.a_id is not None:
+                a_tk = self._get_tk_by_id(node.a_id)
+                if a_tk is not None:
+                    node.ad_perfect = self._has_center_between(a_tk.k_index, d_tk.k_index)
+
+            if (node.cd_perfect is False) and (node.ad_perfect is True):
+                node.resolution = "rollback_c_and_promote_d_to_b_prime"
+                self._apply_rollback_c_promote_d(node)
+                changed = True
+            else:
+                node.resolution = "keep_c_path"
+
+            node.stage = "ready_resolve"
+            s.debug_judgement_events.append({
+                "event": "reversal_eval",
+                "node_id": node.id,
+                "A_id": node.a_id,
+                "B_id": node.base_id,
+                "Bp_id": node.candidate_id,
+                "C_id": node.resolve_anchor_id,
+                "D_id": node.d_candidate_id,
+                "CD_perfect": node.cd_perfect,
+                "AD_perfect": node.ad_perfect,
+                "resolution": node.resolution,
+                "dt": d_tk.dt,
+            })
+
         for node_id in list(s.pending_judgements):
             node = s.judgement_nodes.get(node_id)
             if not node or node.stage != "ready_resolve" or node.resolve_anchor_id is None:
@@ -165,3 +235,17 @@ class DelayedJudgementHelper:
         if cand_idx < 0 or base_tk is None:
             return
         self.s.turning_ks[cand_idx] = base_tk
+
+    def _apply_rollback_c_promote_d(self, node: PendingJudgementNode):
+        """C-D 不完美且 A-D 完美：撤销 C，D 回流为 B'。"""
+        c_idx, c_tk = self._find_tk_in_turnings(node.resolve_anchor_id)
+        d_idx, d_tk = self._find_tk_in_turnings(node.d_candidate_id)
+        if c_idx < 0 or d_idx < 0 or c_tk is None or d_tk is None:
+            return
+
+        if c_idx < d_idx:
+            self.s.turning_ks.pop(c_idx)
+            d_idx -= 1
+
+        node.candidate_id = node.d_candidate_id
+        self.s.turning_tk_store[node.d_candidate_id] = d_tk

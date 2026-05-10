@@ -62,6 +62,7 @@ class SegmentState:
     max_segments: int = 500
     use_left_3k_locator: bool = True  # True: 3K向左寻找优先, False: 区间绝对极值优先
     ma34_cross_as_valid_gate: bool = True  # True: 交叉是顶底成立门槛; False: 仅影响线段虚实
+    ma34_cross_expand_one_k: bool = True  # True: 交叉扫描区间左右各扩展1根K; False: 仅在[start_idx,end_idx]闭区间内扫描
 
     # -------------------------------------------------------------------------
     # 基础数据容器
@@ -90,6 +91,10 @@ class SegmentState:
     macro_excluded_micro_ids: set     = field(default_factory=set)
     macro_swallow_map: dict           = field(default_factory=dict)   # {(start_id, end_id): [internal_micro_ids]}
     macro_last_synced_micro_id: Optional[int] = None
+    last_macro_stable_cutoff_k_index: int = -1
+    stable_cutoff_k_index: int = -1
+    stable_cutoff_micro_id: Optional[int] = None
+    pending_leftmost_turning_idx: int = -1
 
     # -------------------------------------------------------------------------
     # 顶底引擎游标
@@ -115,6 +120,7 @@ class SegmentState:
     judgement_id_seed: int = 0
     last_resolve_anchor_id: Optional[int] = None
     debug_judgement_events: list = field(default_factory=list)
+    reversal_provisional_map: dict = field(default_factory=dict)  # c_id -> {"a_id": int|None, "b_id": int|None}
     # 异向转折门槛：全时域双向最值包络追踪（实时客观，不依赖于信号触发更新）
     leg_max_ma5: Optional[float] = None
     leg_min_ma5: Optional[float] = None
@@ -203,6 +209,7 @@ class SegmentAnalyzer:
         max_segments: int = 500,
         use_left_3k_locator: bool = True,
         ma34_cross_as_valid_gate: bool = True,
+        ma34_cross_expand_one_k: bool = True,
         audit_link_rounds: int = 5,
         enable_macro_audit: bool = True,
         enable_pre_round: bool = True,
@@ -214,6 +221,7 @@ class SegmentAnalyzer:
             max_segments=max_segments,
             use_left_3k_locator=use_left_3k_locator,
             ma34_cross_as_valid_gate=ma34_cross_as_valid_gate,
+            ma34_cross_expand_one_k=ma34_cross_expand_one_k,
             audit_link_rounds=audit_link_rounds,
             enable_macro_audit=enable_macro_audit,
             enable_pre_round=enable_pre_round,
@@ -299,7 +307,11 @@ class SegmentAnalyzer:
         self._sync_potential_to_micro_warehouse()
 
         # --- 5. 宏观同步与审计 (Stage 2) ---
-        macro_changed = self._sync_macro_world_from_micro()
+        macro_changed = False
+        stable_cutoff_idx, committed = self._get_committed_micro_turning_ks()
+        if stable_cutoff_idx > s.last_macro_stable_cutoff_k_index:
+            macro_changed = self._sync_macro_world_from_micro(committed)
+            s.last_macro_stable_cutoff_k_index = stable_cutoff_idx
         
         if s.enable_macro_audit and macro_changed and len(s.macro_turning_ks) > 4:
             # 这里的 audit_and_replay 只执行顶底塌陷逻辑
@@ -331,14 +343,75 @@ class SegmentAnalyzer:
         ctk.cache["source_micro_id"] = tk.cache.get("micro_id")
         return ctk
 
-    def _get_committed_micro_turning_ks(self) -> List[TurningK]:
-        """获取可用于宏观同步的“已提交”微观点（不含最后一个可刷新端点）。"""
+    def _get_committed_micro_turning_ks(self) -> tuple:
+        """获取可用于宏观同步的“稳定区快照”微观点。"""
+        cutoff_idx = self._compute_stable_cutoff_k_index()
         micro = self.state.turning_ks
-        if len(micro) <= 1:
-            return []
-        return micro[:-1]
+        if cutoff_idx < 0 or not micro:
+            return cutoff_idx, []
+        return cutoff_idx, micro[: cutoff_idx + 1]
 
-    def _sync_macro_world_from_micro(self) -> bool:
+    def _compute_stable_cutoff_k_index(self) -> int:
+        """计算宏观可消费的稳定前沿。
+
+        覆盖两类不稳定来源：
+          1) 同向刷新：末端可刷新区（至少最后 1 个 turning）不进入稳定区；
+          2) 延迟结算链：pending 节点涉及的 base/candidate 影响区整体排除。
+        """
+        s = self.state
+        micro = s.turning_ks
+        if len(micro) <= 1:
+            s.stable_cutoff_k_index = -1
+            s.stable_cutoff_micro_id = None
+            s.pending_leftmost_turning_idx = -1
+            return -1
+
+        # 同向刷新保护：最后一个端点视为可刷新，不进入稳定区
+        base_cutoff = len(micro) - 2
+
+        id_to_idx = {}
+        for i, tk in enumerate(micro):
+            mid = tk.cache.get("micro_id")
+            if mid is not None:
+                id_to_idx[mid] = i
+
+        pending_left = None
+        unresolved = {"wait_anchor_start", "wait_anchor_real", "wait_reversal_eval", "ready_resolve"}
+        for node_id in list(s.pending_judgements):
+            node = s.judgement_nodes.get(node_id)
+            if not node or node.stage not in unresolved:
+                continue
+            idxs = []
+            for mid in (node.base_id, node.candidate_id):
+                if mid in id_to_idx:
+                    idxs.append(id_to_idx[mid])
+            # 未解析到候选点时，认为链路仍不稳定，冻结宏观推进
+            if node.candidate_id not in id_to_idx:
+                s.pending_leftmost_turning_idx = -1
+                s.stable_cutoff_k_index = -1
+                s.stable_cutoff_micro_id = None
+                return -1
+            if idxs:
+                cur = min(idxs)
+                pending_left = cur if pending_left is None else min(pending_left, cur)
+
+        if pending_left is not None:
+            cutoff = min(base_cutoff, pending_left - 1)
+            s.pending_leftmost_turning_idx = pending_left
+        else:
+            cutoff = base_cutoff
+            s.pending_leftmost_turning_idx = -1
+
+        if cutoff < 0:
+            s.stable_cutoff_k_index = -1
+            s.stable_cutoff_micro_id = None
+            return -1
+
+        s.stable_cutoff_k_index = cutoff
+        s.stable_cutoff_micro_id = micro[cutoff].cache.get("micro_id")
+        return cutoff
+
+    def _sync_macro_world_from_micro(self, committed: List[TurningK]) -> bool:
         """把“已提交微观快照”增量同步到宏观世界（仅追加，不回退不替换）。"""
         s = self.state
         micro = s.turning_ks
@@ -357,7 +430,6 @@ class SegmentAnalyzer:
                 s.micro_id_seed = max(s.micro_id_seed, int(mid))
             micro_id_to_idx[mid] = i
 
-        committed = self._get_committed_micro_turning_ks()
         if not committed:
             return False
 
@@ -384,8 +456,14 @@ class SegmentAnalyzer:
         if last_synced_id in micro_id_to_idx:
             start_pos = micro_id_to_idx[last_synced_id]
         elif s.macro_turning_ks:
-            # 正常情况下不会出现；若发生，宁可冻结宏观也不做危险回退。
-            return False
+            # 若同步锚点被同向替换/延迟回写淘汰，使用“宏观末端时间锚”继续增量推进。
+            # 仅在稳定区视图内推进，不回退宏观历史。
+            last_macro_dt = s.macro_turning_ks[-1].dt
+            for i, tk in enumerate(committed):
+                if tk.dt <= last_macro_dt:
+                    start_pos = i
+                else:
+                    break
 
         for tk in committed[start_pos + 1 :]:
             if tk.cache.get("micro_id") in s.macro_excluded_micro_ids:
@@ -704,6 +782,19 @@ class SegmentAnalyzer:
                 "child_ids": list(node.child_ids),
             })
         return out
+
+    @property
+    def _debug_macro_sync_state(self) -> dict:
+        s = self.state
+        return {
+            "stable_cutoff_k_index": s.stable_cutoff_k_index,
+            "stable_cutoff_micro_id": s.stable_cutoff_micro_id,
+            "last_macro_stable_cutoff_k_index": s.last_macro_stable_cutoff_k_index,
+            "macro_last_synced_micro_id": s.macro_last_synced_micro_id,
+            "pending_leftmost_turning_idx": s.pending_leftmost_turning_idx,
+            "macro_turning_count": len(s.macro_turning_ks),
+            "micro_turning_count": len(s.turning_ks),
+        }
 
     def _check_actual_perfection(self, tk_start: Optional[TurningK], tk_end: TurningK) -> bool:
         """执行实时的结构完善性检查（Rule 3 的 Live 版本，供宏观审判层调用）

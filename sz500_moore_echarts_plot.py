@@ -629,14 +629,31 @@ def plot_moore_structure_echarts(
                     var res = '<b>' + k.axisValue + '</b><br/>' +
                               '开: ' + d[1] + '  收: <b>' + d[2] + '</b><br/>' +
                               '高: ' + d[4] + '  低: ' + d[3];
-                    if(m5 != null && !isNaN(parseFloat(m5))){
-                        res += '<br/><span style=\"color:#F39C12\">● MA5: ' + parseFloat(m5).toFixed(2) + '</span>';
+                    var m5_val = m5 != null ? parseFloat(m5) : null;
+                    var m34_val = m34 != null ? parseFloat(m34) : null;
+                    var m170_val = m170 != null ? parseFloat(m170) : null;
+                    
+                    if(m5_val !== null && !isNaN(m5_val)){
+                        res += '<br/><span style=\"color:#F39C12\">● MA5: ' + m5_val.toFixed(3) + '</span>';
                     }
-                    if(m34 != null && !isNaN(parseFloat(m34))){
-                        res += '  <span style=\"color:#FF4081\">● MA34: ' + parseFloat(m34).toFixed(2) + '</span>';
+                    if(m34_val !== null && !isNaN(m34_val)){
+                        res += '  <span style=\"color:#FF4081\">● MA34: ' + m34_val.toFixed(3) + '</span>';
                     }
-                    if(m170 != null && !isNaN(parseFloat(m170))){
-                        res += '  <span style=\"color:#2980B9\">● MA170: ' + parseFloat(m170).toFixed(2) + '</span>';
+                    if(m170_val !== null && !isNaN(m170_val)){
+                        res += '  <span style=\"color:#2980B9\">● MA170: ' + m170_val.toFixed(3) + '</span>';
+                    }
+                    
+                    var rels = [];
+                    if(m5_val !== null && !isNaN(m5_val) && m34_val !== null && !isNaN(m34_val)){
+                        var sign1 = m5_val > m34_val ? '>' : (m5_val < m34_val ? '<' : '=');
+                        rels.push('MA5 ' + sign1 + ' MA34');
+                    }
+                    if(m34_val !== null && !isNaN(m34_val) && m170_val !== null && !isNaN(m170_val)){
+                        var sign2 = m34_val > m170_val ? '>' : (m34_val < m170_val ? '<' : '=');
+                        rels.push('MA34 ' + sign2 + ' MA170');
+                    }
+                    if(rels.length > 0){
+                        res += '<br/><span style=\"color:#888; font-size:11px;\">关系: ' + rels.join('  |  ') + '</span>';
                     }
                     return res;
                 }"""),
@@ -937,18 +954,18 @@ if __name__ == "__main__":
         AnalyzeTask("000993", sdt="20190515",edt="20200920", desc="闽东电力"),
         AnalyzeTask("002286", sdt="20200328", edt="20200810", desc="保龄宝"),
         AnalyzeTask("300428", sdt="20200108", edt="20200520", desc="四通新材"),
-        AnalyzeTask("600707", sdt="20150301", edt="20210820", desc="彩虹股份"),
         AnalyzeTask("002613", sdt="20150801", edt="20210820", desc="北玻股份"),
         AnalyzeTask("002772", sdt="20160401", edt="20210701", desc="众兴菌业"),
         AnalyzeTask("000411", sdt="20160401", edt="20210701", desc="英特集团"),
         AnalyzeTask("000553", sdt="20181015", edt="20210701", desc="安道麦A"),
         AnalyzeTask("300339", sdt="20150415", edt="20210701", desc="润和软件"),
+        AnalyzeTask("600707", sdt="20140601", edt="20210820", desc="彩虹股份"),
         # AnalyzeTask("002222", sdt="20220415", edt="20250201", desc="福晶科技"),
         AnalyzeTask("300490", sdt="20160115", edt="20210701", desc="华自科技"),
     ]
 
     # 🎯 切换这里
-    task = tasks[-1]
+    task = tasks[-2]
 
     try:
         symbol = task.symbol
@@ -960,6 +977,7 @@ if __name__ == "__main__":
         engine = MooreCZSC(
             bars,
             ma34_cross_as_valid_gate=True,
+            ma34_cross_expand_one_k=False,
             audit_link_rounds=3,
             enable_pre_round=enable_pre_round,
             replay_centers_after_macro_swallow=replay_centers_after_macro_swallow,
