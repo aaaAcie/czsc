@@ -186,6 +186,7 @@ def plot_moore_structure_echarts(
     ghost_centers = getattr(engine, "ghost_centers", [])
 
     daily_segments = getattr(engine, "daily_segments", getattr(engine, "higher_segments", []))
+    daily_centers = getattr(engine, "daily_centers", [])
     daily_active_center = getattr(engine, "daily_active_center", getattr(engine, "higher_active_center", None))
     daily_archived_centers = getattr(engine, "daily_archived_centers", getattr(engine, "higher_archived_centers", []))
 
@@ -403,7 +404,7 @@ def plot_moore_structure_echarts(
             else:
                 fill, border = "rgba(149,165,166,0.15)", "#7F8C8D" # 灰色：幽灵
 
-            label_txt = f"ID:{cid} {layer_name}-{getattr(ct, 'method', '?')}"
+            label_txt = f"ID:{cid} {layer_name}-{getattr(ct, 'method', '?')}\n上:{y_hi:.3f} 下:{y_lo:.3f}"
             data.append([
                 {
                     "xAxis": _dt_str(ct.start_dt), "yAxis": y_lo,
@@ -438,7 +439,7 @@ def plot_moore_structure_echarts(
                 fill, border = "rgba(243, 156, 18, 0.10)", "#F39C12"
                 border_type = "dashed"
 
-            label_txt = f"D{idx} T{ct.overlap_type} {ct.status}"
+            label_txt = f"D{idx} T{ct.overlap_type} {ct.status}\n上:{y_hi:.3f} 下:{y_lo:.3f}"
             data.append([
                 {
                     "xAxis": _dt_str(start_dt), "yAxis": y_lo,
@@ -449,8 +450,10 @@ def plot_moore_structure_echarts(
             ])
         return data
 
-    final_daily_center = daily_active_center or (daily_archived_centers[-1] if daily_archived_centers else None)
-    daily_center_area_data = _prepare_daily_center_area_data([final_daily_center] if final_daily_center else [], "daily_active")
+    if not daily_centers:
+        final_daily_center = daily_active_center or (daily_archived_centers[-1] if daily_archived_centers else None)
+        daily_centers = [final_daily_center] if final_daily_center else []
+    daily_center_area_data = _prepare_daily_center_area_data(daily_centers, "daily_active")
     # ── 6. 构建各图例系列 ─────────────────────────────────────────────
     def _seg_series(name, seg_list, color, width, alpha=0.85):
         data = _seg_markline_data(seg_list, color, width, alpha)
@@ -996,15 +999,20 @@ if __name__ == "__main__":
 
         daily_active_center = getattr(engine, "daily_active_center", getattr(engine, "higher_active_center", None))
         daily_archived_centers = getattr(engine, "daily_archived_centers", getattr(engine, "higher_archived_centers", []))
-        final_daily_center = daily_active_center or (daily_archived_centers[-1] if daily_archived_centers else None)
-        if final_daily_center:
-            center_source = "active" if daily_active_center else "archived_last"
+        daily_centers = getattr(engine, "daily_centers", [])
+        fallback_daily_center = daily_active_center or (daily_archived_centers[-1] if daily_archived_centers else None)
+        debug_daily_centers = daily_centers or ([fallback_daily_center] if fallback_daily_center else [])
+        if debug_daily_centers:
+            center_source = "filtered_30f" if daily_centers else ("active" if daily_active_center else "archived_last")
             print(
-                f"DailyCenter: {center_source} "
-                f"{_dt_str(final_daily_center.start_dt)} -> {_dt_str(final_daily_center.end_dt)} "
-                f"[{final_daily_center.low:.3f}, {final_daily_center.high:.3f}] "
-                f"T{final_daily_center.overlap_type} {final_daily_center.status}"
+                f"DailyCenters: {center_source} count={len(debug_daily_centers)}"
             )
+            for final_daily_center in debug_daily_centers:
+                print(
+                    f"DailyCenter: {_dt_str(final_daily_center.start_dt)} -> {_dt_str(final_daily_center.end_dt)} "
+                    f"[{final_daily_center.low:.3f}, {final_daily_center.high:.3f}] "
+                    f"T{final_daily_center.overlap_type} {final_daily_center.status}"
+                )
         else:
             print("DailyCenter: None")
 

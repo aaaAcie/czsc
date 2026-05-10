@@ -145,6 +145,10 @@ class MooreCZSC:
         return self.daily_segment_analyzer.active_center
 
     @property
+    def daily_centers(self) -> List[DailySegmentCenter]:
+        return self.daily_segment_analyzer.daily_centers
+
+    @property
     def daily_archived_centers(self) -> List[DailySegmentCenter]:
         return self.daily_segment_analyzer.archived_centers
 

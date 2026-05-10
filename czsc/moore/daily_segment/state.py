@@ -19,6 +19,7 @@ class DailySegmentState:
     current_segments: List[MooreSegment] = field(default_factory=list)
     pending_daily_segments: List[MooreSegment] = field(default_factory=list)
     completed_segments: List[DailySegment] = field(default_factory=list)
+    daily_centers: List[DailySegmentCenter] = field(default_factory=list)
     active_center: Optional[DailySegmentCenter] = None
     archived_centers: List[DailySegmentCenter] = field(default_factory=list)
     candidates: List[DailySegmentCenter] = field(default_factory=list)

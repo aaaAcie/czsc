@@ -10,6 +10,53 @@ from ...objects import MooreSegment
 from ..utils import seg_end_index, seg_start_index
 
 
+def _turning_index(tk) -> int:
+    return tk.turning_k_index if tk.turning_k_index is not None else tk.k_index
+
+
+def _local_extremes(
+    ma_array: Sequence[Optional[float]],
+    start_idx: int,
+    end_idx: int,
+    want_peak: bool,
+    sign: int,
+) -> list[Tuple[int, float]]:
+    left = min(start_idx, end_idx)
+    right = max(start_idx, end_idx)
+    found: list[Tuple[int, float]] = []
+    for i in range(left, right + 1):
+        if i <= 0 or i >= len(ma_array) - 1:
+            continue
+        values = (ma_array[i - 1], ma_array[i], ma_array[i + 1])
+        if any(v is None for v in values):
+            continue
+        prev_norm = values[0] * sign
+        curr_norm = values[1] * sign
+        next_norm = values[2] * sign
+        if want_peak:
+            if curr_norm >= prev_norm and curr_norm >= next_norm and not (prev_norm == curr_norm == next_norm):
+                found.append((i, values[1]))
+        else:
+            if curr_norm <= prev_norm and curr_norm <= next_norm and not (prev_norm == curr_norm == next_norm):
+                found.append((i, values[1]))
+    return found
+
+
+def find_best_local_extreme(
+    ma_array: Sequence[Optional[float]],
+    start_idx: int,
+    end_idx: int,
+    want_peak: bool,
+    sign: int,
+) -> Tuple[Optional[int], Optional[float]]:
+    extremes = _local_extremes(ma_array, start_idx, end_idx, want_peak, sign)
+    if not extremes:
+        return None, None
+    if want_peak:
+        return max(extremes, key=lambda x: (x[1] * sign, x[0]))
+    return min(extremes, key=lambda x: (x[1] * sign, -x[0]))
+
+
 def find_local_extreme(
     ma_array: Sequence[Optional[float]],
     start_idx: int,
@@ -79,13 +126,9 @@ def find_b_point(
     ma_array: Sequence[Optional[float]],
     sign: int,
 ) -> Tuple[Optional[int], Optional[float]]:
-    end_23 = seg_end_index(seg_23)
-    start_23 = seg_start_index(seg_23)
-    b_idx, b_val = find_local_extreme(ma_array, end_23, start_23 - 1, -1, True, sign)
-    if b_val is not None:
-        return b_idx, b_val
-    right_scan_end_index = seg_end_index(seg_34)
-    return find_local_extreme(ma_array, end_23, right_scan_end_index + 1, 1, True, sign)
+    start_idx = _turning_index(seg_23.start_k)
+    end_idx = _turning_index(seg_34.end_k)
+    return find_best_local_extreme(ma_array, start_idx, end_idx, True, sign)
 
 
 def find_a_point(
@@ -94,7 +137,8 @@ def find_a_point(
     ma_array: Sequence[Optional[float]],
     sign: int,
 ) -> Tuple[Optional[int], Optional[float]]:
-    return find_local_extreme(ma_array, b_idx, seg_start_index(seg_12) - 1, -1, False, sign)
+    start_idx = _turning_index(seg_12.start_k)
+    return find_best_local_extreme(ma_array, start_idx, b_idx, False, sign)
 
 
 def find_d_point(
@@ -103,7 +147,7 @@ def find_d_point(
     ma_array: Sequence[Optional[float]],
     sign: int,
 ) -> Tuple[Optional[int], Optional[float]]:
-    return find_local_extreme(ma_array, b_idx + 1, scan_end_index + 1, 1, True, sign)
+    return find_best_local_extreme(ma_array, b_idx + 1, scan_end_index, True, sign)
 
 
 def find_c_point(
@@ -112,12 +156,13 @@ def find_c_point(
     ma_array: Sequence[Optional[float]],
     sign: int,
 ) -> Tuple[Optional[int], Optional[float]]:
-    return find_local_extreme(ma_array, b_idx + 1, d_idx + 1, 1, False, sign)
+    return find_best_local_extreme(ma_array, b_idx + 1, d_idx, False, sign)
 
 
 def find_center(
     segments: Sequence[MooreSegment],
     ma_array: Sequence[Optional[float]],
+    trend_direction: Optional[Direction] = None,
 ) -> Optional[dict]:
     i = 0
     while i + 3 < len(segments):
@@ -127,7 +172,8 @@ def find_center(
         seg_45 = segments[i + 3]
         seg_56 = segments[i + 4] if i + 4 < len(segments) else None
 
-        sign = 1 if seg_12.direction == Direction.Down else -1
+        direction = trend_direction or seg_12.direction
+        sign = 1 if direction == Direction.Down else -1
 
         b_idx, b_val = find_b_point(seg_23, seg_34, ma_array, sign)
         if b_val is None:
@@ -177,13 +223,13 @@ def find_center(
             i += 2
             continue
 
-        center_high = min(b_val * sign, d_val * sign) * sign
-        center_low = max(a_val * sign, c_val * sign) * sign
-        high = max(center_high, center_low)
-        low = min(center_high, center_low)
-        if low >= high:
+        upper_norm = min(b_val * sign, d_val * sign)
+        lower_norm = max(a_val * sign, c_val * sign)
+        if lower_norm >= upper_norm:
             i += 2
             continue
+        high = max(upper_norm * sign, lower_norm * sign)
+        low = min(upper_norm * sign, lower_norm * sign)
 
         return {
             "high": high,

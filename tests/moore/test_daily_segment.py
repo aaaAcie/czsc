@@ -5,7 +5,7 @@ import pytest
 
 from czsc.connectors import research
 from czsc.moore.analyze import MooreCZSC
-from czsc.moore.daily_segment import DailySegment, DailySegmentAnalyzer
+from czsc.moore.daily_segment import DailySegment, DailySegmentAnalyzer, DailySegmentCenter
 from czsc.moore.daily_segment.center_algo import find_b_point, find_center, find_d_point
 from czsc.moore.daily_segment.utils import slice_segments_from_anchor
 from czsc.moore.objects import MooreSegment, TurningK
@@ -138,6 +138,24 @@ def test_find_b_and_d_respect_structure_boundaries():
     d_idx, d_val = find_d_point(18, seg_56.end_k.k_index, ma34, sign=1)
     assert d_idx == 20
     assert d_val == 6
+
+
+def test_find_b_chooses_strongest_local_extreme_in_turning_window():
+    seg_23 = make_seg(10, 20, Direction.Up, 10, 12, start_turning_idx=11, end_turning_idx=20)
+    seg_34 = make_seg(21, 30, Direction.Down, 12, 9, start_turning_idx=21, end_turning_idx=28)
+
+    ma34 = [None] * 40
+    ma34[13] = 3
+    ma34[14] = 7
+    ma34[15] = 4
+    ma34[23] = 5
+    ma34[24] = 11
+    ma34[25] = 6
+    ma34[29] = 30
+
+    b_idx, b_val = find_b_point(seg_23, seg_34, ma34, sign=1)
+    assert b_idx == 24
+    assert b_val == 11
 
 
 def test_center_algo_legacy_import_path_stays_compatible():
@@ -558,6 +576,181 @@ def test_600707_daily_segments_match_expected_long_trend_and_swallow():
     assert daily_pairs[:2] == [("mV1T", "mV36B"), ("mV36B", "mV43T")]
     assert ("mV4B", "mV6T") not in daily_pairs
     assert engine.daily_segments[1].segments[0].cache.get("is_macro_swallow") is True
+
+
+def test_600707_daily_centers_use_filtered_30f_segments():
+    bars = research.get_raw_bars_origin("600707", sdt="20140601", edt="20210820")
+    if not bars:
+        pytest.skip("no bars for 600707")
+
+    engine = MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+    )
+    display_tks = getattr(engine, "micro_turning_ks", engine.turning_ks)
+    label_by_key = {
+        (tk.k_index, tk.dt, tk.price): f"mV{i}{'T' if tk.mark == Mark.G else 'B'}"
+        for i, tk in enumerate(display_tks)
+    }
+
+    def label(tk):
+        return label_by_key[(tk.k_index, tk.dt, tk.price)]
+
+    centers = engine.daily_centers
+    assert centers
+    first = centers[0]
+
+    assert (label(first.segments[0].start_k), label(first.segments[-1].end_k)) == ("mV1T", "mV9T")
+    assert first.overlap_type == 3
+    assert first.status == "FINAL"
+    assert round(first.low, 3) == 11.431
+    assert round(first.high, 3) == 11.875
+    assert round(first.points["A"][1], 3) == 11.431
+    assert round(first.points["B"][1], 3) == 11.875
+    assert all(not seg.cache.get("is_macro_swallow") for seg in first.segments)
+
+
+def test_600707_daily_centers_follow_parent_daily_segment_direction():
+    bars = research.get_raw_bars_origin("600707", sdt="20140601", edt="20210820")
+    if not bars:
+        pytest.skip("no bars for 600707")
+
+    engine = MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+    )
+    display_tks = getattr(engine, "micro_turning_ks", engine.turning_ks)
+    label_by_key = {
+        (tk.k_index, tk.dt, tk.price): f"mV{i}{'T' if tk.mark == Mark.G else 'B'}"
+        for i, tk in enumerate(display_tks)
+    }
+
+    def label(tk):
+        return label_by_key[(tk.k_index, tk.dt, tk.price)]
+
+    center = next(
+        c
+        for c in engine.daily_centers
+        if (label(c.segments[0].start_k), label(c.segments[-1].end_k)) == ("mV1T", "mV9T")
+    )
+
+    assert center.cache["daily_segment_direction"] == Direction.Down.value
+    assert round(center.points["B"][1], 3) == 11.875
+
+
+def test_600707_daily_centers_drop_overlapping_sliding_derivatives():
+    bars = research.get_raw_bars_origin("600707", sdt="20140601", edt="20210820")
+    if not bars:
+        pytest.skip("no bars for 600707")
+
+    engine = MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+    )
+    display_tks = getattr(engine, "micro_turning_ks", engine.turning_ks)
+    label_by_key = {
+        (tk.k_index, tk.dt, tk.price): f"mV{i}{'T' if tk.mark == Mark.G else 'B'}"
+        for i, tk in enumerate(display_tks)
+    }
+
+    def label(tk):
+        return label_by_key[(tk.k_index, tk.dt, tk.price)]
+
+    spans = [(label(c.segments[0].start_k), label(c.segments[-1].end_k)) for c in engine.daily_centers]
+
+    assert ("mV1T", "mV9T") in spans
+    assert ("mV10B", "mV24B") in spans
+    assert ("mV9T", "mV20B") not in spans
+    assert ("mV2B", "mV10B") not in spans
+    assert ("mV3T", "mV11T") not in spans
+
+
+def test_overlapping_daily_centers_keep_first_generated_type3():
+    analyzer = DailySegmentAnalyzer()
+    shared_1 = make_seg(20, 30, Direction.Down, 12, 9)
+    shared_2 = make_seg(30, 40, Direction.Up, 9, 11)
+    slower_left = DailySegmentCenter(
+        segments=[
+            make_seg(0, 10, Direction.Down, 20, 10),
+            make_seg(10, 20, Direction.Up, 10, 12),
+            shared_1,
+            shared_2,
+            make_seg(40, 100, Direction.Down, 11, 6),
+        ],
+        high=12,
+        low=10,
+        overlap_type=3,
+        status="FINAL",
+    )
+    faster_right = DailySegmentCenter(
+        segments=[
+            shared_1,
+            shared_2,
+            make_seg(40, 50, Direction.Down, 11, 8),
+            make_seg(50, 60, Direction.Up, 8, 10),
+            make_seg(60, 70, Direction.Down, 10, 7),
+        ],
+        high=11,
+        low=9,
+        overlap_type=3,
+        status="FINAL",
+    )
+
+    selected = analyzer._dedupe_overlapping_daily_centers([slower_left, faster_right])
+
+    assert selected == [faster_right]
+
+
+def test_overlapping_daily_centers_keep_earliest_third_segment_ba_entry():
+    analyzer = DailySegmentAnalyzer()
+    shared_1 = make_seg(20, 30, Direction.Down, 12, 9)
+    shared_2 = make_seg(30, 40, Direction.Up, 9, 11)
+    later_entry = DailySegmentCenter(
+        segments=[
+            make_seg(0, 10, Direction.Down, 20, 10),
+            make_seg(10, 20, Direction.Up, 10, 12),
+            shared_1,
+            shared_2,
+            make_seg(40, 100, Direction.Down, 11, 6),
+        ],
+        high=12,
+        low=10,
+        overlap_type=3,
+        status="FINAL",
+        points={"A": (10, 10), "B": (20, 12), "C": (55, 9), "D": (80, 11)},
+        cache={"third_entry_index": 70},
+    )
+    earlier_entry = DailySegmentCenter(
+        segments=[
+            shared_1,
+            shared_2,
+            make_seg(40, 50, Direction.Down, 11, 8),
+            make_seg(50, 60, Direction.Up, 8, 10),
+            make_seg(60, 70, Direction.Down, 10, 7),
+        ],
+        high=11,
+        low=9,
+        overlap_type=3,
+        status="FINAL",
+        points={"A": (10, 10), "B": (20, 12), "C": (65, 9), "D": (80, 11)},
+        cache={"third_entry_index": 60},
+    )
+
+    selected = analyzer._dedupe_overlapping_daily_centers([later_entry, earlier_entry])
+
+    assert selected == [earlier_entry]
 
 
 def test_002613_daily_segments_match_expected_blue_split():

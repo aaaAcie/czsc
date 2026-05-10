@@ -80,6 +80,10 @@ class DailySegmentAnalyzer:
         return self.state.active_center
 
     @property
+    def daily_centers(self) -> List[DailySegmentCenter]:
+        return self.state.daily_centers
+
+    @property
     def archived_centers(self) -> List[DailySegmentCenter]:
         return self.state.archived_centers
 
@@ -103,17 +107,20 @@ class DailySegmentAnalyzer:
         )
         if s.anchor_k_index is None or should_fallback or danger is None:
             self._full_rebuild_from_scratch()
+            self._rebuild_daily_centers()
             return
 
         self._restore_from_anchor_snapshot()
         for seg in danger:
             self._process_new_segment(seg)
+        self._rebuild_daily_centers()
 
     def _full_rebuild_from_scratch(self):
         s = self.state
         s.current_segments = []
         s.pending_daily_segments = []
         s.completed_segments = []
+        s.daily_centers = []
         s.active_center = None
         s.archived_centers = []
         s.candidates = []
@@ -125,6 +132,119 @@ class DailySegmentAnalyzer:
 
         for seg in s.base_segments:
             self._process_new_segment(seg)
+
+    def _is_excluded_from_daily_center(self, seg: MooreSegment) -> bool:
+        """Hook for daily-center source filtering.
+
+        Today the only default exclusion is the macro swallow segment that has
+        already been promoted into daily-segment evidence.  Callers can extend
+        the mouth by setting ``exclude_from_daily_center`` in segment cache.
+        """
+        return bool(seg.cache.get("exclude_from_daily_center") or seg.cache.get("is_macro_swallow"))
+
+    def _daily_center_source_segments(self) -> List[MooreSegment]:
+        return [seg for seg in self.state.base_segments if not self._is_excluded_from_daily_center(seg)]
+
+    def _daily_segment_center_source_segments(self, daily_segment: DailySegment) -> List[MooreSegment]:
+        return [seg for seg in daily_segment.segments if not self._is_excluded_from_daily_center(seg)]
+
+    @staticmethod
+    def _center_segment_keys(center: DailySegmentCenter) -> set:
+        return {(seg_start_index(seg), seg_end_index(seg)) for seg in center.segments}
+
+    @staticmethod
+    def _center_generation_rank(center: DailySegmentCenter) -> tuple:
+        if center.overlap_type == 3 and center.status == "FINAL":
+            center_type_rank = 0
+        elif center.overlap_type == 3:
+            center_type_rank = 1
+        else:
+            center_type_rank = 2
+        point_indices = [point[0] for point in center.points.values()]
+        generation_index = center.cache.get("third_entry_index")
+        if generation_index is None:
+            generation_index = max(point_indices) if point_indices else center.end_index
+        c_index = center.points.get("C", center.points.get("B", (center.start_index, None)))[0]
+        return (center_type_rank, generation_index, c_index, center.start_index, center.low, center.high)
+
+    @staticmethod
+    def _third_segment_entry_index(result: dict, ma_array) -> Optional[int]:
+        if result.get("overlap_type") != 3:
+            return None
+        points = result.get("points") or {}
+        if not {"A", "B", "C", "D"} <= set(points):
+            return None
+        a_val = points["A"][1]
+        b_val = points["B"][1]
+        c_idx = points["C"][0]
+        d_idx = points["D"][0]
+        low = min(a_val, b_val)
+        high = max(a_val, b_val)
+        for idx in range(c_idx, d_idx + 1):
+            if idx >= len(ma_array):
+                break
+            ma_val = ma_array[idx]
+            if ma_val is not None and low < ma_val < high:
+                return idx
+        return d_idx
+
+    def _dedupe_overlapping_daily_centers(self, centers: Sequence[DailySegmentCenter]) -> List[DailySegmentCenter]:
+        selected: List[DailySegmentCenter] = []
+        used_keys = set()
+        for center in sorted(centers, key=self._center_generation_rank):
+            keys = self._center_segment_keys(center)
+            if keys & used_keys:
+                continue
+            selected.append(center)
+            used_keys.update(keys)
+        return selected
+
+    def _rebuild_daily_centers(self):
+        s = self.state
+        centers: List[DailySegmentCenter] = []
+        seen = set()
+        for daily_segment in s.completed_segments:
+            source_segments = self._daily_segment_center_source_segments(daily_segment)
+            for start in range(max(0, len(source_segments) - 3)):
+                result = find_center(source_segments[start:], s.ma34, trend_direction=daily_segment.direction)
+                if not result:
+                    continue
+                seg_slice = result["segments"]
+                key = (
+                    seg_start_index(seg_slice[0]),
+                    seg_end_index(seg_slice[-1]),
+                    round(result["high"], 8),
+                    round(result["low"], 8),
+                    result["overlap_type"],
+                    result["status"],
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                centers.append(
+                    DailySegmentCenter(
+                        segments=list(seg_slice),
+                        high=result["high"],
+                        low=result["low"],
+                        overlap_type=result["overlap_type"],
+                        status=result["status"],
+                        points=result["points"],
+                        cache={
+                            "identity_key": key,
+                            "source": "daily_segment_internal",
+                            "daily_segment_direction": daily_segment.direction.value,
+                            "generation_index": max(point[0] for point in result["points"].values()),
+                            "third_entry_index": self._third_segment_entry_index(result, s.ma34),
+                            "excluded_reasons": ("is_macro_swallow", "exclude_from_daily_center"),
+                        },
+                    )
+                )
+
+        type3 = [c for c in centers if c.overlap_type == 3]
+        for c in centers:
+            if c.overlap_type == 1 and any(c.check_segment_overlap(other) for other in type3):
+                c.is_active = False
+        s.daily_centers = self._dedupe_overlapping_daily_centers([c for c in centers if c.is_active])
 
     def _restore_from_anchor_snapshot(self):
         s = self.state
