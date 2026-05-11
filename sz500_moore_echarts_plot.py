@@ -580,8 +580,8 @@ def plot_moore_structure_echarts(
 
     s = _raw_seg_series(
         "日线级别线段(Pending)",
-        _daily_seg_markline_data(daily_pending_segments, "#E67E22", 3.8, alpha=0.9, line_type="dashed"),
-        "#E67E22",
+        _daily_seg_markline_data(daily_pending_segments, "#C0392B", 3.8, alpha=0.9, line_type="dashed"),
+        "#C0392B",
     )
     if s:
         daily_series.append(s)
@@ -1051,16 +1051,18 @@ if __name__ == "__main__":
         AnalyzeTask("002772", sdt="20160401", edt="20210701", desc="众兴菌业"),
         AnalyzeTask("000411", sdt="20160401", edt="20210701", desc="英特集团"),
         AnalyzeTask("000553", sdt="20181015", edt="20210701", desc="安道麦A"),
-        AnalyzeTask("300339", sdt="20150415", edt="20210701", desc="润和软件"),
         AnalyzeTask("002613", sdt="20160801", edt="20210820", desc="北玻股份"),
         AnalyzeTask("600707", sdt="20140601", edt="20210820", desc="彩虹股份"),
         AnalyzeTask("300490", sdt="20160115", edt="20210701", desc="华自科技"),
+        AnalyzeTask("603178", sdt="20150115", edt="20210701", desc="圣龙股份"),
+        AnalyzeTask("300339", sdt="20150415", edt="20210701", desc="润和软件"),
+
         # AnalyzeTask("002222", sdt="20220415", edt="20250201", desc="福晶科技"),
     ]
 
     # 🎯 切换这里
-    task = tasks[0]
-
+    # task = tasks[-1]
+    task = tasks[1]
     try:
         symbol = task.symbol
         logger.info(f"正在拉取标的 {symbol} ({task.desc}) | 时间: {task.sdt} ~ {task.edt}")

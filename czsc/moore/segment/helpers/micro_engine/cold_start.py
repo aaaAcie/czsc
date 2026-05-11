@@ -5,7 +5,7 @@ from czsc.py.enum import Mark
 
 
 # 本地实验开关：默认关闭，避免冷启动改写既有 30F 事实仓。
-ENABLE_MICRO_COLD_START = False
+ENABLE_MICRO_COLD_START = True
 
 
 class ColdStartHelper:

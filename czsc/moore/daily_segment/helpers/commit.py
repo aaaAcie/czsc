@@ -40,6 +40,7 @@ class CommitDecision:
     pending_segments: List
     tail_offset: Optional[int] = None
     independence: Optional["IndependenceDecision"] = None
+    extra_segments: tuple = ()
 
     @property
     def next_tail_offset(self) -> int:
@@ -55,6 +56,10 @@ class IndependenceDecision:
     center_high: Optional[float] = None
     requires_new_extreme: bool = False
     new_extreme_ok: Optional[bool] = None
+    third_point_index: Optional[int] = None
+    third_point_price: Optional[float] = None
+    new_extreme_index: Optional[int] = None
+    new_extreme_price: Optional[float] = None
     reason: str = ""
 
 
@@ -209,7 +214,9 @@ def _candidate_has_swallow(candidate: WindowCandidate) -> bool:
 def _is_strong_reverse_candidate(candidate: WindowCandidate, segments: Sequence, ma34, ma170) -> bool:
     if len(candidate.segments) >= 5:
         return True
-    if candidate.kind != "regular" or _candidate_has_swallow(candidate):
+    if candidate.kind == "non_same":
+        return True
+    if _candidate_has_swallow(candidate):
         lag_segment = segments[candidate.end_offset] if candidate.end_offset < len(segments) else None
         return check_ma_cross_correlation(candidate.segments, ma34, ma170, lag_segment)
     return False
@@ -434,6 +441,8 @@ def should_commit_leading_swallow(
         return False
     if not check_daily_segment_continuity([segments[0]], completed_segments):
         return False
+    if len(segments) < 5:
+        return False
     swallow_end = seg_end_price(segments[0])
     for candidate in regular_candidates_from_start(
         segments,
@@ -491,6 +500,9 @@ def find_delayed_commit_decision(
         swallow_fallback: Optional[CommitDecision] = None
         chosen_decision: Optional[CommitDecision] = None
         for primary in _iter_terminal_candidates(primary_candidates, segments):
+            if primary.kind == "swallow":
+                best_pending = primary.segments
+                continue
             reverse_candidates = find_reverse_confirmation_candidates(
                 segments,
                 primary.end_offset,

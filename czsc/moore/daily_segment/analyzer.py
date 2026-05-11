@@ -2,6 +2,7 @@
 """日线级别线段分析器。"""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
 from czsc.py.enum import Direction, Mark
@@ -11,6 +12,8 @@ from ..objects import MooreSegment
 from .centers.algo import find_center
 from .helpers.commit import (
     CommitDecision,
+    IndependenceDecision,
+    WindowCandidate,
     candidates_from_start,
     find_delayed_commit_decision,
     is_valid_regular_window,
@@ -38,9 +41,21 @@ from .utils import (
     clone_completed_segments_snapshot,
     collect_bars_by_index,
     seg_end_index,
+    seg_end_price,
     seg_start_index,
+    seg_start_price,
     slice_segments_from_anchor,
 )
+
+
+@dataclass(frozen=True)
+class RepairProposal:
+    """日线中枢 owner-chain 修正提案。"""
+
+    seed_result: dict
+    refined_segment: MooreSegment
+    source_segments: List[MooreSegment]
+    promoted_result: dict
 
 
 class DailySegmentAnalyzer:
@@ -172,6 +187,7 @@ class DailySegmentAnalyzer:
 
         for seg in s.base_segments:
             self._process_new_segment(seg)
+        self._finalize_terminal_swallow_pending()
 
     def _is_excluded_from_daily_center(self, seg: MooreSegment) -> bool:
         """Hook for daily-center source filtering.
@@ -251,6 +267,10 @@ class DailySegmentAnalyzer:
     @staticmethod
     def _center_segment_keys(center: DailySegmentCenter) -> set:
         return {(seg_start_index(seg), seg_end_index(seg)) for seg in center.segments}
+
+    @classmethod
+    def _center_segment_overlap_count(cls, left: DailySegmentCenter, right: DailySegmentCenter) -> int:
+        return len(cls._center_segment_keys(left) & cls._center_segment_keys(right))
 
     @staticmethod
     def _tk_key(tk) -> tuple:
@@ -371,16 +391,6 @@ class DailySegmentAnalyzer:
             },
         )
 
-    def _make_overlap_promotion_refined_segment(self, start_tk, end_tk, source_result: dict) -> MooreSegment:
-        refined = self._make_refined_segment(start_tk, end_tk, source_result)
-        refined.cache.update(
-            {
-                "repair_context": "early_overlap_to_badc",
-                "promoted_overlap_type": source_result.get("overlap_type"),
-            }
-        )
-        return refined
-
     def _find_source_segment_offset(self, source_segments: Sequence[MooreSegment], target: MooreSegment) -> Optional[int]:
         target_key = self._seg_key(target)
         for idx, seg in enumerate(source_segments):
@@ -392,49 +402,77 @@ class DailySegmentAnalyzer:
         refined_key = self._seg_key(refined)
         return any(self._seg_key(seg) == refined_key for seg in result.get("segments", []))
 
-    def _early_overlap_repair_source_variants(
+    def _replace_source_span_with_refined(
         self,
         source_segments: Sequence[MooreSegment],
+        refined: MooreSegment,
+    ) -> Optional[List[MooreSegment]]:
+        start_offset = None
+        end_offset = None
+        for idx, seg in enumerate(source_segments):
+            if self._tk_key(seg.start_k) == self._tk_key(refined.start_k):
+                start_offset = idx
+            if start_offset is not None and self._tk_key(seg.end_k) == self._tk_key(refined.end_k):
+                end_offset = idx
+                break
+        if start_offset is None or end_offset is None or start_offset > end_offset:
+            return None
+        return list(source_segments[:start_offset]) + [refined] + list(source_segments[end_offset + 1 :])
+
+    def _build_owner_chain_repair_proposals(
+        self,
+        source_segments: Sequence[MooreSegment],
+        candidate_result: dict,
         trend_direction: Direction,
-    ) -> List[tuple[List[MooreSegment], MooreSegment]]:
-        variants: List[tuple[List[MooreSegment], MooreSegment]] = []
+    ) -> List[RepairProposal]:
+        if candidate_result.get("overlap_type") >= 3:
+            return []
+        segs = candidate_result.get("segments") or []
+        if len(segs) < 4 or "A" not in candidate_result.get("points", {}) or "B" not in candidate_result.get("points", {}):
+            return []
+
+        proposals: List[RepairProposal] = []
         seen = set()
-        for start in range(max(0, len(source_segments) - 3)):
-            result = find_center(source_segments[start:], self.state.ma34, trend_direction=trend_direction)
-            if not result or result.get("overlap_type") >= 3:
-                continue
-            seg_slice = result.get("segments") or []
-            if len(seg_slice) != 4:
-                continue
-            offset = self._find_source_segment_offset(source_segments, seg_slice[0])
-            if offset is None or offset + 3 >= len(source_segments):
-                continue
+        for start_idx in range(len(segs) - 1):
+            start_tk = segs[start_idx].end_k
+            for end_idx in range(start_idx + 1, len(segs)):
+                end_tk = segs[end_idx].end_k
+                if self._tk_key(start_tk) == self._tk_key(end_tk):
+                    continue
+                if self._segment_between_endpoints(start_tk, end_tk, source_segments) is not None:
+                    continue
+                refined = self._make_refined_segment(start_tk, end_tk, candidate_result)
+                refined.cache.update(
+                    {
+                        "repair_context": "owner_chain_proposal",
+                        "promoted_overlap_type": candidate_result.get("overlap_type"),
+                    }
+                )
+                refined_key = self._seg_key(refined)
+                if refined_key in seen:
+                    continue
+                repaired_source_segments = self._replace_source_span_with_refined(source_segments, refined)
+                if repaired_source_segments is None:
+                    continue
 
-            start_tk = seg_slice[1].start_k
-            end_tk = seg_slice[-1].end_k
-            if self._segment_between_endpoints(start_tk, end_tk, source_segments) is not None:
-                continue
-            refined = self._make_overlap_promotion_refined_segment(start_tk, end_tk, result)
-            refined_key = self._seg_key(refined)
-            if refined_key in seen:
-                continue
-            variant = list(source_segments[: offset + 1]) + [refined] + list(source_segments[offset + 4 :])
-
-            promotes_to_type3 = False
-            for variant_start in range(max(0, len(variant) - 3)):
-                promoted = find_center(variant[variant_start:], self.state.ma34, trend_direction=trend_direction)
-                if (
-                    promoted
-                    and promoted.get("overlap_type") == 3
-                    and self._variant_contains_segment(promoted, refined)
-                ):
-                    promotes_to_type3 = True
-                    break
-            if not promotes_to_type3:
-                continue
-            seen.add(refined_key)
-            variants.append((variant, refined))
-        return variants
+                for variant_start in range(max(0, len(repaired_source_segments) - 3)):
+                    promoted = find_center(repaired_source_segments[variant_start:], self.state.ma34, trend_direction=trend_direction)
+                    if (
+                        promoted
+                        and promoted.get("overlap_type") == 3
+                        and self._variant_contains_segment(promoted, refined)
+                    ):
+                        seen.add(refined_key)
+                        proposals.append(
+                            RepairProposal(
+                                seed_result=candidate_result,
+                                refined_segment=refined,
+                                source_segments=repaired_source_segments,
+                                promoted_result=promoted,
+                            )
+                        )
+                        break
+        return proposals
 
     def _candidate_owner_chain_repair(
         self,
@@ -553,13 +591,10 @@ class DailySegmentAnalyzer:
 
     def _dedupe_overlapping_daily_centers(self, centers: Sequence[DailySegmentCenter]) -> List[DailySegmentCenter]:
         selected: List[DailySegmentCenter] = []
-        used_keys = set()
         for center in sorted(centers, key=self._center_generation_rank):
-            keys = self._center_segment_keys(center)
-            if keys & used_keys:
+            if any(self._center_segment_overlap_count(center, kept) > 1 for kept in selected):
                 continue
             selected.append(center)
-            used_keys.update(keys)
         return selected
 
     def _record_center_result(
@@ -668,10 +703,12 @@ class DailySegmentAnalyzer:
         for daily_segment in daily_segments:
             source_segments = self._daily_segment_center_source_segments(daily_segment)
             source_accumulator.extend(source_segments)
+            candidate_results = []
             for start in range(max(0, len(source_segments) - 3)):
                 result = find_center(source_segments[start:], self.state.ma34, trend_direction=daily_segment.direction)
                 if not result:
                     continue
+                candidate_results.append(result)
                 self._record_center_result(
                     centers,
                     seen,
@@ -686,24 +723,21 @@ class DailySegmentAnalyzer:
                     "expanded_continuous_30f",
                 )
 
-            for repaired_source_segments, refined in self._early_overlap_repair_source_variants(source_segments, daily_segment.direction):
-                for start in range(max(0, len(repaired_source_segments) - 3)):
-                    result = find_center(repaired_source_segments[start:], self.state.ma34, trend_direction=daily_segment.direction)
-                    if not result or not self._variant_contains_segment(result, refined):
-                        continue
+            for candidate_result in candidate_results:
+                for proposal in self._build_owner_chain_repair_proposals(source_segments, candidate_result, daily_segment.direction):
                     self._record_center_result(
                         centers,
                         seen,
                         refined_seen,
                         refined_segments,
-                        result,
-                        repaired_source_segments,
+                        proposal.promoted_result,
+                        proposal.source_segments,
                         daily_segment,
                         source,
                         status_layer,
                         collect_refined,
                         "owner_chain_repair",
-                        forced_refined_segments=[refined],
+                        forced_refined_segments=[proposal.refined_segment],
                     )
 
             repair_source_segments = self._compact_repair_source_segments(source_segments)
@@ -734,6 +768,7 @@ class DailySegmentAnalyzer:
                             continue
                         refined_seen.add(refined_key)
                         if collect_refined:
+                            refined.cache.setdefault("repair_context", "compact_diagnostic")
                             refined_segments.append(refined)
 
         active_centers = [c for c in centers if c.is_active]
@@ -755,7 +790,7 @@ class DailySegmentAnalyzer:
         refined_segments = [
             seg
             for seg in refined_segments
-            if seg.cache.get("repair_context") != "early_overlap_to_badc" or self._seg_key(seg) in selected_refined_keys
+            if self._seg_key(seg) in selected_refined_keys or seg.cache.get("repair_context") == "compact_diagnostic"
         ]
         return selected_centers, source_accumulator, refined_segments
 
@@ -906,7 +941,32 @@ class DailySegmentAnalyzer:
             return True
         return False
 
-    def _append_daily_segment(self, segments: Sequence[MooreSegment]):
+    @staticmethod
+    def _independence_cache(independence: Optional[IndependenceDecision]) -> dict:
+        if independence is None:
+            return {}
+        cache = {
+            "independence_kind": independence.kind,
+            "independence_reason": independence.reason,
+            "center_kind": independence.center_kind,
+            "center_low": independence.center_low,
+            "center_high": independence.center_high,
+            "requires_new_extreme": independence.requires_new_extreme,
+            "new_extreme_ok": independence.new_extreme_ok,
+        }
+        if independence.third_point_index is not None:
+            cache["third_point_index"] = independence.third_point_index
+            cache["third_point_price"] = independence.third_point_price
+        if independence.new_extreme_index is not None:
+            cache["new_extreme_index"] = independence.new_extreme_index
+            cache["new_extreme_price"] = independence.new_extreme_price
+        return {k: v for k, v in cache.items() if v is not None and v != ""}
+
+    def _append_daily_segment(
+        self,
+        segments: Sequence[MooreSegment],
+        independence: Optional[IndependenceDecision] = None,
+    ):
         centers = [
             c
             for c in self.state.candidates
@@ -914,6 +974,8 @@ class DailySegmentAnalyzer:
             and c.start_index >= seg_start_index(segments[0])
             and c.end_index <= seg_end_index(segments[-1])
         ]
+        cache = {"from_macro_swallow": True} if len(segments) == 1 and segments[0].cache.get("is_macro_swallow") else {}
+        cache.update(self._independence_cache(independence))
         self._append_completed_segment(
             DailySegment(
                 symbol=segments[0].symbol,
@@ -922,7 +984,7 @@ class DailySegmentAnalyzer:
                 end_seg=segments[-1],
                 segments=list(segments),
                 centers=centers,
-                cache={"from_macro_swallow": True} if len(segments) == 1 and segments[0].cache.get("is_macro_swallow") else {},
+                cache=cache,
             )
         )
         self.state.continuity_broken = False
@@ -969,7 +1031,9 @@ class DailySegmentAnalyzer:
                 return
 
             tail = list(s.current_segments[decision.next_tail_offset:])
-            self._append_daily_segment(decision.segments)
+            self._append_daily_segment(decision.segments, decision.independence)
+            for extra_segments, extra_independence in decision.extra_segments:
+                self._append_daily_segment(extra_segments, extra_independence)
             s.current_segments = tail
             s.pending_daily_segments = []
             s.pending_display_segments = []
@@ -982,6 +1046,40 @@ class DailySegmentAnalyzer:
                 s.anchor_k_index = None
                 s.anchor_dt = None
                 s.pending_anchor_snapshot = True
+
+    def _finalize_terminal_swallow_pending(self):
+        s = self.state
+        segments = list(s.current_segments)
+        if not segments or not s.completed_segments:
+            return
+        first = segments[0]
+        if not first.cache.get("is_macro_swallow"):
+            return
+        if not check_daily_segment_continuity([first], s.completed_segments):
+            return
+        expandable = select_valid_daily_window(
+            segments,
+            s.completed_segments,
+            s.ma34,
+            s.ma170,
+            continuity_broken=s.continuity_broken,
+        )
+        if expandable and len(expandable) > 1:
+            return
+        self._append_daily_segment([first])
+        s.current_segments = list(segments[1:])
+        s.pending_daily_segments = []
+        s.pending_display_segments = []
+        s.pending_centers = []
+        self._reset_daily_center_state()
+        if s.current_segments:
+            self._advance_anchor_snapshot(s.current_segments[0])
+            self._rebuild_candidates_for_current_segments()
+            self._commit_ready_daily_segments()
+        else:
+            s.anchor_k_index = None
+            s.anchor_dt = None
+            s.pending_anchor_snapshot = True
 
     def _rebuild_pending_display_segments(self):
         s = self.state
@@ -1010,6 +1108,22 @@ class DailySegmentAnalyzer:
             selected = candidates[-1]
             if selected.end_offset <= offset:
                 break
+            if selected.kind == "non_same":
+                next_candidates = candidates_from_start(
+                    segments,
+                    selected.end_offset,
+                    s.ma34,
+                    s.ma170,
+                    completed_segments=(),
+                    enforce_continuity=False,
+                    previous_direction=selected.direction,
+                    include_swallow_candidate=True,
+                    require_ma=False,
+                )
+                if any(candidate.kind == "regular" for candidate in next_candidates):
+                    previous_direction = selected.direction
+                    offset = selected.end_offset
+                    continue
             s.pending_display_segments.append(
                 DailySegment(
                     symbol=selected.segments[0].symbol,
@@ -1031,6 +1145,9 @@ class DailySegmentAnalyzer:
     def _find_commit_decision(self, segments: Sequence[MooreSegment]) -> Optional[CommitDecision]:
         if self.state.continuity_broken:
             return None
+        block_decision = self._find_block_third_buy_sell_decision(segments)
+        if block_decision:
+            return block_decision
         if not self.state.completed_segments and len(segments) >= 3:
             return find_cold_start_decision(segments, self.state.ma34, self.state.ma170)
         if self.state.completed_segments and should_commit_leading_swallow(
@@ -1050,6 +1167,120 @@ class DailySegmentAnalyzer:
             continuity_broken=self.state.continuity_broken,
             allow_cold_start=False,
         )
+
+    @staticmethod
+    def _strictly_breaks_start(candidate: Sequence[MooreSegment], reverse: Sequence[MooreSegment]) -> bool:
+        if not candidate or not reverse:
+            return False
+        start_price = seg_start_price(candidate[0])
+        reverse_end = seg_end_price(reverse[-1])
+        if candidate[0].direction == Direction.Up:
+            return reverse_end < start_price
+        if candidate[0].direction == Direction.Down:
+            return reverse_end > start_price
+        return False
+
+    @staticmethod
+    def _third_point_outside_center(candidate: Sequence[MooreSegment], reverse: Sequence[MooreSegment], result: dict) -> bool:
+        if len(reverse) < 2:
+            return False
+        third_price = reverse[-2].end_k.price
+        if candidate[0].direction == Direction.Up:
+            return third_price < result["low"]
+        if candidate[0].direction == Direction.Down:
+            return third_price > result["high"]
+        return False
+
+    def _find_block_third_buy_sell_decision(self, segments: Sequence[MooreSegment]) -> Optional[CommitDecision]:
+        if len(segments) < 7:
+            return None
+        if self.state.completed_segments:
+            start_offsets = range(0, 1)
+        elif segments[0].cache.get("is_macro_swallow"):
+            start_offsets = range(1, len(segments) - 6)
+        else:
+            return None
+        for start_offset in start_offsets:
+            previous_direction = self.state.completed_segments[-1].direction if self.state.completed_segments else None
+            candidates = candidates_from_start(
+                segments,
+                start_offset,
+                self.state.ma34,
+                self.state.ma170,
+                completed_segments=self.state.completed_segments if start_offset == 0 else (),
+                enforce_continuity=bool(self.state.completed_segments) and start_offset == 0,
+                previous_direction=previous_direction,
+                include_swallow_candidate=not self.state.completed_segments and start_offset == 0,
+                require_ma=False,
+            )
+            decision = self._find_block_third_buy_sell_decision_from_candidates(segments, candidates)
+            if decision:
+                return decision
+        return None
+
+    def _find_block_third_buy_sell_decision_from_candidates(
+        self,
+        segments: Sequence[MooreSegment],
+        candidates: Sequence[WindowCandidate],
+    ) -> Optional[CommitDecision]:
+        for block in sorted(candidates, key=lambda c: c.end_offset):
+            if block.kind != "regular" or len(block.segments) < 7:
+                continue
+            macro = list(block.segments)
+            for i in range(3, len(macro) - 5):
+                prefix = macro[:i]
+                primary = macro[i : i + 3]
+                reverse = macro[i + 3 : i + 6]
+                if len(prefix) % 2 == 0:
+                    continue
+                if not is_valid_regular_window(
+                    prefix,
+                    self.state.ma34,
+                    self.state.ma170,
+                    completed_segments=self.state.completed_segments if block.start_offset == 0 else (),
+                    enforce_continuity=bool(self.state.completed_segments) and block.start_offset == 0,
+                    require_ma=False,
+                ):
+                    continue
+                result = find_center(macro[i : i + 5], self.state.ma34, trend_direction=primary[0].direction)
+                if not result or result.get("center_kind") != "trend_class":
+                    continue
+                if result.get("overlap_type") != 3 or result.get("status") != "FINAL":
+                    continue
+                if len(primary) < 3 or len(reverse) < 3:
+                    continue
+                if not any(seg.cache.get("is_macro_swallow") for seg in primary):
+                    continue
+                if primary[0].direction == reverse[0].direction:
+                    continue
+                if not self._third_point_outside_center(primary, reverse, result):
+                    continue
+                if not self._strictly_breaks_start(primary, reverse):
+                    continue
+                independence = IndependenceDecision(
+                    ok=True,
+                    kind="third_buy_sell",
+                    center_kind=result.get("center_kind", "trend_class"),
+                    center_low=result.get("low"),
+                    center_high=result.get("high"),
+                    requires_new_extreme=True,
+                    new_extreme_ok=True,
+                    third_point_index=reverse[-2].end_k.k_index,
+                    third_point_price=reverse[-2].end_k.price,
+                    new_extreme_index=reverse[-1].end_k.k_index,
+                    new_extreme_price=reverse[-1].end_k.price,
+                    reason="candidate block trend-class center third buy/sell plus strict new extreme confirms independence",
+                )
+                return CommitDecision(
+                    start_offset=block.start_offset,
+                    end_offset=block.start_offset + len(prefix),
+                    segments=prefix,
+                    pending_segments=reverse,
+                    tail_offset=block.start_offset + len(prefix) + len(primary) + len(reverse),
+                    independence=None,
+                    extra_segments=((primary, independence), (reverse, independence)),
+                )
+        return None
 
     def _find_confirmed_daily_window(self, segments: Sequence[MooreSegment]) -> List[MooreSegment]:
         decision = self._find_commit_decision(segments)

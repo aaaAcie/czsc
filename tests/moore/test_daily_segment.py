@@ -351,10 +351,9 @@ def test_swallow_segment_direct_commit_and_moore_aliases():
         )
     ]
     analyzer._process_new_segment(swallow)
-    assert len(analyzer.daily_segments) == 2
-    assert analyzer.daily_segments[-1].segments == [swallow]
-    assert analyzer.daily_segments[-1].cache["from_macro_swallow"] is True
-    assert analyzer.state.current_segments == []
+    assert len(analyzer.daily_segments) == 1
+    assert analyzer.state.current_segments == [swallow]
+    assert analyzer.daily_pending_segments == []
 
     engine = MooreCZSC([])
     engine.daily_segment_analyzer.update([swallow])
@@ -920,7 +919,7 @@ def test_regression_600707_candidate_owner_repair_infers_v14_to_v19_without_muta
     assert ("mV14B", "mV19T") in {(label(seg.start_k), label(seg.end_k)) for seg in analyzer.refined_segments}
 
 
-def test_regression_300339_early_owner_repair_promotes_earlier_t3_and_refined_segment():
+def test_regression_300339_daily_segments_split_on_confirmed_independence():
     bars = research.get_raw_bars_origin("300339", sdt="20150415", edt="20210701")
     if not bars:
         pytest.skip("no bars for 300339")
@@ -935,12 +934,17 @@ def test_regression_300339_early_owner_repair_promotes_earlier_t3_and_refined_se
     )
     label, _ = make_visible_labelers(engine)
 
-    spans = {(label(c.segments[0].start_k), label(c.segments[-1].end_k), c.overlap_type) for c in engine.daily_pending_centers}
-    assert ("mV12B", "mV21T", 3) in spans
-    assert ("mV15T", "mV22B", 3) not in spans
+    daily_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_segments]
+    assert daily_pairs[:3] == [("mV3T", "mV16B"), ("mV16B", "mV21T"), ("mV21T", "mV24B")]
+    assert engine.daily_segments[1].cache["independence_kind"] == "third_buy_sell"
+    assert engine.daily_segments[1].cache["center_kind"] == "trend_class"
+    assert engine.daily_segments[1].cache["new_extreme_ok"] is True
+    assert engine.daily_segments[1].cache["third_point_price"] == pytest.approx(11.364)
+    assert engine.daily_segments[1].cache["new_extreme_price"] == pytest.approx(8.448)
+    assert engine.daily_segments[2].cache["independence_kind"] == "third_buy_sell"
 
-    refined_spans = {(label(seg.start_k), label(seg.end_k)) for seg in engine.daily_refined_segments}
-    assert ("mV13T", "mV16B") in refined_spans
+    center_spans = {(label(c.segments[0].start_k), label(c.segments[-1].end_k), c.overlap_type) for c in engine.daily_centers}
+    assert ("mV3T", "mV8B", 3) in center_spans
 
 
 def test_overlapping_daily_centers_keep_first_generated_type3():
@@ -1045,4 +1049,4 @@ def test_002613_daily_segments_match_expected_blue_split():
     pending_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_pending_segments]
 
     assert daily_pairs[:3] == [("V1T", "V18B"), ("V18B", "V23T"), ("V23T", "V30B")]
-    assert pending_pairs[:2] == [("V30B", "V33T"), ("V33T", "V38B")]
+    assert pending_pairs[:1] == [("V33T", "V38B")]
