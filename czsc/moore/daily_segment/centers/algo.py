@@ -188,8 +188,15 @@ def find_center(
         a_norm = a_val * sign
         b_norm = b_val * sign
         if not check_price_reentry(seg_45, a_norm, b_norm, sign):
-            i += 2
-            continue
+            return {
+                "high": max(a_val, b_val),
+                "low": min(a_val, b_val),
+                "overlap_type": 0,
+                "center_kind": "turning",
+                "status": "FINAL",
+                "segments": list(segments[i : i + 4]),
+                "points": {"A": (a_idx, a_val), "B": (b_idx, b_val)},
+            }
 
         ma34_in_ab = check_ma34_overlap(seg_45, a_norm, b_norm, ma_array, sign)
         if not ma34_in_ab:
@@ -197,6 +204,7 @@ def find_center(
                 "high": max(a_val, b_val),
                 "low": min(a_val, b_val),
                 "overlap_type": 1,
+                "center_kind": "trend_class",
                 "status": "FINAL",
                 "segments": list(segments[i : i + 4]),
                 "points": {"A": (a_idx, a_val), "B": (b_idx, b_val)},
@@ -207,6 +215,7 @@ def find_center(
                 "high": max(a_val, b_val),
                 "low": min(a_val, b_val),
                 "overlap_type": 3,
+                "center_kind": "trend_class",
                 "status": "TEMPORARY",
                 "segments": list(segments[i : i + 4]),
                 "points": {"A": (a_idx, a_val), "B": (b_idx, b_val)},
@@ -235,6 +244,7 @@ def find_center(
             "high": high,
             "low": low,
             "overlap_type": 3,
+            "center_kind": "trend_class",
             "status": "FINAL",
             "segments": list(segments[i : i + 5]),
             "points": {

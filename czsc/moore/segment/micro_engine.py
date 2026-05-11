@@ -184,15 +184,26 @@ class MicroStructureEngine:
 
         reversal_ready = _is_turning_triggered(reversal_mark)
 
-        if refresh_attempt and _run_attempt(
-            refresh_mark,
-            preset_ext_idx=refresh_attempt["ext_idx"],
-            allow_special_shift=refresh_attempt["allow_special_shift"],
-            invalidate_last_on_fail=refresh_attempt["invalidate_last_on_fail"],
-        ):
-            # 本根处理结束前，再把当前 K 吞入实时包络
-            self._update_leg_realtime_extremes(bar, k_index, ma5)
-            return
+        if refresh_attempt:
+            if _run_attempt(
+                refresh_mark,
+                preset_ext_idx=refresh_attempt["ext_idx"],
+                allow_special_shift=refresh_attempt["allow_special_shift"],
+                invalidate_last_on_fail=refresh_attempt["invalidate_last_on_fail"],
+            ):
+                # 本根处理结束前，再把当前 K 吞入实时包络
+                self._update_leg_realtime_extremes(bar, k_index, ma5)
+                return
+
+            fallback_attempt = refresh_attempt.get("fallback")
+            if fallback_attempt and _run_attempt(
+                refresh_mark,
+                preset_ext_idx=fallback_attempt["ext_idx"],
+                allow_special_shift=fallback_attempt["allow_special_shift"],
+                invalidate_last_on_fail=fallback_attempt["invalidate_last_on_fail"],
+            ):
+                self._update_leg_realtime_extremes(bar, k_index, ma5)
+                return
         if reversal_ready:
             _run_attempt(reversal_mark, None)
         # 本根处理结束后统一刷新包络

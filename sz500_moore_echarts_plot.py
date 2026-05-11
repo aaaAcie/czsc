@@ -1039,6 +1039,8 @@ class AnalyzeTask:
 
 if __name__ == "__main__":
     tasks = [
+        AnalyzeTask("603126", sdt="20181220",edt="20201030", desc="中材节能"),
+
         AnalyzeTask("300371", sdt="20161220",edt="20201030", desc="汇中股份"),
         AnalyzeTask("002346", sdt="20161201", edt="20211001", desc="柘中股份"),
         AnalyzeTask("sz002286", sdt="20210101",edt="20210701", desc="保利发展"),
@@ -1057,7 +1059,7 @@ if __name__ == "__main__":
     ]
 
     # 🎯 切换这里
-    task = tasks[1]
+    task = tasks[0]
 
     try:
         symbol = task.symbol

@@ -7,6 +7,7 @@ from typing import List, Optional, Sequence
 
 from czsc.py.enum import Direction
 
+from ..centers.algo import find_center
 from .continuity import check_daily_segment_continuity
 from .extension import is_extension_same_trend, is_opposite_direction
 from .ma_cross import check_ma_cross_correlation
@@ -38,10 +39,23 @@ class CommitDecision:
     segments: List
     pending_segments: List
     tail_offset: Optional[int] = None
+    independence: Optional["IndependenceDecision"] = None
 
     @property
     def next_tail_offset(self) -> int:
         return self.end_offset if self.tail_offset is None else self.tail_offset
+
+
+@dataclass(frozen=True)
+class IndependenceDecision:
+    ok: bool
+    kind: str = ""
+    center_kind: str = ""
+    center_low: Optional[float] = None
+    center_high: Optional[float] = None
+    requires_new_extreme: bool = False
+    new_extreme_ok: Optional[bool] = None
+    reason: str = ""
 
 
 def is_valid_regular_window(
@@ -211,14 +225,123 @@ def _candidate_extends_primary(primary: WindowCandidate, confirmer: WindowCandid
     return False
 
 
-def _reverse_breaks_primary_last_pivot(primary: WindowCandidate, reverse: WindowCandidate) -> bool:
-    pivot = seg_start_price(primary.segments[-1])
+def _reverse_strictly_breaks_primary_start(primary: WindowCandidate, reverse: WindowCandidate) -> bool:
+    pivot = seg_start_price(primary.segments[0])
     reverse_end = seg_end_price(reverse.segments[-1])
     if primary.direction == Direction.Down:
         return reverse_end > pivot
     if primary.direction == Direction.Up:
         return reverse_end < pivot
     return False
+
+
+def _find_candidate_center(candidate: WindowCandidate, ma34) -> Optional[dict]:
+    return find_center(candidate.segments, ma34, trend_direction=candidate.direction)
+
+
+def _find_boundary_turning_center(primary: WindowCandidate, reverse: WindowCandidate, ma34) -> Optional[dict]:
+    if not primary.segments or not reverse.segments:
+        return None
+    boundary_segments = [*primary.segments, reverse.segments[0]]
+    result = find_center(boundary_segments, ma34, trend_direction=primary.direction)
+    if result and result.get("center_kind") == "turning":
+        return result
+    return None
+
+
+def _decision_from_center(kind: str, center: dict, **kwargs) -> IndependenceDecision:
+    return IndependenceDecision(
+        ok=True,
+        kind=kind,
+        center_kind=center.get("center_kind", ""),
+        center_low=center.get("low"),
+        center_high=center.get("high"),
+        **kwargs,
+    )
+
+
+def check_daily_segment_independence(
+    primary: WindowCandidate,
+    reverse: WindowCandidate,
+    segments: Sequence,
+    ma34,
+    ma170,
+    completed_segments: Sequence,
+) -> IndependenceDecision:
+    """Judge whether a reverse daily candidate is independent enough to be born.
+
+    The reverse candidate is already responsible for "违背趋势" in the delayed
+    confirmation chain.  This helper only decides the independent birth reason.
+    """
+    if reverse.kind == "swallow" or (
+        len(reverse.segments) == 1 and reverse.segments[0].cache.get("is_macro_swallow")
+    ):
+        if check_daily_segment_continuity(reverse.segments, completed_segments):
+            return IndependenceDecision(
+                ok=True,
+                kind="swallow_one_segment",
+                reason="macro swallow segment can be promoted as one daily segment",
+            )
+
+    boundary_turning = _find_boundary_turning_center(primary, reverse, ma34)
+    if boundary_turning:
+        return _decision_from_center(
+            "third_buy_sell",
+            boundary_turning,
+            requires_new_extreme=False,
+            new_extreme_ok=None,
+            reason="boundary turning center third buy/sell confirms independence",
+        )
+
+    candidate_center = _find_candidate_center(reverse, ma34)
+    new_extreme_ok = _reverse_strictly_breaks_primary_start(primary, reverse)
+
+    if candidate_center is None:
+        return IndependenceDecision(
+            ok=True,
+            kind="no_daily_center",
+            reason="candidate itself is a valid daily segment and has no daily center",
+        )
+
+    center_kind = candidate_center.get("center_kind", "")
+    if center_kind == "turning":
+        return _decision_from_center(
+            "third_buy_sell",
+            candidate_center,
+            requires_new_extreme=False,
+            new_extreme_ok=None,
+            reason="candidate turning center third buy/sell confirms independence",
+        )
+
+    if new_extreme_ok:
+        return _decision_from_center(
+            "strict_new_extreme",
+            candidate_center,
+            requires_new_extreme=True,
+            new_extreme_ok=True,
+            reason="reverse candidate strictly breaks primary start extreme",
+        )
+
+    if center_kind == "trend_class":
+        return IndependenceDecision(
+            ok=False,
+            kind="third_buy_sell",
+            center_kind=center_kind,
+            center_low=candidate_center.get("low"),
+            center_high=candidate_center.get("high"),
+            requires_new_extreme=True,
+            new_extreme_ok=False,
+            reason="trend-class center needs third buy/sell plus strict new extreme",
+        )
+
+    return IndependenceDecision(
+        ok=False,
+        kind="unknown",
+        center_kind=center_kind,
+        center_low=candidate_center.get("low"),
+        center_high=candidate_center.get("high"),
+        reason="candidate center did not satisfy any independence rule",
+    )
 
 
 def find_reverse_candidate(
@@ -388,8 +511,15 @@ def find_delayed_commit_decision(
                 if not _is_strong_reverse_candidate(reverse, segments, ma34, ma170):
                     best_pending = primary.segments
                     continue
-                pivot_break_ok = _reverse_breaks_primary_last_pivot(primary, reverse)
-                if not pivot_break_ok:
+                independence = check_daily_segment_independence(
+                    primary,
+                    reverse,
+                    segments,
+                    ma34,
+                    ma170,
+                    completed_segments,
+                )
+                if not independence.ok:
                     is_cold_start = len(completed_segments) == 0
                     can_relax_cold_start = (
                         ENABLE_COLD_START_RELAX_PIVOT_BREAK
@@ -400,6 +530,11 @@ def find_delayed_commit_decision(
                     if not can_relax_cold_start:
                         best_pending = primary.segments
                         continue
+                    independence = IndependenceDecision(
+                        ok=True,
+                        kind="cold_start_swallow_primary_relax",
+                        reason="cold start primary swallow keeps legacy relax behavior",
+                    )
 
                 possible_decision = CommitDecision(
                     start_offset=primary.start_offset,
@@ -407,6 +542,7 @@ def find_delayed_commit_decision(
                     segments=primary.segments,
                     pending_segments=reverse.segments,
                     tail_offset=primary.end_offset,
+                    independence=independence,
                 )
                 if allow_cold_start and primary.start_offset == 0 and primary.segments[0].cache.get("is_macro_swallow"):
                     return possible_decision

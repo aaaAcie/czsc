@@ -58,11 +58,12 @@ class RefreshPhysicsHelper:
         right_scope = bars[old_trigger_idx + 1: trigger_index + 1]
         if not right_scope:
             return None
+        fallback = None
         cond_a = refresh.ma5_refreshed
         if cond_a:
             left_end = max(old_trigger_idx + 1, trigger_index - 1)
             _, ext_idx = self.extreme_locator.locate_extreme_with_mode(mark, old_trigger_idx - 1, left_end)
-            return {"ext_idx": ext_idx, "allow_special_shift": False, "invalidate_last_on_fail": False}
+            fallback = {"ext_idx": ext_idx, "allow_special_shift": False, "invalidate_last_on_fail": False}
         if mark == Mark.G:
             ext_bar = max(right_scope, key=lambda x: x.high)
             ext_price = ext_bar.high
@@ -77,10 +78,29 @@ class RefreshPhysicsHelper:
             price_refreshed = ext_price < refresh.old_price_ext
         ext_idx = (old_trigger_idx + 1) + right_scope.index(ext_bar)
         cond_b = price_refreshed and body_ok
-        if not cond_b:
-            return None
-        return {
-            "ext_idx": ext_idx,
-            "allow_special_shift": cond_b and ext_idx == trigger_index,
-            "invalidate_last_on_fail": False,
-        }
+        if cond_b and fallback is None:
+            fallback = {
+                "ext_idx": ext_idx,
+                "allow_special_shift": cond_b and ext_idx == trigger_index,
+                "invalidate_last_on_fail": False,
+            }
+
+        seg_bars = bars[seg_start : trigger_index + 1]
+        trig_bar = bars[trigger_index]
+        if mark == Mark.G:
+            trigger_is_seg_extreme = trig_bar.high >= max(b.high for b in seg_bars)
+        else:
+            trigger_is_seg_extreme = trig_bar.low <= min(b.low for b in seg_bars)
+
+        # 同向刷新时，先给 trigger K 本人一次机会：
+        # 若它本身已是整段最值，则优先按“特殊法则候选”进入主流程；
+        # 只有这条链路未落地时，才回退到 A/B 在 trigger 左侧的寻址。
+        if trigger_is_seg_extreme:
+            return {
+                "ext_idx": trigger_index,
+                "allow_special_shift": True,
+                "invalidate_last_on_fail": False,
+                "fallback": fallback,
+            }
+
+        return fallback

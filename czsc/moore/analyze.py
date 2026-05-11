@@ -164,7 +164,7 @@ class MooreCZSC:
 
     @property
     def daily_refined_segments(self) -> List[MooreSegment]:
-        return self.daily_segment_analyzer.refined_segments
+        return self.daily_segment_analyzer.refined_segments + self.daily_segment_analyzer.pending_refined_segments
 
     @property
     def daily_archived_centers(self) -> List[DailySegmentCenter]:

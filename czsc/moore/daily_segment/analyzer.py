@@ -116,6 +116,10 @@ class DailySegmentAnalyzer:
         return self.state.refined_segments
 
     @property
+    def pending_refined_segments(self) -> List[MooreSegment]:
+        return self.state.pending_refined_segments
+
+    @property
     def archived_centers(self) -> List[DailySegmentCenter]:
         return self.state.archived_centers
 
@@ -158,6 +162,8 @@ class DailySegmentAnalyzer:
         s.active_center = None
         s.archived_centers = []
         s.candidates = []
+        s.refined_segments = []
+        s.pending_refined_segments = []
         s.anchor_k_index = None
         s.anchor_dt = None
         s.anchor_completed_segments = []
@@ -365,6 +371,71 @@ class DailySegmentAnalyzer:
             },
         )
 
+    def _make_overlap_promotion_refined_segment(self, start_tk, end_tk, source_result: dict) -> MooreSegment:
+        refined = self._make_refined_segment(start_tk, end_tk, source_result)
+        refined.cache.update(
+            {
+                "repair_context": "early_overlap_to_badc",
+                "promoted_overlap_type": source_result.get("overlap_type"),
+            }
+        )
+        return refined
+
+    def _find_source_segment_offset(self, source_segments: Sequence[MooreSegment], target: MooreSegment) -> Optional[int]:
+        target_key = self._seg_key(target)
+        for idx, seg in enumerate(source_segments):
+            if self._seg_key(seg) == target_key:
+                return idx
+        return None
+
+    def _variant_contains_segment(self, result: dict, refined: MooreSegment) -> bool:
+        refined_key = self._seg_key(refined)
+        return any(self._seg_key(seg) == refined_key for seg in result.get("segments", []))
+
+    def _early_overlap_repair_source_variants(
+        self,
+        source_segments: Sequence[MooreSegment],
+        trend_direction: Direction,
+    ) -> List[tuple[List[MooreSegment], MooreSegment]]:
+        variants: List[tuple[List[MooreSegment], MooreSegment]] = []
+        seen = set()
+        for start in range(max(0, len(source_segments) - 3)):
+            result = find_center(source_segments[start:], self.state.ma34, trend_direction=trend_direction)
+            if not result or result.get("overlap_type") >= 3:
+                continue
+            seg_slice = result.get("segments") or []
+            if len(seg_slice) != 4:
+                continue
+            offset = self._find_source_segment_offset(source_segments, seg_slice[0])
+            if offset is None or offset + 3 >= len(source_segments):
+                continue
+
+            start_tk = seg_slice[1].start_k
+            end_tk = seg_slice[-1].end_k
+            if self._segment_between_endpoints(start_tk, end_tk, source_segments) is not None:
+                continue
+            refined = self._make_overlap_promotion_refined_segment(start_tk, end_tk, result)
+            refined_key = self._seg_key(refined)
+            if refined_key in seen:
+                continue
+            variant = list(source_segments[: offset + 1]) + [refined] + list(source_segments[offset + 4 :])
+
+            promotes_to_type3 = False
+            for variant_start in range(max(0, len(variant) - 3)):
+                promoted = find_center(variant[variant_start:], self.state.ma34, trend_direction=trend_direction)
+                if (
+                    promoted
+                    and promoted.get("overlap_type") == 3
+                    and self._variant_contains_segment(promoted, refined)
+                ):
+                    promotes_to_type3 = True
+                    break
+            if not promotes_to_type3:
+                continue
+            seen.add(refined_key)
+            variants.append((variant, refined))
+        return variants
+
     def _candidate_owner_chain_repair(
         self,
         result: dict,
@@ -447,14 +518,17 @@ class DailySegmentAnalyzer:
             center_type_rank = 0
         elif center.overlap_type == 3:
             center_type_rank = 1
-        else:
+        elif center.overlap_type == 1:
             center_type_rank = 2
+        else:
+            center_type_rank = 3
         point_indices = [point[0] for point in center.points.values()]
         generation_index = center.cache.get("third_entry_index")
         if generation_index is None:
             generation_index = max(point_indices) if point_indices else center.end_index
         c_index = center.points.get("C", center.points.get("B", (center.start_index, None)))[0]
-        return (center_type_rank, generation_index, c_index, center.start_index, center.low, center.high)
+        source_kind_rank = 1 if center.cache.get("source_segments_kind") == "owner_chain_repair" else 0
+        return (center_type_rank, generation_index, source_kind_rank, c_index, center.start_index, center.low, center.high)
 
     @staticmethod
     def _third_segment_entry_index(result: dict, ma_array) -> Optional[int]:
@@ -488,6 +562,97 @@ class DailySegmentAnalyzer:
             used_keys.update(keys)
         return selected
 
+    def _record_center_result(
+        self,
+        centers: List[DailySegmentCenter],
+        seen: set,
+        refined_seen: set,
+        refined_segments: List[MooreSegment],
+        result: dict,
+        source_segments: Sequence[MooreSegment],
+        daily_segment: DailySegment,
+        source: str,
+        status_layer: str,
+        collect_refined: bool,
+        source_segments_kind: str,
+        forced_refined_segments: Optional[Sequence[MooreSegment]] = None,
+    ) -> None:
+        seg_slice = result["segments"]
+        owner_evidence = self._owner_chain_evidence(result, source_segments, daily_segment.direction)
+        repair_evidence = self._candidate_owner_chain_repair(result, source_segments, daily_segment.direction)
+        if forced_refined_segments:
+            forced_refined_segments = list(forced_refined_segments)
+            if repair_evidence is None:
+                repair_evidence = {
+                    "source": "daily_segment_owner_chain_repair",
+                    "source_segments_kind": source_segments_kind,
+                    "repair_reason": "missing_continuous_owner_segment_for_badc",
+                    "point_owners": owner_evidence.get("point_owners", {}),
+                    "owner_chain": owner_evidence.get("owner_chain", []),
+                    "owner_chain_valid": False,
+                    "refined_segments": [],
+                }
+            existing = {self._seg_key(seg) for seg in repair_evidence.get("refined_segments", [])}
+            for refined in forced_refined_segments:
+                if self._seg_key(refined) not in existing:
+                    repair_evidence.setdefault("refined_segments", []).append(refined)
+                    existing.add(self._seg_key(refined))
+            repair_evidence["repair_reason"] = repair_evidence.get("repair_reason") or "missing_continuous_owner_segment_for_badc"
+
+        if repair_evidence:
+            for refined in repair_evidence.get("refined_segments", []):
+                refined_key = self._seg_key(refined)
+                if refined_key in refined_seen:
+                    continue
+                refined_seen.add(refined_key)
+                if collect_refined:
+                    refined_segments.append(refined)
+        key = (
+            seg_start_index(seg_slice[0]),
+            seg_end_index(seg_slice[-1]),
+            round(result["high"], 8),
+            round(result["low"], 8),
+            result["overlap_type"],
+            result.get("center_kind", "trend_class"),
+            result["status"],
+        )
+        if key in seen:
+            return
+        seen.add(key)
+        centers.append(
+            DailySegmentCenter(
+                segments=list(seg_slice),
+                high=result["high"],
+                low=result["low"],
+                overlap_type=result["overlap_type"],
+                status=result["status"],
+                points=result["points"],
+                cache={
+                    "identity_key": key,
+                    "source": source,
+                    "status_layer": status_layer,
+                    "source_segments_kind": source_segments_kind,
+                    "daily_segment_direction": daily_segment.direction.value,
+                    "center_kind": result.get("center_kind", "trend_class"),
+                    "generation_index": max(point[0] for point in result["points"].values()),
+                    "third_entry_index": self._third_segment_entry_index(result, self.state.ma34),
+                    "expanded_segments": [
+                        self._seg_key(seg)
+                        for seg in source_segments
+                        if seg.cache.get("source_for_daily_center") == "expanded_from_swallow"
+                    ],
+                    **owner_evidence,
+                    "repair": repair_evidence,
+                    "refined_segments": [
+                        self._seg_key(seg)
+                        for seg in (repair_evidence or {}).get("refined_segments", [])
+                    ],
+                    "repair_reason": (repair_evidence or {}).get("repair_reason", ""),
+                    "excluded_reasons": ("exclude_from_daily_center",),
+                },
+            )
+        )
+
     def _collect_centers_for_daily_segments(
         self,
         daily_segments: Sequence[DailySegment],
@@ -507,60 +672,39 @@ class DailySegmentAnalyzer:
                 result = find_center(source_segments[start:], self.state.ma34, trend_direction=daily_segment.direction)
                 if not result:
                     continue
-                seg_slice = result["segments"]
-                owner_evidence = self._owner_chain_evidence(result, source_segments, daily_segment.direction)
-                repair_evidence = self._candidate_owner_chain_repair(result, source_segments, daily_segment.direction)
-                if repair_evidence:
-                    for refined in repair_evidence.get("refined_segments", []):
-                        refined_key = self._seg_key(refined)
-                        if refined_key in refined_seen:
-                            continue
-                        refined_seen.add(refined_key)
-                        if collect_refined:
-                            refined_segments.append(refined)
-                key = (
-                    seg_start_index(seg_slice[0]),
-                    seg_end_index(seg_slice[-1]),
-                    round(result["high"], 8),
-                    round(result["low"], 8),
-                    result["overlap_type"],
-                    result["status"],
+                self._record_center_result(
+                    centers,
+                    seen,
+                    refined_seen,
+                    refined_segments,
+                    result,
+                    source_segments,
+                    daily_segment,
+                    source,
+                    status_layer,
+                    collect_refined,
+                    "expanded_continuous_30f",
                 )
-                if key in seen:
-                    continue
-                seen.add(key)
-                centers.append(
-                    DailySegmentCenter(
-                        segments=list(seg_slice),
-                        high=result["high"],
-                        low=result["low"],
-                        overlap_type=result["overlap_type"],
-                        status=result["status"],
-                        points=result["points"],
-                        cache={
-                            "identity_key": key,
-                            "source": source,
-                            "status_layer": status_layer,
-                            "source_segments_kind": "expanded_continuous_30f",
-                            "daily_segment_direction": daily_segment.direction.value,
-                            "generation_index": max(point[0] for point in result["points"].values()),
-                            "third_entry_index": self._third_segment_entry_index(result, self.state.ma34),
-                            "expanded_segments": [
-                                self._seg_key(seg)
-                                for seg in source_segments
-                                if seg.cache.get("source_for_daily_center") == "expanded_from_swallow"
-                            ],
-                            **owner_evidence,
-                            "repair": repair_evidence,
-                            "refined_segments": [
-                                self._seg_key(seg)
-                                for seg in (repair_evidence or {}).get("refined_segments", [])
-                            ],
-                            "repair_reason": (repair_evidence or {}).get("repair_reason", ""),
-                            "excluded_reasons": ("exclude_from_daily_center",),
-                        },
+
+            for repaired_source_segments, refined in self._early_overlap_repair_source_variants(source_segments, daily_segment.direction):
+                for start in range(max(0, len(repaired_source_segments) - 3)):
+                    result = find_center(repaired_source_segments[start:], self.state.ma34, trend_direction=daily_segment.direction)
+                    if not result or not self._variant_contains_segment(result, refined):
+                        continue
+                    self._record_center_result(
+                        centers,
+                        seen,
+                        refined_seen,
+                        refined_segments,
+                        result,
+                        repaired_source_segments,
+                        daily_segment,
+                        source,
+                        status_layer,
+                        collect_refined,
+                        "owner_chain_repair",
+                        forced_refined_segments=[refined],
                     )
-                )
 
             repair_source_segments = self._compact_repair_source_segments(source_segments)
             if repair_source_segments and repair_source_segments != list(source_segments):
@@ -575,6 +719,7 @@ class DailySegmentAnalyzer:
                         round(result["high"], 8),
                         round(result["low"], 8),
                         result["overlap_type"],
+                        result.get("center_kind", "trend_class"),
                         result["status"],
                     )
                     if repair_key in repair_seen:
@@ -591,11 +736,28 @@ class DailySegmentAnalyzer:
                         if collect_refined:
                             refined_segments.append(refined)
 
-        type3 = [c for c in centers if c.overlap_type == 3]
+        active_centers = [c for c in centers if c.is_active]
         for c in centers:
-            if c.overlap_type == 1 and any(c.check_segment_overlap(other) for other in type3):
+            if any(
+                other is not c
+                and other.is_active
+                and other.overlap_type > c.overlap_type
+                and c.check_segment_overlap(other)
+                for other in active_centers
+            ):
                 c.is_active = False
-        return self._dedupe_overlapping_daily_centers([c for c in centers if c.is_active]), source_accumulator, refined_segments
+        selected_centers = self._dedupe_overlapping_daily_centers([c for c in centers if c.is_active])
+        selected_refined_keys = {
+            key
+            for center in selected_centers
+            for key in center.cache.get("refined_segments", [])
+        }
+        refined_segments = [
+            seg
+            for seg in refined_segments
+            if seg.cache.get("repair_context") != "early_overlap_to_badc" or self._seg_key(seg) in selected_refined_keys
+        ]
+        return selected_centers, source_accumulator, refined_segments
 
     def _rebuild_daily_centers(self):
         s = self.state
@@ -609,11 +771,11 @@ class DailySegmentAnalyzer:
 
     def _rebuild_pending_centers(self):
         s = self.state
-        s.pending_centers, _, _ = self._collect_centers_for_daily_segments(
+        s.pending_centers, _, s.pending_refined_segments = self._collect_centers_for_daily_segments(
             s.pending_display_segments,
             source="daily_segment_pending_internal",
             status_layer="PENDING",
-            collect_refined=False,
+            collect_refined=True,
         )
 
     def _restore_from_anchor_snapshot(self):
@@ -660,7 +822,7 @@ class DailySegmentAnalyzer:
             for c_b in actives:
                 if c_a is c_b:
                     continue
-                if c_b.overlap_type == 3 and c_a.overlap_type == 1 and c_a.check_segment_overlap(c_b):
+                if c_b.overlap_type > c_a.overlap_type and c_a.check_segment_overlap(c_b):
                     c_a.is_active = False
 
         s.candidates = [c for c in s.candidates if c.is_active]
@@ -697,6 +859,8 @@ class DailySegmentAnalyzer:
             seg_end_index(seg_slice[-1]),
             round(high, 8),
             round(low, 8),
+            overlap_type,
+            result.get("center_kind", "trend_class"),
         )
 
         for c in s.candidates:
@@ -706,6 +870,7 @@ class DailySegmentAnalyzer:
                     c.high = high
                     c.low = low
                     c.overlap_type = overlap_type
+                    c.cache["center_kind"] = result.get("center_kind", "trend_class")
                     c.points = result["points"]
                     c.segments = list(seg_slice)
                 return
@@ -718,7 +883,7 @@ class DailySegmentAnalyzer:
                 overlap_type=overlap_type,
                 status=status,
                 points=result["points"],
-                cache={"identity_key": key},
+                cache={"identity_key": key, "center_kind": result.get("center_kind", "trend_class")},
             )
         )
 

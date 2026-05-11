@@ -81,3 +81,42 @@ def test_600707_has_c_20190201_and_d_candidate_20190307():
         MicroStructureEngine._process_confirmed_trigger = orig
 
     assert captured.get("dt") == "2019-03-07"
+
+
+def test_603126_refresh_trigger_prefers_special_rule_before_left_search():
+    bars = _safe_get_bars("603126", "20181220", "20191010")
+    captured = {}
+    orig = MicroStructureEngine._process_confirmed_trigger
+
+    def wrapped(self, trigger_bar, trigger_index, new_mark, *args, **kwargs):
+        d = trigger_bar.dt.strftime("%Y-%m-%d")
+        if d == "2019-09-17" and new_mark.name == "G":
+            captured.setdefault("calls", []).append(
+                {
+                    "preset_ext_idx": kwargs.get("preset_ext_idx"),
+                    "allow_special_shift": kwargs.get("allow_special_shift"),
+                    "from_special_rule": kwargs.get("from_special_rule", False),
+                }
+            )
+        return orig(self, trigger_bar, trigger_index, new_mark, *args, **kwargs)
+
+    MicroStructureEngine._process_confirmed_trigger = wrapped
+    try:
+        engine = MooreCZSC(
+            bars,
+            ma34_cross_as_valid_gate=False,
+            audit_link_rounds=5,
+            enable_pre_round=True,
+            replay_centers_after_macro_swallow=False,
+        )
+    finally:
+        MicroStructureEngine._process_confirmed_trigger = orig
+
+    calls = captured.get("calls") or []
+    assert calls
+    assert calls[0]["preset_ext_idx"] == 180
+    assert calls[0]["allow_special_shift"] is True
+
+    target = next(tk for tk in engine.micro_turning_ks if tk.trigger_k and tk.trigger_k.dt.strftime("%Y-%m-%d") == "2019-09-18")
+    assert target.dt.strftime("%Y-%m-%d") == "2019-09-17"
+    assert target.turning_k.dt.strftime("%Y-%m-%d") == "2019-09-18"

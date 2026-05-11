@@ -7,6 +7,7 @@ from czsc.connectors import research
 from czsc.moore.analyze import MooreCZSC
 from czsc.moore.daily_segment import DailySegment, DailySegmentAnalyzer, DailySegmentCenter
 from czsc.moore.daily_segment.center_algo import find_b_point, find_center, find_d_point
+from czsc.moore.daily_segment.helpers.commit import WindowCandidate, check_daily_segment_independence
 from czsc.moore.daily_segment.utils import slice_segments_from_anchor
 from czsc.moore.objects import MooreSegment, TurningK
 from czsc.py.enum import Direction, Freq, Mark
@@ -93,6 +94,10 @@ def set_ma34(analyzer: DailySegmentAnalyzer, values: dict[int, float], size: int
     analyzer.state.ma34 = [None] * size
     for idx, value in values.items():
         analyzer.state.ma34[idx] = value
+
+
+def make_empty_ma(size: int = 240) -> tuple[list[float | None], list[float | None]]:
+    return [None] * size, [10] * size
 
 
 def make_600707_engine() -> MooreCZSC:
@@ -194,6 +199,140 @@ def test_find_b_chooses_strongest_local_extreme_in_turning_window():
 
 def test_center_algo_legacy_import_path_stays_compatible():
     assert callable(find_center)
+
+
+def test_find_center_returns_turning_center_when_price_never_reenters_ab():
+    segs = [
+        make_seg(0, 10, Direction.Down, 20, 10),
+        make_seg(10, 20, Direction.Up, 10, 12),
+        make_seg(20, 30, Direction.Down, 12, 8.5),
+        make_seg(30, 40, Direction.Up, 8.5, 8.8),
+        make_seg(40, 50, Direction.Down, 8.8, 7),
+    ]
+    ma34, _ = make_empty_ma(80)
+    ma34[7], ma34[8], ma34[9] = 10, 9, 10
+    ma34[18], ma34[19], ma34[20] = 11, 12, 11
+
+    result = find_center(segs, ma34, trend_direction=Direction.Down)
+
+    assert result is not None
+    assert result["center_kind"] == "turning"
+    assert result["overlap_type"] == 0
+    assert result["status"] == "FINAL"
+    assert result["low"] == 9
+    assert result["high"] == 12
+
+
+def test_find_center_keeps_turning_boundary_from_later_badc_upgrade():
+    segs = [
+        make_seg(0, 10, Direction.Down, 20, 10),
+        make_seg(10, 20, Direction.Up, 10, 12),
+        make_seg(20, 30, Direction.Down, 12, 8.5),
+        make_seg(30, 40, Direction.Up, 8.5, 8.8),
+        make_seg(40, 50, Direction.Down, 8.8, 7),
+        make_seg(50, 60, Direction.Up, 7, 10),
+    ]
+    ma34, _ = make_empty_ma(90)
+    ma34[7], ma34[8], ma34[9] = 10, 9, 10
+    ma34[18], ma34[19], ma34[20] = 11, 12, 11
+    ma34[55], ma34[56], ma34[57] = 8, 10, 8
+
+    result = find_center(segs, ma34, trend_direction=Direction.Down)
+
+    assert result is not None
+    assert result["center_kind"] == "turning"
+    assert result["segments"] == segs[:4]
+
+
+def test_independence_accepts_valid_candidate_without_own_daily_center():
+    primary = WindowCandidate(0, 3, [
+        make_seg(0, 1, Direction.Up, 10, 13),
+        make_seg(1, 2, Direction.Down, 13, 11),
+        make_seg(2, 3, Direction.Up, 11, 14),
+    ])
+    reverse = WindowCandidate(3, 6, [
+        make_seg(3, 4, Direction.Down, 14, 12),
+        make_seg(4, 5, Direction.Up, 12, 13),
+        make_seg(5, 6, Direction.Down, 13, 11),
+    ])
+    ma34, ma170 = make_empty_ma()
+
+    decision = check_daily_segment_independence(primary, reverse, primary.segments + reverse.segments, ma34, ma170, [])
+
+    assert decision.ok
+    assert decision.kind == "no_daily_center"
+
+
+def test_independence_requires_strict_new_extreme_for_trend_class_center():
+    primary = WindowCandidate(0, 3, [
+        make_seg(0, 1, Direction.Up, 10, 13),
+        make_seg(1, 2, Direction.Down, 13, 11),
+        make_seg(2, 3, Direction.Up, 11, 14),
+    ])
+    reverse = WindowCandidate(3, 7, [
+        make_seg(3, 13, Direction.Down, 14, 11),
+        make_seg(13, 23, Direction.Up, 11, 12),
+        make_seg(23, 33, Direction.Down, 12, 8.5),
+        make_seg(33, 43, Direction.Up, 8.5, 10),
+    ])
+    ma34, ma170 = make_empty_ma(80)
+    ma34[7], ma34[8], ma34[9] = 10, 9, 10
+    ma34[18], ma34[19], ma34[20] = 11, 12, 11
+
+    decision = check_daily_segment_independence(primary, reverse, primary.segments + reverse.segments, ma34, ma170, [])
+
+    assert not decision.ok
+    assert decision.center_kind == "trend_class"
+    assert decision.requires_new_extreme
+    assert decision.new_extreme_ok is False
+
+
+def test_independence_accepts_trend_class_center_with_strict_new_extreme():
+    primary = WindowCandidate(0, 3, [
+        make_seg(0, 1, Direction.Up, 10, 13),
+        make_seg(1, 2, Direction.Down, 13, 11),
+        make_seg(2, 3, Direction.Up, 11, 14),
+    ])
+    reverse = WindowCandidate(3, 8, [
+        make_seg(3, 13, Direction.Down, 14, 11),
+        make_seg(13, 23, Direction.Up, 11, 12),
+        make_seg(23, 33, Direction.Down, 12, 8.5),
+        make_seg(33, 43, Direction.Up, 8.5, 10),
+        make_seg(43, 53, Direction.Down, 10, 8),
+    ])
+    ma34, ma170 = make_empty_ma(90)
+    ma34[7], ma34[8], ma34[9] = 10, 9, 10
+    ma34[18], ma34[19], ma34[20] = 11, 12, 11
+
+    decision = check_daily_segment_independence(primary, reverse, primary.segments + reverse.segments, ma34, ma170, [])
+
+    assert decision.ok
+    assert decision.kind == "strict_new_extreme"
+    assert decision.center_kind == "trend_class"
+    assert decision.new_extreme_ok is True
+
+
+def test_independence_accepts_boundary_turning_center_without_new_extreme():
+    primary = WindowCandidate(0, 3, [
+        make_seg(0, 10, Direction.Down, 20, 10),
+        make_seg(10, 20, Direction.Up, 10, 12),
+        make_seg(20, 30, Direction.Down, 12, 8.5),
+    ])
+    reverse = WindowCandidate(3, 6, [
+        make_seg(30, 40, Direction.Up, 8.5, 8.8),
+        make_seg(40, 50, Direction.Down, 8.8, 7.5),
+        make_seg(50, 60, Direction.Up, 7.5, 11),
+    ])
+    ma34, ma170 = make_empty_ma(90)
+    ma34[7], ma34[8], ma34[9] = 10, 9, 10
+    ma34[18], ma34[19], ma34[20] = 11, 12, 11
+
+    decision = check_daily_segment_independence(primary, reverse, primary.segments + reverse.segments, ma34, ma170, [])
+
+    assert decision.ok
+    assert decision.kind == "third_buy_sell"
+    assert decision.center_kind == "turning"
+    assert decision.requires_new_extreme is False
 
 
 def test_swallow_segment_direct_commit_and_moore_aliases():
@@ -662,14 +801,12 @@ def test_regression_002346_pending_reverse_confirms_previous_daily_segments():
     label, _ = make_visible_labelers(engine)
 
     daily_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_segments]
-    pending_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_pending_segments]
 
-    assert daily_pairs[:2] == [("mV2B", "mV5T"), ("mV5T", "mV10B")]
-    assert pending_pairs == [("mV10B", "mV23T")]
-    assert all(c.cache.get("status_layer") == "COMPLETED" for c in engine.daily_centers)
-    assert [(round(c.low, 3), round(c.high, 3), c.cache.get("status_layer")) for c in engine.daily_pending_centers] == [
-        (9.484, 9.504, "PENDING")
-    ]
+    # 新独立性规则下，mV5T->mV10B 自身有走势分类中枢且没有严格跌破 mV2B，
+    # 因此不能再用旧近端反向枢轴逻辑确认 mV2B->mV5T。
+    assert daily_pairs == []
+    assert engine.daily_pending_segments == []
+    assert engine.daily_centers == []
 
 
 def test_regression_002346_daily_window_rejects_non_extreme_end():
@@ -783,6 +920,29 @@ def test_regression_600707_candidate_owner_repair_infers_v14_to_v19_without_muta
     assert ("mV14B", "mV19T") in {(label(seg.start_k), label(seg.end_k)) for seg in analyzer.refined_segments}
 
 
+def test_regression_300339_early_owner_repair_promotes_earlier_t3_and_refined_segment():
+    bars = research.get_raw_bars_origin("300339", sdt="20150415", edt="20210701")
+    if not bars:
+        pytest.skip("no bars for 300339")
+
+    engine = MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+    )
+    label, _ = make_visible_labelers(engine)
+
+    spans = {(label(c.segments[0].start_k), label(c.segments[-1].end_k), c.overlap_type) for c in engine.daily_pending_centers}
+    assert ("mV12B", "mV21T", 3) in spans
+    assert ("mV15T", "mV22B", 3) not in spans
+
+    refined_spans = {(label(seg.start_k), label(seg.end_k)) for seg in engine.daily_refined_segments}
+    assert ("mV13T", "mV16B") in refined_spans
+
+
 def test_overlapping_daily_centers_keep_first_generated_type3():
     analyzer = DailySegmentAnalyzer()
     shared_1 = make_seg(20, 30, Direction.Down, 12, 9)
@@ -882,5 +1042,7 @@ def test_002613_daily_segments_match_expected_blue_split():
         return label_by_key[(tk.k_index, tk.dt, tk.price)]
 
     daily_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_segments]
+    pending_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_pending_segments]
 
-    assert daily_pairs[:4] == [("V1T", "V18B"), ("V18B", "V23T"), ("V23T", "V30B"), ("V30B", "V33T")]
+    assert daily_pairs[:3] == [("V1T", "V18B"), ("V18B", "V23T"), ("V23T", "V30B")]
+    assert pending_pairs[:2] == [("V30B", "V33T"), ("V33T", "V38B")]
