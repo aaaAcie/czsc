@@ -4,6 +4,10 @@
 from czsc.py.enum import Mark
 
 
+# 本地实验开关：默认关闭，避免冷启动改写既有 30F 事实仓。
+ENABLE_MICRO_COLD_START = False
+
+
 class ColdStartHelper:
     def __init__(self, state, ma34_lookback: int = 8, seed_hold_bars: int = 120):
         self.s = state
@@ -12,6 +16,8 @@ class ColdStartHelper:
 
     def try_seed_initial_anchor(self, trigger_bar, trigger_index: int):
         """返回冷启动锚点描述；若不触发则返回 None。"""
+        if not ENABLE_MICRO_COLD_START:
+            return None
         s = self.s
         if s.cache.get("cold_start_seeded"):
             return None

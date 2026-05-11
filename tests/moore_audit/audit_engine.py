@@ -381,22 +381,6 @@ def build_audit_payload(
                 }
                 for ev in s.debug_judgement_events
             ],
-            "reversal_events": [
-                {
-                    "event": ev.get("event"),
-                    "node_id": ev.get("node_id"),
-                    "A_id": ev.get("A_id"),
-                    "B_id": ev.get("B_id"),
-                    "C_id": ev.get("C_id"),
-                    "D_id": ev.get("D_id"),
-                    "CD_perfect": ev.get("CD_perfect"),
-                    "AD_perfect": ev.get("AD_perfect"),
-                    "resolution": ev.get("resolution"),
-                    "dt": _fmt_dt_or_none(ev.get("dt")),
-                }
-                for ev in s.debug_judgement_events
-                if ev.get("event") == "reversal_eval"
-            ],
             "nodes": [
                 {
                     "id": node.id,
@@ -409,11 +393,7 @@ def build_audit_payload(
                     "child_ids": list(node.child_ids),
                     "created_dt": _fmt_dt_or_none(node.created_dt),
                     "resolved_dt": _fmt_dt_or_none(node.resolved_dt),
-                    "a_id": getattr(node, "a_id", None),
                     "c_candidate_id": getattr(node, "c_candidate_id", None),
-                    "d_candidate_id": getattr(node, "d_candidate_id", None),
-                    "cd_perfect": getattr(node, "cd_perfect", None),
-                    "ad_perfect": getattr(node, "ad_perfect", None),
                 }
                 for node in s.judgement_nodes.values()
             ],

@@ -3,6 +3,9 @@
 
 from czsc.py.enum import Mark
 
+from . import cold_start as cold_start_config
+
+
 class RuleValidatorHelper:
     def __init__(self, state):
         self.s = state
@@ -95,26 +98,27 @@ class RuleValidatorHelper:
         if effective_centers:
             rule_double_k = self.check_double_k_escape(ref_tk, tk, effective_centers, bars)
 
-        # 启动期放宽：候选极值仍在“MA34 首次出现之前”时，允许无 MA5/MA34 交叉，先建立异向骨架。
-        first_ma34_idx = s.cache.get("first_ma34_k_index")
-        if first_ma34_idx is None:
-            first_ma34_idx = -1
-            for i, b in enumerate(bars):
-                if b.cache.get("ma34") is not None:
-                    first_ma34_idx = i
-                    break
-            s.cache["first_ma34_k_index"] = first_ma34_idx
-        pre_ma34_candidate = (first_ma34_idx >= 0 and tk.k_index <= first_ma34_idx)
+        if cold_start_config.ENABLE_MICRO_COLD_START:
+            # 启动期放宽：候选极值仍在“MA34 首次出现之前”时，允许无 MA5/MA34 交叉，先建立异向骨架。
+            first_ma34_idx = s.cache.get("first_ma34_k_index")
+            if first_ma34_idx is None:
+                first_ma34_idx = -1
+                for i, b in enumerate(bars):
+                    if b.cache.get("ma34") is not None:
+                        first_ma34_idx = i
+                        break
+                s.cache["first_ma34_k_index"] = first_ma34_idx
+            pre_ma34_candidate = first_ma34_idx >= 0 and tk.k_index <= first_ma34_idx
 
-        if (
-            s.ma34_cross_as_valid_gate
-            and (not rule2)
-            and ref_tk is not None
-            and s.turning_ks
-            and s.turning_ks[-1].mark != tk.mark
-            and pre_ma34_candidate
-        ):
-            rule2 = True
+            if (
+                s.ma34_cross_as_valid_gate
+                and (not rule2)
+                and ref_tk is not None
+                and s.turning_ks
+                and s.turning_ks[-1].mark != tk.mark
+                and pre_ma34_candidate
+            ):
+                rule2 = True
 
         if s.ma34_cross_as_valid_gate:
             is_valid = rule1 and rule2 and rule_double_k

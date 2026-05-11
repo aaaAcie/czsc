@@ -387,16 +387,6 @@ class MicroStructureEngine:
         # 3. 实时确立检查
         if s.candidate_tk:
             valid, perfect, visible = self._validate_four_rules(s.candidate_tk)
-            # 异向初判失败时，尝试 A->D 复判（避免被 C->D 局部语境锁死）。
-            if (not valid) and is_reversal:
-                c_id = s.turning_ks[-1].cache.get("micro_id") if s.turning_ks else None
-                ref_a_id = self._delayed_judgement.get_reversal_fallback_ref_id(c_id) if c_id is not None else None
-                if ref_a_id is not None:
-                    ref_a_tk = self._delayed_judgement.get_tk_by_id(ref_a_id)
-                    if ref_a_tk is not None:
-                        valid2, perfect2, visible2 = self._validate_four_rules(s.candidate_tk, override_ref_tk=ref_a_tk)
-                        if valid2:
-                            valid, perfect, visible = valid2, perfect2, visible2
             if valid:
                 # 特殊法则：当转折K本身就是本段极值K，且四法则通过时，
                 if (not from_special_rule) and allow_special_shift and ext_idx == trigger_index:

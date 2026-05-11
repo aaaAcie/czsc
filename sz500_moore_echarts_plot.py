@@ -186,7 +186,9 @@ def plot_moore_structure_echarts(
     ghost_centers = getattr(engine, "ghost_centers", [])
 
     daily_segments = getattr(engine, "daily_segments", getattr(engine, "higher_segments", []))
+    daily_pending_segments = getattr(engine, "daily_pending_segments", [])
     daily_centers = getattr(engine, "daily_centers", [])
+    daily_pending_centers = getattr(engine, "daily_pending_centers", [])
     daily_active_center = getattr(engine, "daily_active_center", getattr(engine, "higher_active_center", None))
     daily_archived_centers = getattr(engine, "daily_archived_centers", getattr(engine, "higher_archived_centers", []))
     daily_refined_segments = getattr(engine, "daily_refined_segments", None)
@@ -462,11 +464,15 @@ def plot_moore_structure_echarts(
             elif layer_name == "daily_active":
                 fill, border = "rgba(46, 204, 113, 0.14)", "#27AE60"
                 border_type = "solid"
+            elif layer_name == "daily_pending":
+                fill, border = "rgba(230, 126, 34, 0.10)", "#E67E22"
+                border_type = "dashed"
             else:
                 fill, border = "rgba(243, 156, 18, 0.10)", "#F39C12"
                 border_type = "dashed"
 
-            label_txt = f"D{idx} T{ct.overlap_type} {ct.status}\n上:{y_hi:.3f} 下:{y_lo:.3f}"
+            prefix = "PD" if layer_name == "daily_pending" else "D"
+            label_txt = f"{prefix}{idx} T{ct.overlap_type} {ct.status}\n上:{y_hi:.3f} 下:{y_lo:.3f}"
             data.append([
                 {
                     "xAxis": _dt_str(start_dt), "yAxis": y_lo,
@@ -481,6 +487,7 @@ def plot_moore_structure_echarts(
         final_daily_center = daily_active_center or (daily_archived_centers[-1] if daily_archived_centers else None)
         daily_centers = [final_daily_center] if final_daily_center else []
     daily_center_area_data = _prepare_daily_center_area_data(daily_centers, "daily_active")
+    daily_pending_center_area_data = _prepare_daily_center_area_data(daily_pending_centers, "daily_pending")
     # ── 6. 构建各图例系列 ─────────────────────────────────────────────
     def _seg_series(name, seg_list, color, width, alpha=0.85):
         data = _seg_markline_data(seg_list, color, width, alpha)
@@ -571,6 +578,14 @@ def plot_moore_structure_echarts(
     if s:
         daily_series.append(s)
 
+    s = _raw_seg_series(
+        "日线级别线段(Pending)",
+        _daily_seg_markline_data(daily_pending_segments, "#E67E22", 3.8, alpha=0.9, line_type="dashed"),
+        "#E67E22",
+    )
+    if s:
+        daily_series.append(s)
+
     s = _raw_seg_series("演变路径", refresh_data, "#BBBBBB")
     if s:
         minute_series.append(s)
@@ -588,6 +603,7 @@ def plot_moore_structure_echarts(
         ("微观中枢", micro_area_data, "#8E44AD"),
         ("幽灵中枢", ghost_area_data, "#7F8C8D"),
         ("日线级别中枢", daily_center_area_data, "#27AE60"),
+        ("日线级别中枢(Pending)", daily_pending_center_area_data, "#E67E22"),
     ]:
         s = _center_series(name, data, color)
         if not s:
@@ -912,7 +928,7 @@ def plot_moore_structure_echarts(
                 "向上转折确立", "向下转折确立"
             ];
             var legendGroupDaily = [
-                "日线级别线段", "日线级别中枢"
+                "日线级别线段", "日线级别线段(Pending)", "日线级别中枢"
             ];
             var legendGuard = false;
 
@@ -1024,7 +1040,7 @@ class AnalyzeTask:
 if __name__ == "__main__":
     tasks = [
         AnalyzeTask("300371", sdt="20161220",edt="20201030", desc="汇中股份"),
-        AnalyzeTask("002346", sdt="20161201", edt="20210301", desc="柘中股份"),
+        AnalyzeTask("002346", sdt="20161201", edt="20211001", desc="柘中股份"),
         AnalyzeTask("sz002286", sdt="20210101",edt="20210701", desc="保利发展"),
         AnalyzeTask("300137", sdt="20190415", edt="20201130", desc="先河环保"),
         AnalyzeTask("000993", sdt="20190515",edt="20200920", desc="闽东电力"),
@@ -1041,7 +1057,7 @@ if __name__ == "__main__":
     ]
 
     # 🎯 切换这里
-    task = tasks[-3]
+    task = tasks[1]
 
     try:
         symbol = task.symbol

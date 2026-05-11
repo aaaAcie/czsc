@@ -253,6 +253,20 @@ def test_trend_relationship_requires_unique_start_extreme_and_allows_equal_end_e
     ]
     assert not analyzer._check_global_trend_relationship(down_duplicate_start_high)
 
+    up_bad_end = [
+        make_seg(0, 1, Direction.Up, 10, 13),
+        make_seg(1, 2, Direction.Down, 13, 11),
+        make_seg(2, 3, Direction.Up, 11, 12),
+    ]
+    assert not analyzer._check_global_trend_relationship(up_bad_end)
+
+    down_bad_end = [
+        make_seg(0, 1, Direction.Down, 20, 17),
+        make_seg(1, 2, Direction.Up, 17, 19),
+        make_seg(2, 3, Direction.Down, 19, 18),
+    ]
+    assert not analyzer._check_global_trend_relationship(down_bad_end)
+
 
 def test_ma_cross_scans_between_turning_k_confirmations():
     segs = [
@@ -632,8 +646,8 @@ def test_600707_daily_segments_match_expected_long_trend_and_swallow():
     assert engine.daily_segments[1].segments[0].cache.get("is_macro_swallow") is True
 
 
-def test_regression_002346_cold_start_keeps_initial_swallow_trend():
-    bars = research.get_raw_bars_origin("002346", sdt="20161201", edt="20210301")
+def test_regression_002346_pending_reverse_confirms_previous_daily_segments():
+    bars = research.get_raw_bars_origin("002346", sdt="20161201", edt="20211001")
     if not bars:
         pytest.skip("no bars for 002346")
 
@@ -648,9 +662,36 @@ def test_regression_002346_cold_start_keeps_initial_swallow_trend():
     label, _ = make_visible_labelers(engine)
 
     daily_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_segments]
+    pending_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_pending_segments]
 
-    assert daily_pairs[:2] == [("mV0T", "mV11B"), ("mV11B", "mV14T")]
-    assert engine.daily_segments[0].segments[0].cache.get("is_macro_swallow") is True
+    assert daily_pairs[:2] == [("mV2B", "mV5T"), ("mV5T", "mV10B")]
+    assert pending_pairs == [("mV10B", "mV23T")]
+    assert all(c.cache.get("status_layer") == "COMPLETED" for c in engine.daily_centers)
+    assert [(round(c.low, 3), round(c.high, 3), c.cache.get("status_layer")) for c in engine.daily_pending_centers] == [
+        (9.484, 9.504, "PENDING")
+    ]
+
+
+def test_regression_002346_daily_window_rejects_non_extreme_end():
+    bars = research.get_raw_bars_origin("002346", sdt="20161201", edt="20211001")
+    if not bars:
+        pytest.skip("no bars for 002346")
+
+    engine = MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+    )
+    label, _ = make_visible_labelers(engine)
+    start = next(i for i, seg in enumerate(engine.segments) if label(seg.start_k) == "mV1T")
+    end = next(i for i, seg in enumerate(engine.segments) if label(seg.end_k) == "mV4B") + 1
+    window = engine.segments[start:end]
+
+    assert (label(window[0].start_k), label(window[-1].end_k)) == ("mV1T", "mV4B")
+    assert not engine.daily_segment_analyzer._check_global_trend_relationship(window)
 
 
 def test_600707_daily_centers_use_completed_source_and_owner_chain():
@@ -842,4 +883,4 @@ def test_002613_daily_segments_match_expected_blue_split():
 
     daily_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_segments]
 
-    assert daily_pairs[:3] == [("V1T", "V20B"), ("V20B", "V25T"), ("V25T", "V32B")]
+    assert daily_pairs[:4] == [("V1T", "V18B"), ("V18B", "V23T"), ("V23T", "V30B"), ("V30B", "V33T")]

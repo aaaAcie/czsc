@@ -266,6 +266,41 @@ def find_reverse_candidates(
     return _iter_terminal_candidates(valid, segments)
 
 
+def find_reverse_confirmation_candidates(
+    segments: Sequence,
+    start_offset: int,
+    previous_direction,
+    ma34,
+    ma170,
+    completed_segments: Sequence,
+) -> list[WindowCandidate]:
+    terminals = find_reverse_candidates(
+        segments,
+        start_offset,
+        previous_direction,
+        ma34,
+        ma170,
+        completed_segments,
+    )
+    candidates = candidates_from_start(
+        segments,
+        start_offset,
+        ma34,
+        ma170,
+        completed_segments=completed_segments,
+        enforce_continuity=False,
+        previous_direction=previous_direction,
+    )
+    valid = [c for c in candidates if is_opposite_direction(c.direction, previous_direction)]
+    if not valid:
+        return terminals
+    pending = valid[-1]
+    seen = {(c.start_offset, c.end_offset, c.kind) for c in terminals}
+    if (pending.start_offset, pending.end_offset, pending.kind) not in seen:
+        return [*terminals, pending]
+    return terminals
+
+
 def should_commit_leading_swallow(
     segments: Sequence,
     completed_segments: Sequence,
@@ -333,7 +368,7 @@ def find_delayed_commit_decision(
         swallow_fallback: Optional[CommitDecision] = None
         chosen_decision: Optional[CommitDecision] = None
         for primary in _iter_terminal_candidates(primary_candidates, segments):
-            reverse_candidates = find_reverse_candidates(
+            reverse_candidates = find_reverse_confirmation_candidates(
                 segments,
                 primary.end_offset,
                 primary.direction,

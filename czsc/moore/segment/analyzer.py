@@ -120,7 +120,6 @@ class SegmentState:
     judgement_id_seed: int = 0
     last_resolve_anchor_id: Optional[int] = None
     debug_judgement_events: list = field(default_factory=list)
-    reversal_provisional_map: dict = field(default_factory=dict)  # c_id -> {"a_id": int|None, "b_id": int|None}
     # 异向转折门槛：全时域双向最值包络追踪（实时客观，不依赖于信号触发更新）
     leg_max_ma5: Optional[float] = None
     leg_min_ma5: Optional[float] = None
@@ -376,7 +375,7 @@ class SegmentAnalyzer:
                 id_to_idx[mid] = i
 
         pending_left = None
-        unresolved = {"wait_anchor_start", "wait_anchor_real", "wait_reversal_eval", "ready_resolve"}
+        unresolved = {"wait_anchor_start", "wait_anchor_real", "ready_resolve"}
         for node_id in list(s.pending_judgements):
             node = s.judgement_nodes.get(node_id)
             if not node or node.stage not in unresolved:

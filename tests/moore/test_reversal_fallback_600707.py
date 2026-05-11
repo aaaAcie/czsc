@@ -4,7 +4,6 @@ import pytest
 from czsc.connectors import research
 from czsc.moore.analyze import MooreCZSC
 from czsc.moore.segment.micro_engine import MicroStructureEngine
-from tests.moore_audit.audit_engine import build_audit_payload
 
 
 def _safe_get_bars(symbol: str, sdt: str, edt: str):
@@ -82,23 +81,3 @@ def test_600707_has_c_20190201_and_d_candidate_20190307():
         MicroStructureEngine._process_confirmed_trigger = orig
 
     assert captured.get("dt") == "2019-03-07"
-
-
-def test_reversal_fallback_event_exists():
-    bars = _safe_get_bars("600707", "20140601", "20210820")
-    engine = MooreCZSC(
-        bars,
-        ma34_cross_as_valid_gate=True,
-        audit_link_rounds=3,
-        enable_pre_round=True,
-        replay_centers_after_macro_swallow=False,
-    )
-    payload = build_audit_payload(engine, "600707", "20140601", "20210820", 3, True, False)
-    events = payload["delayed"]["reversal_events"]
-    hit = [
-        ev for ev in events
-        if ev.get("resolution") == "rollback_c_and_promote_d_to_b_prime"
-        and ev.get("CD_perfect") is False
-        and ev.get("AD_perfect") is True
-    ]
-    assert hit, "expected at least one reversal fallback event"

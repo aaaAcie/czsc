@@ -142,8 +142,8 @@ class PendingJudgementNode:
     id: int
     base_id: int
     candidate_id: int
-    stage: str = "wait_anchor_start"   # wait_anchor_start | wait_anchor_real | wait_reversal_eval | ready_resolve | resolved | cancelled
-    resolution: str = ""               # keep_candidate | rollback_base | rollback_c_and_promote_d_to_b_prime | keep_c_path
+    stage: str = "wait_anchor_start"   # wait_anchor_start | wait_anchor_real | ready_resolve | resolved | cancelled
+    resolution: str = ""               # keep_candidate | rollback_base
     resolve_anchor_id: Optional[int] = None
     created_k_idx: int = -1
     created_dt: Optional[datetime] = None
@@ -152,7 +152,3 @@ class PendingJudgementNode:
     parent_id: Optional[int] = None
     child_ids: List[int] = field(default_factory=list)
     c_candidate_id: Optional[int] = None
-    d_candidate_id: Optional[int] = None
-    a_id: Optional[int] = None
-    cd_perfect: Optional[bool] = None
-    ad_perfect: Optional[bool] = None

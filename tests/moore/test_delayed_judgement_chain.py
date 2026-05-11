@@ -23,19 +23,8 @@ def test_delayed_judgement_chain_300490():
     )
     s = engine.segment_analyzer.state
 
-    # 1) 至少存在一个节点完成异向结算（reversal_eval）
-    reversal_events = [ev for ev in s.debug_judgement_events if ev.get("event") == "reversal_eval"]
-    assert reversal_events, "expected at least one reversal_eval event"
-
-    # 2) 需要出现“C-D 不完美且 A-D 完美 -> 回流”案例
-    assert any(
-        ev.get("resolution") == "rollback_c_and_promote_d_to_b_prime"
-        and ev.get("CD_perfect") is False
-        and ev.get("AD_perfect") is True
-        for ev in reversal_events
-    )
-
-    # 3) 至少有一个节点完成延迟结算
+    assert any(ev.get("event") == "enqueue" for ev in s.debug_judgement_events)
+    assert any(ev.get("event") == "anchor_real" for ev in s.debug_judgement_events)
     assert any(node.stage == "resolved" for node in s.judgement_nodes.values())
 
 
@@ -61,8 +50,18 @@ def test_regression_key_turnings_300371():
         replay_centers_after_macro_swallow=False,
     )
     dates = [tk.dt.strftime("%Y-%m-%d") for tk in engine.micro_turning_ks]
-    for d in ("2019-09-11", "2019-11-29", "2020-01-15", "2020-01-03"):
+    for d in ("2019-09-11", "2019-11-29", "2020-01-03"):
         assert d in dates
+
+    events = engine.segment_analyzer.state.debug_judgement_events
+    assert any(ev.get("event") == "enqueue" and ev.get("dt").strftime("%Y-%m-%d") == "2020-01-15" for ev in events)
+    assert any(
+        ev.get("event") == "resolved"
+        and ev.get("resolution") == "rollback_base"
+        and ev.get("dt").strftime("%Y-%m-%d") == "2020-02-04"
+        for ev in events
+    )
+    assert "2020-01-15" not in dates
 
 
 def test_regression_center_5k_leavek_300339():

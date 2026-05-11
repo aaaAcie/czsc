@@ -11,6 +11,7 @@ from ..objects import MooreSegment
 from .centers.algo import find_center
 from .helpers.commit import (
     CommitDecision,
+    candidates_from_start,
     find_delayed_commit_decision,
     is_valid_regular_window,
     select_valid_daily_window,
@@ -91,6 +92,14 @@ class DailySegmentAnalyzer:
         return self.state.completed_segments
 
     @property
+    def daily_pending_segments(self) -> List[DailySegment]:
+        return self.state.pending_display_segments
+
+    @property
+    def daily_pending_centers(self) -> List[DailySegmentCenter]:
+        return self.state.pending_centers
+
+    @property
     def active_center(self) -> Optional[DailySegmentCenter]:
         return self.state.active_center
 
@@ -142,8 +151,10 @@ class DailySegmentAnalyzer:
         s = self.state
         s.current_segments = []
         s.pending_daily_segments = []
+        s.pending_display_segments = []
         s.completed_segments = []
         s.daily_centers = []
+        s.pending_centers = []
         s.active_center = None
         s.archived_centers = []
         s.candidates = []
@@ -477,18 +488,23 @@ class DailySegmentAnalyzer:
             used_keys.update(keys)
         return selected
 
-    def _rebuild_daily_centers(self):
-        s = self.state
+    def _collect_centers_for_daily_segments(
+        self,
+        daily_segments: Sequence[DailySegment],
+        source: str,
+        status_layer: str,
+        collect_refined: bool,
+    ) -> tuple[List[DailySegmentCenter], List[MooreSegment], List[MooreSegment]]:
         centers: List[DailySegmentCenter] = []
-        s.daily_center_source_segments = []
-        s.refined_segments = []
+        source_accumulator: List[MooreSegment] = []
+        refined_segments: List[MooreSegment] = []
         seen = set()
         refined_seen = set()
-        for daily_segment in s.completed_segments:
+        for daily_segment in daily_segments:
             source_segments = self._daily_segment_center_source_segments(daily_segment)
-            s.daily_center_source_segments.extend(source_segments)
+            source_accumulator.extend(source_segments)
             for start in range(max(0, len(source_segments) - 3)):
-                result = find_center(source_segments[start:], s.ma34, trend_direction=daily_segment.direction)
+                result = find_center(source_segments[start:], self.state.ma34, trend_direction=daily_segment.direction)
                 if not result:
                     continue
                 seg_slice = result["segments"]
@@ -500,7 +516,8 @@ class DailySegmentAnalyzer:
                         if refined_key in refined_seen:
                             continue
                         refined_seen.add(refined_key)
-                        s.refined_segments.append(refined)
+                        if collect_refined:
+                            refined_segments.append(refined)
                 key = (
                     seg_start_index(seg_slice[0]),
                     seg_end_index(seg_slice[-1]),
@@ -522,11 +539,12 @@ class DailySegmentAnalyzer:
                         points=result["points"],
                         cache={
                             "identity_key": key,
-                            "source": "daily_segment_internal",
+                            "source": source,
+                            "status_layer": status_layer,
                             "source_segments_kind": "expanded_continuous_30f",
                             "daily_segment_direction": daily_segment.direction.value,
                             "generation_index": max(point[0] for point in result["points"].values()),
-                            "third_entry_index": self._third_segment_entry_index(result, s.ma34),
+                            "third_entry_index": self._third_segment_entry_index(result, self.state.ma34),
                             "expanded_segments": [
                                 self._seg_key(seg)
                                 for seg in source_segments
@@ -548,7 +566,7 @@ class DailySegmentAnalyzer:
             if repair_source_segments and repair_source_segments != list(source_segments):
                 repair_seen = set()
                 for start in range(max(0, len(repair_source_segments) - 3)):
-                    result = find_center(repair_source_segments[start:], s.ma34, trend_direction=daily_segment.direction)
+                    result = find_center(repair_source_segments[start:], self.state.ma34, trend_direction=daily_segment.direction)
                     if not result:
                         continue
                     repair_key = (
@@ -570,19 +588,41 @@ class DailySegmentAnalyzer:
                         if refined_key in refined_seen:
                             continue
                         refined_seen.add(refined_key)
-                        s.refined_segments.append(refined)
+                        if collect_refined:
+                            refined_segments.append(refined)
 
         type3 = [c for c in centers if c.overlap_type == 3]
         for c in centers:
             if c.overlap_type == 1 and any(c.check_segment_overlap(other) for other in type3):
                 c.is_active = False
-        s.daily_centers = self._dedupe_overlapping_daily_centers([c for c in centers if c.is_active])
+        return self._dedupe_overlapping_daily_centers([c for c in centers if c.is_active]), source_accumulator, refined_segments
+
+    def _rebuild_daily_centers(self):
+        s = self.state
+        s.daily_centers, s.daily_center_source_segments, s.refined_segments = self._collect_centers_for_daily_segments(
+            s.completed_segments,
+            source="daily_segment_internal",
+            status_layer="COMPLETED",
+            collect_refined=True,
+        )
+        self._rebuild_pending_centers()
+
+    def _rebuild_pending_centers(self):
+        s = self.state
+        s.pending_centers, _, _ = self._collect_centers_for_daily_segments(
+            s.pending_display_segments,
+            source="daily_segment_pending_internal",
+            status_layer="PENDING",
+            collect_refined=False,
+        )
 
     def _restore_from_anchor_snapshot(self):
         s = self.state
         s.completed_segments = clone_completed_segments_snapshot(s.anchor_completed_segments)
         s.current_segments = []
         s.pending_daily_segments = []
+        s.pending_display_segments = []
+        s.pending_centers = []
         s.active_center = None
         s.archived_centers = []
         s.candidates = []
@@ -592,6 +632,8 @@ class DailySegmentAnalyzer:
         s = self.state
         s.current_segments = []
         s.pending_daily_segments = []
+        s.pending_display_segments = []
+        s.pending_centers = []
         s.active_center = None
         s.archived_centers = []
         s.candidates = []
@@ -754,15 +796,19 @@ class DailySegmentAnalyzer:
         while True:
             decision = self._find_commit_decision(s.current_segments)
             if not decision:
+                self._rebuild_pending_display_segments()
                 return
             if not decision.segments:
                 s.pending_daily_segments = decision.pending_segments
+                self._rebuild_pending_display_segments()
                 return
 
             tail = list(s.current_segments[decision.next_tail_offset:])
             self._append_daily_segment(decision.segments)
             s.current_segments = tail
             s.pending_daily_segments = []
+            s.pending_display_segments = []
+            s.pending_centers = []
             self._reset_daily_center_state()
             if s.current_segments:
                 self._advance_anchor_snapshot(s.current_segments[0])
@@ -771,6 +817,51 @@ class DailySegmentAnalyzer:
                 s.anchor_k_index = None
                 s.anchor_dt = None
                 s.pending_anchor_snapshot = True
+
+    def _rebuild_pending_display_segments(self):
+        s = self.state
+        s.pending_display_segments = []
+        s.pending_centers = []
+        segments = list(s.current_segments)
+        if len(segments) < 3:
+            return
+
+        offset = 0
+        previous_direction = s.completed_segments[-1].direction if s.completed_segments else None
+        while offset < len(segments):
+            candidates = candidates_from_start(
+                segments,
+                offset,
+                s.ma34,
+                s.ma170,
+                completed_segments=s.completed_segments if offset == 0 else (),
+                enforce_continuity=offset == 0,
+                previous_direction=previous_direction,
+                include_swallow_candidate=True,
+                require_ma=False,
+            )
+            if not candidates:
+                break
+            selected = candidates[-1]
+            if selected.end_offset <= offset:
+                break
+            s.pending_display_segments.append(
+                DailySegment(
+                    symbol=selected.segments[0].symbol,
+                    direction=selected.direction,
+                    start_seg=selected.segments[0],
+                    end_seg=selected.segments[-1],
+                    segments=list(selected.segments),
+                    cache={
+                        "status": "PENDING",
+                        "source": "daily_segment_cold_end",
+                        "candidate_kind": selected.kind,
+                    },
+                )
+            )
+            previous_direction = selected.direction
+            offset = selected.end_offset
+        self._rebuild_pending_centers()
 
     def _find_commit_decision(self, segments: Sequence[MooreSegment]) -> Optional[CommitDecision]:
         if self.state.continuity_broken:

@@ -6,7 +6,7 @@ from typing import Sequence
 
 from czsc.py.enum import Direction
 
-from ..utils import seg_start_price
+from ..utils import seg_end_price, seg_start_price
 
 
 def check_strict_start_extreme(segments: Sequence) -> bool:
@@ -26,6 +26,23 @@ def check_strict_start_extreme(segments: Sequence) -> bool:
     return False
 
 
+def check_end_extreme(segments: Sequence) -> bool:
+    if not segments:
+        return False
+    daily_dir = segments[0].direction
+    end_p = seg_end_price(segments[-1])
+    endpoints = []
+    for seg in segments:
+        endpoints.extend([seg_start_price(seg), seg_end_price(seg)])
+    global_max = max(endpoints)
+    global_min = min(endpoints)
+    if daily_dir == Direction.Up:
+        return end_p >= global_max
+    if daily_dir == Direction.Down:
+        return end_p <= global_min
+    return False
+
+
 def check_global_trend_relationship(segments: Sequence) -> bool:
-    """兼容旧命名：日线候选只校验起点严格极值，终点由提交链确认。"""
-    return check_strict_start_extreme(segments)
+    """日线候选窗口必须整体顺势：起点严格极值，终点触达顺势极值。"""
+    return check_strict_start_extreme(segments) and check_end_extreme(segments)
