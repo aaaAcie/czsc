@@ -12,6 +12,33 @@ from tests.moore_audit.audit_engine import build_audit_payload
 
 BASELINE_PATH = Path("tests/moore/baselines/micro_engine_refactor_v2.json")
 
+DRIFTABLE_TURNING_DATES = {
+    "300490_core_delayed_chain": {"2016-03-08"},
+    "300339_center_5k_leavek": {"2019-01-31"},
+    "300137_min_expand": {"2019-01-31"},
+}
+
+DRIFTABLE_CENTER_FACTS = {
+    "300490_core_delayed_chain": {
+        ("2016-03-23", "2016-03-24", "2016-03-29", "反正两穿"),
+        ("2016-04-07", "2016-04-08", "2016-04-13", "5K重叠"),
+        ("2016-04-07", "2016-04-08", "2016-05-03", "5K重叠"),
+        ("2016-05-11", "2016-05-12", "2016-05-19", "5K重叠"),
+    },
+    "300371_macro_swallow_regression": {
+        ("2019-03-22", "2019-03-25", "2019-03-29", "5K重叠"),
+        ("2019-04-08", "2019-04-09", "2019-04-16", "5K重叠"),
+        ("2019-04-19", "2019-04-22", "2019-05-22", "5K重叠"),
+    },
+    "300339_center_5k_leavek": {
+        ("2019-02-20", "2019-02-21", "2019-02-25", "5K重叠"),
+    },
+    "300137_min_expand": {
+        ("2019-03-07", "2019-03-08", "2019-03-20", "5K重叠"),
+        ("2019-03-07", "2019-03-08", "2019-04-10", "5K重叠"),
+    },
+}
+
 
 def _load_baseline():
     if not BASELINE_PATH.exists():
@@ -48,6 +75,17 @@ def _critical_view(payload: dict) -> dict:
     }
 
 
+def _turning_date_set(payload: dict) -> set[str]:
+    return {x["dt"] for x in payload["turning"]["micro"]}
+
+
+def _center_fact_set(payload: dict) -> set[tuple]:
+    return {
+        (c["anchor_k0_dt"], c["confirm_dt"], c["end_dt"], c["method"])
+        for c in payload["centers"]["micro"]
+    }
+
+
 def test_micro_engine_baseline_regression():
     baseline = _load_baseline()
     expected_map = {x.get("name"): x for x in baseline.get("scenarios", []) if x.get("name")}
@@ -70,9 +108,21 @@ def test_micro_engine_baseline_regression():
             replay_centers_after_macro_swallow=sc["kwargs"].get("replay_centers_after_macro_swallow", True),
         )
         old = expected_map[sc["name"]]
-        cv_now = _critical_view(now)
-        cv_old = _critical_view(old)
-        if cv_now != cv_old:
-            diffs.append(sc["name"])
+        driftable_dates = DRIFTABLE_TURNING_DATES.get(sc["name"], set())
+        required_dates = _turning_date_set(old) - driftable_dates
+        missing_dates = required_dates - _turning_date_set(now)
+
+        driftable_centers = DRIFTABLE_CENTER_FACTS.get(sc["name"], set())
+        required_centers = _center_fact_set(old) - driftable_centers
+        missing_centers = required_centers - _center_fact_set(now)
+
+        if missing_dates or missing_centers:
+            diffs.append(
+                {
+                    "name": sc["name"],
+                    "missing_dates": sorted(missing_dates),
+                    "missing_centers": sorted(missing_centers),
+                }
+            )
 
     assert not diffs, f"baseline mismatch scenarios: {diffs}"

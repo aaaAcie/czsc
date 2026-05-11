@@ -1061,8 +1061,8 @@ if __name__ == "__main__":
     ]
 
     # 🎯 切换这里
-    # task = tasks[-1]
-    task = tasks[1]
+    task = tasks[-4]
+    # task = tasks[2]
     try:
         symbol = task.symbol
         logger.info(f"正在拉取标的 {symbol} ({task.desc}) | 时间: {task.sdt} ~ {task.edt}")

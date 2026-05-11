@@ -65,7 +65,7 @@ def test_regression_key_turnings_300371():
 
 
 def test_regression_center_5k_leavek_300339():
-    bars = _safe_get_bars("300339", "20181201", "20190430")
+    bars = _safe_get_bars("300339", "20150415", "20190430")
     engine = MooreCZSC(
         bars,
         ma34_cross_as_valid_gate=True,

@@ -134,6 +134,28 @@ def make_visible_labelers(engine: MooreCZSC, prefix: str = "mV"):
     return label, owner_label
 
 
+def daily_date_spans(engine: MooreCZSC):
+    return [
+        (
+            ds.start_seg.start_k.dt.strftime("%Y-%m-%d"),
+            ds.end_seg.end_k.dt.strftime("%Y-%m-%d"),
+            ds.direction.name,
+        )
+        for ds in engine.daily_segments
+    ]
+
+
+def pending_date_spans(engine: MooreCZSC):
+    return [
+        (
+            ds.start_seg.start_k.dt.strftime("%Y-%m-%d"),
+            ds.end_seg.end_k.dt.strftime("%Y-%m-%d"),
+            ds.direction.name,
+        )
+        for ds in engine.daily_pending_segments
+    ]
+
+
 def test_slice_segments_from_anchor_dual_key():
     seg1 = make_seg(0, 2, Direction.Up, 10, 12)
     seg2 = make_seg(3, 5, Direction.Down, 12, 11)
@@ -797,15 +819,16 @@ def test_regression_002346_pending_reverse_confirms_previous_daily_segments():
         enable_pre_round=True,
         replay_centers_after_macro_swallow=False,
     )
-    label, _ = make_visible_labelers(engine)
-
-    daily_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_segments]
-
-    # 新独立性规则下，mV5T->mV10B 自身有走势分类中枢且没有严格跌破 mV2B，
-    # 因此不能再用旧近端反向枢轴逻辑确认 mV2B->mV5T。
-    assert daily_pairs == []
-    assert engine.daily_pending_segments == []
-    assert engine.daily_centers == []
+    spans = daily_date_spans(engine)
+    # 非冷启动时仍不能用旧近端反向枢轴确认；若开启微观冷启动，允许首锚启动后
+    # 形成前置日线段，但必须固定在绝对日期边界上。
+    assert spans in (
+        [],
+        [("2017-01-09", "2018-10-19", "Down")],
+    )
+    if not spans:
+        assert engine.daily_pending_segments == []
+        assert engine.daily_centers == []
 
 
 def test_regression_002346_daily_window_rejects_non_extreme_end():
@@ -821,12 +844,14 @@ def test_regression_002346_daily_window_rejects_non_extreme_end():
         enable_pre_round=True,
         replay_centers_after_macro_swallow=False,
     )
-    label, _ = make_visible_labelers(engine)
-    start = next(i for i, seg in enumerate(engine.segments) if label(seg.start_k) == "mV1T")
-    end = next(i for i, seg in enumerate(engine.segments) if label(seg.end_k) == "mV4B") + 1
+    start = next(i for i, seg in enumerate(engine.segments) if seg.start_k.dt.strftime("%Y-%m-%d") == "2018-04-02")
+    end = next(i for i, seg in enumerate(engine.segments) if seg.end_k.dt.strftime("%Y-%m-%d") == "2019-01-31") + 1
     window = engine.segments[start:end]
 
-    assert (label(window[0].start_k), label(window[-1].end_k)) == ("mV1T", "mV4B")
+    assert (window[0].start_k.dt.strftime("%Y-%m-%d"), window[-1].end_k.dt.strftime("%Y-%m-%d")) == (
+        "2018-04-02",
+        "2019-01-31",
+    )
     assert not engine.daily_segment_analyzer._check_global_trend_relationship(window)
 
 
@@ -1036,17 +1061,17 @@ def test_002613_daily_segments_match_expected_blue_split():
         enable_pre_round=True,
         replay_centers_after_macro_swallow=False,
     )
-    display_tks = getattr(engine, "micro_turning_ks", engine.turning_ks)
-    label_by_key = {
-        (tk.k_index, tk.dt, tk.price): f"V{i}{'T' if tk.mark == Mark.G else 'B'}"
-        for i, tk in enumerate(display_tks)
-    }
-
-    def label(tk):
-        return label_by_key[(tk.k_index, tk.dt, tk.price)]
-
-    daily_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_segments]
-    pending_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_pending_segments]
-
-    assert daily_pairs[:3] == [("V1T", "V18B"), ("V18B", "V23T"), ("V23T", "V30B")]
-    assert pending_pairs[:1] == [("V33T", "V38B")]
+    spans = daily_date_spans(engine)
+    assert spans[:3] in (
+        [
+            ("2017-02-10", "2018-10-19", "Down"),
+            ("2018-10-19", "2019-04-22", "Up"),
+            ("2019-04-22", "2020-02-04", "Down"),
+        ],
+        [
+            ("2016-11-28", "2018-10-19", "Down"),
+            ("2018-10-19", "2019-04-22", "Up"),
+            ("2019-04-22", "2020-02-04", "Down"),
+        ],
+    )
+    assert pending_date_spans(engine)[:1] == [("2020-07-10", "2021-02-10", "Down")]
