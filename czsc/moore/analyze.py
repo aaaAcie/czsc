@@ -36,6 +36,7 @@ class MooreCZSC:
         enable_macro_audit: bool = True,
         enable_pre_round: bool = True,
         replay_centers_after_macro_swallow: bool = True,
+        rebuild_daily_centers_after_segment_change: bool = False,
     ):
         # --- 30分钟线段级 ---
         self.segment_analyzer = SegmentAnalyzer(
@@ -55,6 +56,7 @@ class MooreCZSC:
             self.segment_analyzer.segments,
             bars=self.segment_analyzer.state.bars_raw,
             micro_segments=self.segment_analyzer.micro_segments,
+            rebuild_centers_after_segment_change=rebuild_daily_centers_after_segment_change,
         )
 
     def update(self, bar: RawBar):

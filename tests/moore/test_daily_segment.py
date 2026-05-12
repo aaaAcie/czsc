@@ -111,6 +111,7 @@ def make_600707_engine() -> MooreCZSC:
         audit_link_rounds=3,
         enable_pre_round=True,
         replay_centers_after_macro_swallow=False,
+        rebuild_daily_centers_after_segment_change=True,
     )
 
 
@@ -125,6 +126,7 @@ def make_603178_engine() -> MooreCZSC:
         audit_link_rounds=3,
         enable_pre_round=True,
         replay_centers_after_macro_swallow=False,
+        rebuild_daily_centers_after_segment_change=True,
     )
 
 
@@ -831,6 +833,30 @@ def test_600707_daily_segments_match_expected_long_trend_and_swallow():
     assert engine.daily_segments[1].segments[0].cache.get("is_macro_swallow") is True
 
 
+def test_daily_center_rebuild_after_segment_change_defaults_to_construction_time_centers():
+    bars = research.get_raw_bars_origin("600707", sdt="20140601", edt="20210820")
+    if not bars:
+        pytest.skip("no bars for 600707")
+
+    engine = MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+    )
+
+    assert engine.daily_segments
+    assert engine.daily_centers
+    assert all(c.cache.get("source") == "daily_segment_construction" for c in engine.daily_centers)
+    assert all(c.cache.get("source") != "daily_segment_internal" for c in engine.daily_centers)
+    direct = next(c for c in engine.daily_centers if round(c.low, 3) == 8.046 and round(c.high, 3) == 8.160)
+    assert direct.cache["construction_direction"] == Direction.Down.value
+    assert engine.daily_pending_centers == []
+    assert engine.daily_refined_segments == []
+
+
 def test_regression_002346_pending_reverse_confirms_previous_daily_segments():
     bars = research.get_raw_bars_origin("002346", sdt="20161201", edt="20211001")
     if not bars:
@@ -1022,6 +1048,42 @@ def test_regression_603178_unfrozen_tail_extends_and_pending_stays_open_ended():
     assert round(repaired_center.high, 3) == 8.699
 
 
+def test_regression_603178_default_centers_use_construction_time_source_after_tail_extension():
+    bars = research.get_raw_bars_origin("603178", sdt="20171015", edt="20211101")
+    if not bars:
+        pytest.skip("no bars for 603178")
+
+    engine = MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+    )
+    label, _ = make_visible_labelers(engine)
+
+    daily_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_segments]
+    assert daily_pairs == [("mV2T", "mV25B")]
+    assert engine.daily_segments[0].cache["extended_from_unfrozen_end"] is True
+    assert engine.daily_centers
+    assert all(c.cache.get("source") == "daily_segment_construction" for c in engine.daily_centers)
+    assert len(engine.daily_centers) >= 3
+    center_spans = {(label(c.segments[0].start_k), label(c.segments[-1].end_k)) for c in engine.daily_centers}
+    assert {("mV9B", "mV16T"), ("mV16T", "mV25B")} <= center_spans
+
+    pending = engine.daily_pending_segments[0]
+    assert (label(pending.start_seg.start_k), label(pending.end_seg.end_k)) == ("mV25B", "mV28T")
+    assert pending.cache["open_ended"] is True
+    refined_spans = {(label(seg.start_k), label(seg.end_k), seg.cache.get("repair_reason")) for seg in engine.daily_refined_segments}
+    assert ("mV28T", "mV35B", "daily_center_source_non_same") in refined_spans
+
+    repaired_center = next(c for c in engine.daily_pending_centers if c.cache.get("repair_reason") == "daily_center_source_non_same")
+    assert repaired_center.cache["source"] == "daily_segment_pending_construction"
+    assert round(repaired_center.low, 3) == 8.589
+    assert round(repaired_center.high, 3) == 8.699
+
+
 def test_regression_300339_source_repair_does_not_create_same_mark_refined_segment():
     bars = research.get_raw_bars_origin("300339", sdt="20150415", edt="20210701")
     if not bars:
@@ -1034,6 +1096,7 @@ def test_regression_300339_source_repair_does_not_create_same_mark_refined_segme
         audit_link_rounds=3,
         enable_pre_round=True,
         replay_centers_after_macro_swallow=False,
+        rebuild_daily_centers_after_segment_change=True,
     )
     label, _ = make_visible_labelers(engine)
 
@@ -1054,6 +1117,7 @@ def test_regression_300339_daily_segments_split_on_confirmed_independence():
         audit_link_rounds=3,
         enable_pre_round=True,
         replay_centers_after_macro_swallow=False,
+        rebuild_daily_centers_after_segment_change=True,
     )
     label, _ = make_visible_labelers(engine)
 

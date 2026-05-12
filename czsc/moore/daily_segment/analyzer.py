@@ -66,8 +66,10 @@ class DailySegmentAnalyzer:
         segments: Optional[Sequence[MooreSegment]] = None,
         bars: Optional[Sequence[RawBar]] = None,
         micro_segments: Optional[Sequence[MooreSegment]] = None,
+        rebuild_centers_after_segment_change: bool = False,
     ):
         self.state = DailySegmentState()
+        self.state.rebuild_centers_after_segment_change = rebuild_centers_after_segment_change
         if bars:
             self.state.bars_raw = list(bars)
         if micro_segments:
@@ -794,8 +796,54 @@ class DailySegmentAnalyzer:
         ]
         return selected_centers, source_accumulator, refined_segments
 
+    def _collect_construction_centers_for_daily_segment(
+        self,
+        daily_segment: DailySegment,
+    ) -> tuple[List[DailySegmentCenter], List[MooreSegment], List[MooreSegment]]:
+        return self._collect_centers_for_daily_segments(
+            [daily_segment],
+            source="daily_segment_construction",
+            status_layer="COMPLETED",
+            collect_refined=True,
+        )
+
+    def _publish_construction_time_centers(self):
+        s = self.state
+        centers: List[DailySegmentCenter] = []
+        source_segments: List[MooreSegment] = []
+        refined_segments: List[MooreSegment] = []
+        refined_seen = set()
+
+        for daily_segment in s.completed_segments:
+            centers.extend(daily_segment.centers)
+            source_segments.extend(daily_segment.cache.get("_construction_source_segments", []))
+            for refined in daily_segment.cache.get("_construction_refined_segments", []):
+                refined_key = self._seg_key(refined)
+                if refined_key in refined_seen:
+                    continue
+                refined_seen.add(refined_key)
+                refined_segments.append(refined)
+
+        selected_centers = self._dedupe_overlapping_daily_centers([c for c in centers if c.is_active])
+        selected_refined_keys = {
+            key
+            for center in selected_centers
+            for key in center.cache.get("refined_segments", [])
+        }
+        s.daily_centers = selected_centers
+        s.daily_center_source_segments = source_segments
+        s.refined_segments = [
+            seg
+            for seg in refined_segments
+            if self._seg_key(seg) in selected_refined_keys or seg.cache.get("repair_context") == "compact_diagnostic"
+        ]
+
     def _rebuild_daily_centers(self):
         s = self.state
+        if not s.rebuild_centers_after_segment_change:
+            self._publish_construction_time_centers()
+            self._rebuild_pending_centers()
+            return
         s.daily_centers, s.daily_center_source_segments, s.refined_segments = self._collect_centers_for_daily_segments(
             s.completed_segments,
             source="daily_segment_internal",
@@ -806,6 +854,14 @@ class DailySegmentAnalyzer:
 
     def _rebuild_pending_centers(self):
         s = self.state
+        if not s.rebuild_centers_after_segment_change:
+            s.pending_centers, _, s.pending_refined_segments = self._collect_centers_for_daily_segments(
+                s.pending_display_segments,
+                source="daily_segment_pending_construction",
+                status_layer="PENDING",
+                collect_refined=True,
+            )
+            return
         s.pending_centers, _, s.pending_refined_segments = self._collect_centers_for_daily_segments(
             s.pending_display_segments,
             source="daily_segment_pending_internal",
@@ -972,28 +1028,23 @@ class DailySegmentAnalyzer:
         independence: Optional[IndependenceDecision] = None,
         candidate_kind: str = "",
     ):
-        centers = [
-            c
-            for c in self.state.candidates
-            if c.is_active
-            and c.start_index >= seg_start_index(segments[0])
-            and c.end_index <= seg_end_index(segments[-1])
-        ]
         cache = {"from_macro_swallow": True} if len(segments) == 1 and segments[0].cache.get("is_macro_swallow") else {}
         cache.update(self._independence_cache(independence))
         if candidate_kind:
             cache["candidate_kind"] = candidate_kind
-        self._append_completed_segment(
-            DailySegment(
-                symbol=segments[0].symbol,
-                direction=segments[0].direction,
-                start_seg=segments[0],
-                end_seg=segments[-1],
-                segments=list(segments),
-                centers=centers,
-                cache=cache,
-            )
+        daily_segment = DailySegment(
+            symbol=segments[0].symbol,
+            direction=segments[0].direction,
+            start_seg=segments[0],
+            end_seg=segments[-1],
+            segments=list(segments),
+            cache=cache,
         )
+        centers, source_segments, refined_segments = self._collect_construction_centers_for_daily_segment(daily_segment)
+        daily_segment.centers = centers
+        daily_segment.cache["_construction_source_segments"] = source_segments
+        daily_segment.cache["_construction_refined_segments"] = refined_segments
+        self._append_completed_segment(daily_segment)
         self.state.continuity_broken = False
 
     def _select_valid_daily_window(
@@ -1115,9 +1166,13 @@ class DailySegmentAnalyzer:
             start_seg=completed.start_seg,
             end_seg=extension_segments[-1],
             segments=[*completed.segments, *extension_segments],
-            centers=[],
+            centers=list(completed.centers),
             cache=extended_cache,
         )
+        centers, source_segments, refined_segments = self._collect_construction_centers_for_daily_segment(s.completed_segments[-1])
+        s.completed_segments[-1].centers = centers
+        s.completed_segments[-1].cache["_construction_source_segments"] = source_segments
+        s.completed_segments[-1].cache["_construction_refined_segments"] = refined_segments
         s.anchor_completed_segments = clone_completed_segments_snapshot(s.completed_segments)
         s.current_segments = list(s.current_segments[extension_offset + 1 :])
         s.pending_daily_segments = []
