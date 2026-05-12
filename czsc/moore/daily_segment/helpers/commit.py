@@ -41,6 +41,7 @@ class CommitDecision:
     tail_offset: Optional[int] = None
     independence: Optional["IndependenceDecision"] = None
     extra_segments: tuple = ()
+    candidate_kind: str = ""
 
     @property
     def next_tail_offset(self) -> int:
@@ -555,6 +556,7 @@ def find_delayed_commit_decision(
                     pending_segments=reverse.segments,
                     tail_offset=primary.end_offset,
                     independence=independence,
+                    candidate_kind=primary.kind,
                 )
                 if allow_cold_start and primary.start_offset == 0 and primary.segments[0].cache.get("is_macro_swallow"):
                     return possible_decision

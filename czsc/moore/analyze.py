@@ -147,6 +147,10 @@ class MooreCZSC:
         return self.daily_segment_analyzer.daily_pending_segments
 
     @property
+    def daily_non_same_segments(self) -> List[DailySegment]:
+        return self.daily_segment_analyzer.daily_non_same_segments
+
+    @property
     def daily_active_center(self) -> Optional[DailySegmentCenter]:
         return self.daily_segment_analyzer.active_center
 

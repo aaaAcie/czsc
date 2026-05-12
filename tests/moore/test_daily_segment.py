@@ -156,6 +156,17 @@ def pending_date_spans(engine: MooreCZSC):
     ]
 
 
+def non_same_date_spans(engine: MooreCZSC):
+    return [
+        (
+            ds.start_seg.start_k.dt.strftime("%Y-%m-%d"),
+            ds.end_seg.end_k.dt.strftime("%Y-%m-%d"),
+            ds.direction.name,
+        )
+        for ds in engine.daily_non_same_segments
+    ]
+
+
 def test_slice_segments_from_anchor_dual_key():
     seg1 = make_seg(0, 2, Direction.Up, 10, 12)
     seg2 = make_seg(3, 5, Direction.Down, 12, 11)
@@ -1074,4 +1085,6 @@ def test_002613_daily_segments_match_expected_blue_split():
             ("2019-04-22", "2020-02-04", "Down"),
         ],
     )
+    assert non_same_date_spans(engine)[:1] == [("2020-02-04", "2020-07-10", "Up")]
     assert pending_date_spans(engine)[:1] == [("2020-07-10", "2021-02-10", "Down")]
+    assert engine.daily_non_same_segments[0].cache["candidate_kind"] == "non_same"

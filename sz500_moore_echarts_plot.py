@@ -36,6 +36,8 @@ from czsc.connectors import research
 from czsc.moore.analyze import MooreCZSC
 from czsc.py.enum import Direction, Mark
 
+NON_SAME_LINE_COLOR = "#D35400"
+
 
 # ─────────────────────────────────────────────────────────────────────
 # 工具函数
@@ -140,10 +142,11 @@ def _daily_seg_markline_data(daily_segs: list, color: str, width: float, alpha: 
     """把日线级别线段列表转为 markLine data。"""
     data = []
     for seg in daily_segs:
+        seg_color = NON_SAME_LINE_COLOR if seg.cache.get("candidate_kind") == "non_same" else color
         data.append([
             {"coord": [_dt_str(seg.start_seg.start_k.dt), seg.start_seg.start_k.price],
              "symbol": "none",
-             "lineStyle": {"color": color, "width": width, "type": line_type, "opacity": alpha}},
+             "lineStyle": {"color": seg_color, "width": width, "type": line_type, "opacity": alpha}},
             {"coord": [_dt_str(seg.end_seg.end_k.dt), seg.end_seg.end_k.price],
              "symbol": "none"},
         ])
@@ -187,6 +190,7 @@ def plot_moore_structure_echarts(
 
     daily_segments = getattr(engine, "daily_segments", getattr(engine, "higher_segments", []))
     daily_pending_segments = getattr(engine, "daily_pending_segments", [])
+    daily_non_same_segments = getattr(engine, "daily_non_same_segments", [])
     daily_centers = getattr(engine, "daily_centers", [])
     daily_pending_centers = getattr(engine, "daily_pending_centers", [])
     daily_active_center = getattr(engine, "daily_active_center", getattr(engine, "higher_active_center", None))
@@ -559,7 +563,7 @@ def plot_moore_structure_echarts(
             is_sw = seg.cache.get("is_macro_swallow", False)
             is_refined = seg.cache.get("source") == "daily_segment_owner_chain_repair"
             tp = "solid" if is_refined or seg.is_perfect else "dashed"
-            color = "#D35400" if is_refined else "#000000"
+            color = NON_SAME_LINE_COLOR if is_refined else "#000000"
             w = 4 if is_sw or is_refined else 2.5
             opacity = 0.96 if is_refined else 0.92
             data.append([
@@ -582,6 +586,14 @@ def plot_moore_structure_echarts(
         "日线级别线段(Pending)",
         _daily_seg_markline_data(daily_pending_segments, "#C0392B", 3.8, alpha=0.9, line_type="dashed"),
         "#C0392B",
+    )
+    if s:
+        daily_series.append(s)
+
+    s = _raw_seg_series(
+        "日线非同处理",
+        _daily_seg_markline_data(daily_non_same_segments, NON_SAME_LINE_COLOR, 4.0, alpha=0.95, line_type="dashed"),
+        NON_SAME_LINE_COLOR,
     )
     if s:
         daily_series.append(s)
@@ -928,7 +940,7 @@ def plot_moore_structure_echarts(
                 "向上转折确立", "向下转折确立"
             ];
             var legendGroupDaily = [
-                "日线级别线段", "日线级别线段(Pending)", "日线级别中枢"
+                "日线级别线段", "日线级别线段(Pending)", "日线非同处理", "日线级别中枢"
             ];
             var legendGuard = false;
 
@@ -1054,15 +1066,15 @@ if __name__ == "__main__":
         AnalyzeTask("002613", sdt="20160801", edt="20210820", desc="北玻股份"),
         AnalyzeTask("600707", sdt="20140601", edt="20210820", desc="彩虹股份"),
         AnalyzeTask("300490", sdt="20160115", edt="20210701", desc="华自科技"),
-        AnalyzeTask("603178", sdt="20150115", edt="20210701", desc="圣龙股份"),
+        AnalyzeTask("603178", sdt="20171015", edt="20211101", desc="圣龙股份"),
         AnalyzeTask("300339", sdt="20150415", edt="20210701", desc="润和软件"),
 
         # AnalyzeTask("002222", sdt="20220415", edt="20250201", desc="福晶科技"),
     ]
 
     # 🎯 切换这里
-    task = tasks[-4]
-    # task = tasks[2]
+    task = tasks[-2]
+    # task = tasks[1]
     try:
         symbol = task.symbol
         logger.info(f"正在拉取标的 {symbol} ({task.desc}) | 时间: {task.sdt} ~ {task.edt}")

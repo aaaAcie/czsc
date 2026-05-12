@@ -108,7 +108,19 @@ class DailySegmentAnalyzer:
 
     @property
     def daily_pending_segments(self) -> List[DailySegment]:
-        return self.state.pending_display_segments
+        return [
+            segment
+            for segment in self.state.pending_display_segments
+            if segment.cache.get("candidate_kind") != "non_same"
+        ]
+
+    @property
+    def daily_non_same_segments(self) -> List[DailySegment]:
+        return [
+            segment
+            for segment in self.state.pending_display_segments
+            if segment.cache.get("candidate_kind") == "non_same"
+        ]
 
     @property
     def daily_pending_centers(self) -> List[DailySegmentCenter]:
@@ -966,6 +978,7 @@ class DailySegmentAnalyzer:
         self,
         segments: Sequence[MooreSegment],
         independence: Optional[IndependenceDecision] = None,
+        candidate_kind: str = "",
     ):
         centers = [
             c
@@ -976,6 +989,8 @@ class DailySegmentAnalyzer:
         ]
         cache = {"from_macro_swallow": True} if len(segments) == 1 and segments[0].cache.get("is_macro_swallow") else {}
         cache.update(self._independence_cache(independence))
+        if candidate_kind:
+            cache["candidate_kind"] = candidate_kind
         self._append_completed_segment(
             DailySegment(
                 symbol=segments[0].symbol,
@@ -1031,7 +1046,7 @@ class DailySegmentAnalyzer:
                 return
 
             tail = list(s.current_segments[decision.next_tail_offset:])
-            self._append_daily_segment(decision.segments, decision.independence)
+            self._append_daily_segment(decision.segments, decision.independence, decision.candidate_kind)
             for extra_segments, extra_independence in decision.extra_segments:
                 self._append_daily_segment(extra_segments, extra_independence)
             s.current_segments = tail
@@ -1108,22 +1123,6 @@ class DailySegmentAnalyzer:
             selected = candidates[-1]
             if selected.end_offset <= offset:
                 break
-            if selected.kind == "non_same":
-                next_candidates = candidates_from_start(
-                    segments,
-                    selected.end_offset,
-                    s.ma34,
-                    s.ma170,
-                    completed_segments=(),
-                    enforce_continuity=False,
-                    previous_direction=selected.direction,
-                    include_swallow_candidate=True,
-                    require_ma=False,
-                )
-                if any(candidate.kind == "regular" for candidate in next_candidates):
-                    previous_direction = selected.direction
-                    offset = selected.end_offset
-                    continue
             s.pending_display_segments.append(
                 DailySegment(
                     symbol=selected.segments[0].symbol,
