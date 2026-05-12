@@ -142,6 +142,8 @@ def _daily_seg_markline_data(daily_segs: list, color: str, width: float, alpha: 
     """把日线级别线段列表转为 markLine data。"""
     data = []
     for seg in daily_segs:
+        if seg.cache.get("open_ended"):
+            continue
         seg_color = NON_SAME_LINE_COLOR if seg.cache.get("candidate_kind") == "non_same" else color
         data.append([
             {"coord": [_dt_str(seg.start_seg.start_k.dt), seg.start_seg.start_k.price],
@@ -149,6 +151,44 @@ def _daily_seg_markline_data(daily_segs: list, color: str, width: float, alpha: 
              "lineStyle": {"color": seg_color, "width": width, "type": line_type, "opacity": alpha}},
             {"coord": [_dt_str(seg.end_seg.end_k.dt), seg.end_seg.end_k.price],
              "symbol": "none"},
+        ])
+    return data
+
+
+def _daily_open_ended_markline_data(daily_segs: list, bars: list, color: str, width: float, alpha: float = 0.9) -> list:
+    """把 open-ended pending 日线段画成不指向具体端点的红色虚线延伸箭头。"""
+    if not bars:
+        return []
+    data = []
+    right_dt = _dt_str(bars[-1].dt)
+    highs = [bar.high for bar in bars if getattr(bar, "high", None) is not None]
+    lows = [bar.low for bar in bars if getattr(bar, "low", None) is not None]
+    chart_high = max(highs) if highs else None
+    chart_low = min(lows) if lows else None
+
+    for seg in daily_segs:
+        if not seg.cache.get("open_ended"):
+            continue
+        start_price = seg.start_seg.start_k.price
+        evidence_price = seg.end_seg.end_k.price
+        if seg.direction == Direction.Up:
+            target_price = max(evidence_price, start_price)
+            if chart_high is not None:
+                target_price = max(target_price, chart_high * 0.92)
+        elif seg.direction == Direction.Down:
+            target_price = min(evidence_price, start_price)
+            if chart_low is not None:
+                target_price = min(target_price, chart_low * 1.08)
+        else:
+            target_price = evidence_price
+
+        data.append([
+            {"coord": [_dt_str(seg.start_seg.start_k.dt), start_price],
+             "symbol": "none",
+             "lineStyle": {"color": color, "width": width, "type": "dashed", "opacity": alpha}},
+            {"coord": [right_dt, round(target_price, 3)],
+             "symbol": "arrow",
+             "symbolSize": [18, 26]},
         ])
     return data
 
@@ -591,8 +631,16 @@ def plot_moore_structure_echarts(
         daily_series.append(s)
 
     s = _raw_seg_series(
+        "日线级别线段(Pending Open)",
+        _daily_open_ended_markline_data(daily_pending_segments, bars, "#C0392B", 3.8, alpha=0.9),
+        "#C0392B",
+    )
+    if s:
+        daily_series.append(s)
+
+    s = _raw_seg_series(
         "日线非同处理",
-        _daily_seg_markline_data(daily_non_same_segments, NON_SAME_LINE_COLOR, 4.0, alpha=0.95, line_type="dashed"),
+        _daily_seg_markline_data(daily_non_same_segments, NON_SAME_LINE_COLOR, 4.0, alpha=0.95, line_type="solid"),
         NON_SAME_LINE_COLOR,
     )
     if s:
@@ -1073,7 +1121,7 @@ if __name__ == "__main__":
     ]
 
     # 🎯 切换这里
-    task = tasks[-1]
+    task = tasks[-5]
     # task = tasks[1]
     try:
         symbol = task.symbol

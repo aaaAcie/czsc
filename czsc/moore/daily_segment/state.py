@@ -40,3 +40,4 @@ class DailySegmentState:
     last_sig: Optional[tuple] = None
     pending_anchor_snapshot: bool = False
     continuity_broken: bool = False
+    pending_after_tail_extension: bool = False

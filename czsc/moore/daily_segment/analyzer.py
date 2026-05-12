@@ -196,6 +196,7 @@ class DailySegmentAnalyzer:
         s.anchor_completed_segments = []
         s.pending_anchor_snapshot = False
         s.continuity_broken = False
+        s.pending_after_tail_extension = False
 
         for seg in s.base_segments:
             self._process_new_segment(seg)
@@ -697,6 +698,7 @@ class DailySegmentAnalyzer:
                     "status_layer": status_layer,
                     "source_segments_kind": source_segments_kind,
                     "daily_segment_direction": daily_segment.direction.value,
+                    "construction_direction": daily_segment.cache.get("construction_direction", daily_segment.direction.value),
                     "center_kind": result.get("center_kind", "trend_class"),
                     "generation_index": max(point[0] for point in result["points"].values()),
                     "third_entry_index": self._third_segment_entry_index(result, self.state.ma34),
@@ -922,8 +924,12 @@ class DailySegmentAnalyzer:
 
     def _append_completed_segment(self, segment: DailySegment):
         s = self.state
+        if s.completed_segments:
+            s.completed_segments[-1].cache["end_state"] = "frozen_end"
+        segment.cache.setdefault("end_state", "extendable_end")
         s.completed_segments.append(segment)
         s.anchor_completed_segments = clone_completed_segments_snapshot(s.completed_segments)
+        s.pending_after_tail_extension = False
 
     def _advance_anchor_snapshot(self, next_start_seg: MooreSegment):
         s = self.state
@@ -1024,9 +1030,13 @@ class DailySegmentAnalyzer:
         while True:
             decision = self._find_commit_decision(s.current_segments)
             if not decision:
+                if self._extend_unfrozen_completed_tail_if_needed():
+                    continue
                 self._rebuild_pending_display_segments()
                 return
             if not decision.segments:
+                if self._extend_unfrozen_completed_tail_if_needed():
+                    continue
                 s.pending_daily_segments = decision.pending_segments
                 self._rebuild_pending_display_segments()
                 return
@@ -1047,6 +1057,82 @@ class DailySegmentAnalyzer:
                 s.anchor_k_index = None
                 s.anchor_dt = None
                 s.pending_anchor_snapshot = True
+
+    @staticmethod
+    def _strictly_extends_direction(direction: Direction, base_price: float, price: float) -> bool:
+        if direction == Direction.Up:
+            return price > base_price
+        if direction == Direction.Down:
+            return price < base_price
+        return False
+
+    def _tail_extension_offset(self, completed: DailySegment, segments: Sequence[MooreSegment]) -> Optional[int]:
+        if not segments:
+            return None
+        if self._tk_key(segments[0].start_k) != self._tk_key(completed.end_seg.end_k):
+            return None
+        if segments[0].cache.get("is_macro_swallow"):
+            return None
+
+        best_offset = None
+        best_price = completed.end_price
+        for idx, seg in enumerate(segments):
+            price = seg.end_k.price
+            if not self._strictly_extends_direction(completed.direction, completed.end_price, price):
+                continue
+            if best_offset is None or self._strictly_extends_direction(completed.direction, best_price, price):
+                best_offset = idx
+                best_price = price
+        return best_offset
+
+    def _extend_unfrozen_completed_tail_if_needed(self) -> bool:
+        s = self.state
+        if not s.completed_segments or not s.current_segments:
+            return False
+
+        completed = s.completed_segments[-1]
+        if completed.cache.get("end_state") != "extendable_end":
+            return False
+
+        extension_offset = self._tail_extension_offset(completed, s.current_segments)
+        if extension_offset is None:
+            return False
+
+        extension_segments = list(s.current_segments[: extension_offset + 1])
+        extended_cache = dict(completed.cache)
+        extended_cache.update(
+            {
+                "end_state": "extendable_end",
+                "extended_from_unfrozen_end": True,
+                "extension_reason": "unfrozen_boundary_continuation_new_extreme",
+                "original_end_segment": self._seg_key(completed.end_seg),
+                "extension_end_segment": self._seg_key(extension_segments[-1]),
+            }
+        )
+        s.completed_segments[-1] = DailySegment(
+            symbol=completed.symbol,
+            direction=completed.direction,
+            start_seg=completed.start_seg,
+            end_seg=extension_segments[-1],
+            segments=[*completed.segments, *extension_segments],
+            centers=[],
+            cache=extended_cache,
+        )
+        s.anchor_completed_segments = clone_completed_segments_snapshot(s.completed_segments)
+        s.current_segments = list(s.current_segments[extension_offset + 1 :])
+        s.pending_daily_segments = []
+        s.pending_display_segments = []
+        s.pending_centers = []
+        s.pending_after_tail_extension = True
+        self._reset_daily_center_state()
+        if s.current_segments:
+            self._advance_anchor_snapshot(s.current_segments[0])
+            self._rebuild_candidates_for_current_segments()
+        else:
+            s.anchor_k_index = None
+            s.anchor_dt = None
+            s.pending_anchor_snapshot = True
+        return True
 
     def _finalize_terminal_swallow_pending(self):
         s = self.state
@@ -1109,26 +1195,44 @@ class DailySegmentAnalyzer:
             selected = candidates[-1]
             if selected.end_offset <= offset:
                 break
+            open_ended = selected.kind == "regular" and offset == 0 and selected.end_offset < len(segments)
+            display_segments = list(segments[offset:]) if open_ended else list(selected.segments)
+            display_end_seg = selected.segments[-1]
+            cache = {
+                "status": "PENDING",
+                "source": "daily_segment_cold_end",
+                "candidate_kind": selected.kind,
+                "construction_direction": selected.direction.value,
+            }
+            if open_ended:
+                cache.update(
+                    {
+                        "open_ended": True,
+                        "candidate_end_segment": self._seg_key(selected.segments[-1]),
+                        "evidence_end_segment": self._seg_key(selected.segments[-1]),
+                        "source_end_segment": self._seg_key(display_segments[-1]),
+                    }
+                )
             s.pending_display_segments.append(
                 DailySegment(
                     symbol=selected.segments[0].symbol,
                     direction=selected.direction,
                     start_seg=selected.segments[0],
-                    end_seg=selected.segments[-1],
-                    segments=list(selected.segments),
-                    cache={
-                        "status": "PENDING",
-                        "source": "daily_segment_cold_end",
-                        "candidate_kind": selected.kind,
-                    },
+                    end_seg=display_end_seg,
+                    segments=display_segments,
+                    cache=cache,
                 )
             )
+            if open_ended:
+                break
             previous_direction = selected.direction
             offset = selected.end_offset
         self._rebuild_pending_centers()
 
     def _find_commit_decision(self, segments: Sequence[MooreSegment]) -> Optional[CommitDecision]:
         if self.state.continuity_broken:
+            return None
+        if self.state.pending_after_tail_extension:
             return None
         block_decision = self._find_block_third_buy_sell_decision(segments)
         if block_decision:

@@ -996,6 +996,32 @@ def test_regression_603178_source_non_same_proposal_builds_v28_to_v35_when_regio
     assert proposals[0].refined_segment.cache["repair_reason"] == "daily_center_source_non_same"
 
 
+def test_regression_603178_unfrozen_tail_extends_and_pending_stays_open_ended():
+    engine = make_603178_engine()
+    label, _ = make_visible_labelers(engine)
+
+    daily_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_segments]
+    assert daily_pairs == [("mV2T", "mV25B")]
+    assert engine.daily_segments[0].cache["extended_from_unfrozen_end"] is True
+    assert engine.daily_segments[0].cache["end_state"] == "extendable_end"
+
+    pending = engine.daily_pending_segments[0]
+    assert (label(pending.start_seg.start_k), label(pending.end_seg.end_k)) == ("mV25B", "mV28T")
+    assert pending.direction == Direction.Up
+    assert pending.cache["open_ended"] is True
+    assert (label(pending.segments[3].start_k), label(pending.segments[7].end_k)) == ("mV28T", "mV35B")
+
+    refined_spans = {(label(seg.start_k), label(seg.end_k), seg.cache.get("repair_reason")) for seg in engine.daily_refined_segments}
+    assert ("mV28T", "mV35B", "daily_center_source_non_same") in refined_spans
+
+    repaired_center = next(c for c in engine.daily_pending_centers if c.cache.get("repair_reason") == "daily_center_source_non_same")
+    assert repaired_center.overlap_type == 3
+    assert repaired_center.status == "FINAL"
+    assert repaired_center.cache["construction_direction"] == Direction.Up.value
+    assert round(repaired_center.low, 3) == 8.589
+    assert round(repaired_center.high, 3) == 8.699
+
+
 def test_regression_300339_source_repair_does_not_create_same_mark_refined_segment():
     bars = research.get_raw_bars_origin("300339", sdt="20150415", edt="20210701")
     if not bars:
