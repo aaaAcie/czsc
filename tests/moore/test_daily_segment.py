@@ -114,6 +114,20 @@ def make_600707_engine() -> MooreCZSC:
     )
 
 
+def make_603178_engine() -> MooreCZSC:
+    bars = research.get_raw_bars_origin("603178", sdt="20171015", edt="20211101")
+    if not bars:
+        pytest.skip("no bars for 603178")
+    return MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+    )
+
+
 def make_visible_labelers(engine: MooreCZSC, prefix: str = "mV"):
     display_tks = getattr(engine, "micro_turning_ks", engine.turning_ks)
     label_by_key = {
@@ -952,7 +966,54 @@ def test_regression_600707_candidate_owner_repair_infers_v14_to_v19_without_muta
 
     raw_30f_spans = {(label(seg.start_k), label(seg.end_k)) for seg in engine.segments}
     assert ("mV14B", "mV19T") not in raw_30f_spans
-    assert ("mV14B", "mV19T") in {(label(seg.start_k), label(seg.end_k)) for seg in analyzer.refined_segments}
+    assert ("mV14B", "mV19T") not in {(label(seg.start_k), label(seg.end_k)) for seg in analyzer.refined_segments}
+
+
+def test_regression_603178_source_non_same_proposal_builds_v28_to_v35_when_region_is_in_source():
+    engine = make_603178_engine()
+    label, _ = make_visible_labelers(engine)
+    analyzer = engine.daily_segment_analyzer
+    source = [
+        seg
+        for seg in engine.segments
+        if label(seg.start_k) in {"mV24T", "mV25B", "mV26T", "mV27B", "mV28T", "mV29B", "mV30T", "mV31B", "mV32T", "mV35B", "mV40T", "mV41B", "mV42T"}
+    ]
+
+    target_result = None
+    for start in range(max(0, len(source) - 3)):
+        result = find_center(source[start:], analyzer.state.ma34, trend_direction=Direction.Down)
+        if result and round(result["low"], 3) == 7.561 and round(result["high"], 3) == 8.699:
+            target_result = result
+            break
+
+    assert target_result is not None
+    proposals = analyzer._build_owner_chain_repair_proposals(source, target_result, Direction.Down)
+
+    assert [(label(p.refined_segment.start_k), label(p.refined_segment.end_k)) for p in proposals] == [("mV28T", "mV35B")]
+    promoted = proposals[0].promoted_result
+    assert promoted["overlap_type"] == 3
+    assert promoted["status"] == "FINAL"
+    assert proposals[0].refined_segment.cache["repair_reason"] == "daily_center_source_non_same"
+
+
+def test_regression_300339_source_repair_does_not_create_same_mark_refined_segment():
+    bars = research.get_raw_bars_origin("300339", sdt="20150415", edt="20210701")
+    if not bars:
+        pytest.skip("no bars for 300339")
+
+    engine = MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+    )
+    label, _ = make_visible_labelers(engine)
+
+    refined_spans = {(label(seg.start_k), label(seg.end_k)) for seg in engine.daily_refined_segments}
+    assert ("mV34B", "mV36B") not in refined_spans
+    assert all(seg.start_k.mark != seg.end_k.mark for seg in engine.daily_refined_segments)
 
 
 def test_regression_300339_daily_segments_split_on_confirmed_independence():

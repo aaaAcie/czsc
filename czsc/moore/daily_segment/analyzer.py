@@ -445,45 +445,58 @@ class DailySegmentAnalyzer:
 
         proposals: List[RepairProposal] = []
         seen = set()
-        for start_idx in range(len(segs) - 1):
-            start_tk = segs[start_idx].end_k
-            for end_idx in range(start_idx + 1, len(segs)):
-                end_tk = segs[end_idx].end_k
-                if self._tk_key(start_tk) == self._tk_key(end_tk):
-                    continue
-                if self._segment_between_endpoints(start_tk, end_tk, source_segments) is not None:
-                    continue
-                refined = self._make_refined_segment(start_tk, end_tk, candidate_result)
-                refined.cache.update(
-                    {
-                        "repair_context": "owner_chain_proposal",
-                        "promoted_overlap_type": candidate_result.get("overlap_type"),
-                    }
-                )
-                refined_key = self._seg_key(refined)
-                if refined_key in seen:
-                    continue
-                repaired_source_segments = self._replace_source_span_with_refined(source_segments, refined)
-                if repaired_source_segments is None:
-                    continue
+        seed_offset = self._find_source_segment_offset(source_segments, segs[0])
+        repair_start_offset = self._find_source_segment_offset(source_segments, segs[3])
+        if seed_offset is None or repair_start_offset is None:
+            return []
 
-                for variant_start in range(max(0, len(repaired_source_segments) - 3)):
-                    promoted = find_center(repaired_source_segments[variant_start:], self.state.ma34, trend_direction=trend_direction)
-                    if (
-                        promoted
-                        and promoted.get("overlap_type") == 3
-                        and self._variant_contains_segment(promoted, refined)
-                    ):
-                        seen.add(refined_key)
-                        proposals.append(
-                            RepairProposal(
-                                seed_result=candidate_result,
-                                refined_segment=refined,
-                                source_segments=repaired_source_segments,
-                                promoted_result=promoted,
-                            )
-                        )
-                        break
+        repair_start_seg = source_segments[repair_start_offset]
+        start_tk = repair_start_seg.start_k
+        for end_offset in range(repair_start_offset + 2, len(source_segments) - 1):
+            end_tk = source_segments[end_offset].end_k
+            if start_tk.mark == end_tk.mark:
+                continue
+            if self._segment_between_endpoints(start_tk, end_tk, source_segments) is not None:
+                continue
+
+            refined = self._make_refined_segment(start_tk, end_tk, candidate_result)
+            if refined.direction != repair_start_seg.direction:
+                continue
+            replaced_span = list(source_segments[repair_start_offset : end_offset + 1])
+            if not ma_reverses_against_window(replaced_span, self.state.ma34):
+                continue
+
+            refined.cache.update(
+                {
+                    "repair_context": "owner_chain_proposal",
+                    "repair_reason": "daily_center_source_non_same",
+                    "promoted_overlap_type": candidate_result.get("overlap_type"),
+                }
+            )
+            refined_key = self._seg_key(refined)
+            if refined_key in seen:
+                continue
+            repaired_source_segments = self._replace_source_span_with_refined(source_segments, refined)
+            if repaired_source_segments is None:
+                continue
+
+            promoted = find_center(repaired_source_segments[seed_offset:], self.state.ma34, trend_direction=trend_direction)
+            if (
+                promoted
+                and promoted.get("overlap_type") == 3
+                and promoted.get("status") == "FINAL"
+                and self._variant_contains_segment(promoted, refined)
+            ):
+                seen.add(refined_key)
+                proposals.append(
+                    RepairProposal(
+                        seed_result=candidate_result,
+                        refined_segment=refined,
+                        source_segments=repaired_source_segments,
+                        promoted_result=promoted,
+                    )
+                )
+                break
         return proposals
 
     def _candidate_owner_chain_repair(
@@ -629,11 +642,15 @@ class DailySegmentAnalyzer:
         repair_evidence = self._candidate_owner_chain_repair(result, source_segments, daily_segment.direction)
         if forced_refined_segments:
             forced_refined_segments = list(forced_refined_segments)
+            forced_repair_reason = next(
+                (seg.cache.get("repair_reason") for seg in forced_refined_segments if seg.cache.get("repair_reason")),
+                "missing_continuous_owner_segment_for_badc",
+            )
             if repair_evidence is None:
                 repair_evidence = {
                     "source": "daily_segment_owner_chain_repair",
                     "source_segments_kind": source_segments_kind,
-                    "repair_reason": "missing_continuous_owner_segment_for_badc",
+                    "repair_reason": forced_repair_reason,
                     "point_owners": owner_evidence.get("point_owners", {}),
                     "owner_chain": owner_evidence.get("owner_chain", []),
                     "owner_chain_valid": False,
@@ -644,7 +661,7 @@ class DailySegmentAnalyzer:
                 if self._seg_key(refined) not in existing:
                     repair_evidence.setdefault("refined_segments", []).append(refined)
                     existing.add(self._seg_key(refined))
-            repair_evidence["repair_reason"] = repair_evidence.get("repair_reason") or "missing_continuous_owner_segment_for_badc"
+            repair_evidence["repair_reason"] = repair_evidence.get("repair_reason") or forced_repair_reason
 
         if repair_evidence:
             for refined in repair_evidence.get("refined_segments", []):
@@ -751,37 +768,6 @@ class DailySegmentAnalyzer:
                         "owner_chain_repair",
                         forced_refined_segments=[proposal.refined_segment],
                     )
-
-            repair_source_segments = self._compact_repair_source_segments(source_segments)
-            if repair_source_segments and repair_source_segments != list(source_segments):
-                repair_seen = set()
-                for start in range(max(0, len(repair_source_segments) - 3)):
-                    result = find_center(repair_source_segments[start:], self.state.ma34, trend_direction=daily_segment.direction)
-                    if not result:
-                        continue
-                    repair_key = (
-                        seg_start_index(result["segments"][0]),
-                        seg_end_index(result["segments"][-1]),
-                        round(result["high"], 8),
-                        round(result["low"], 8),
-                        result["overlap_type"],
-                        result.get("center_kind", "trend_class"),
-                        result["status"],
-                    )
-                    if repair_key in repair_seen:
-                        continue
-                    repair_seen.add(repair_key)
-                    repair_evidence = self._candidate_owner_chain_repair(result, source_segments, daily_segment.direction)
-                    if not repair_evidence:
-                        continue
-                    for refined in repair_evidence.get("refined_segments", []):
-                        refined_key = self._seg_key(refined)
-                        if refined_key in refined_seen:
-                            continue
-                        refined_seen.add(refined_key)
-                        if collect_refined:
-                            refined.cache.setdefault("repair_context", "compact_diagnostic")
-                            refined_segments.append(refined)
 
         active_centers = [c for c in centers if c.is_active]
         for c in centers:
