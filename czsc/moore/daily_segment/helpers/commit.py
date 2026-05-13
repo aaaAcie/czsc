@@ -205,34 +205,6 @@ def find_terminal_candidate_from_start(
     return _select_pending_and_terminal(candidates, segments)
 
 
-def _candidate_has_swallow(candidate: WindowCandidate) -> bool:
-    return candidate.kind == "swallow" or any(
-        seg.cache.get("is_macro_swallow") and seg.direction == candidate.direction
-        for seg in candidate.segments
-    )
-
-
-def _is_strong_reverse_candidate(candidate: WindowCandidate, segments: Sequence, ma34, ma170) -> bool:
-    if len(candidate.segments) >= 5:
-        return True
-    if candidate.kind == "non_same":
-        return True
-    if _candidate_has_swallow(candidate):
-        lag_segment = segments[candidate.end_offset] if candidate.end_offset < len(segments) else None
-        return check_ma_cross_correlation(candidate.segments, ma34, ma170, lag_segment)
-    return False
-
-
-def _candidate_extends_primary(primary: WindowCandidate, confirmer: WindowCandidate) -> bool:
-    primary_end = seg_end_price(primary.segments[-1])
-    confirm_end = seg_end_price(confirmer.segments[-1])
-    if primary.direction == Direction.Up:
-        return confirm_end > primary_end
-    if primary.direction == Direction.Down:
-        return confirm_end < primary_end
-    return False
-
-
 def _reverse_strictly_breaks_primary_start(primary: WindowCandidate, reverse: WindowCandidate) -> bool:
     pivot = seg_start_price(primary.segments[0])
     reverse_end = seg_end_price(reverse.segments[-1])
@@ -490,7 +462,6 @@ def find_delayed_commit_decision(
             enforce_continuity=not allow_cold_start,
             previous_direction=previous_direction,
             include_swallow_candidate=not allow_cold_start,
-            require_ma=False,
         )
         if not primary_candidates:
             continue
@@ -516,12 +487,8 @@ def find_delayed_commit_decision(
                 best_pending = primary.segments
                 continue
 
-            committed = False
             for reverse in reverse_candidates:
                 if reverse.kind == "swallow" and len(primary.segments) <= 3:
-                    best_pending = primary.segments
-                    continue
-                if not _is_strong_reverse_candidate(reverse, segments, ma34, ma170):
                     best_pending = primary.segments
                     continue
                 independence = check_daily_segment_independence(
@@ -561,36 +528,9 @@ def find_delayed_commit_decision(
                 if allow_cold_start and primary.start_offset == 0 and primary.segments[0].cache.get("is_macro_swallow"):
                     return possible_decision
 
-                confirmers = find_reverse_candidates(
-                    segments,
-                    reverse.end_offset,
-                    reverse.direction,
-                    ma34,
-                    ma170,
-                    completed_segments,
-                )
-                if not confirmers:
-                    if reverse.kind == "swallow" and len(primary.segments) > 3:
-                        swallow_fallback = possible_decision
-                    chosen_decision = possible_decision
-                    best_pending = reverse.segments
-                    continue
-
-                confirmer = None
-                for candidate in confirmers:
-                    if _candidate_extends_primary(primary, candidate):
-                        confirmer = candidate
-                        break
-                if confirmer is None:
-                    chosen_decision = possible_decision
-                    best_pending = reverse.segments
-                    continue
-
-                committed = True
                 chosen_decision = possible_decision
+                best_pending = reverse.segments
                 break
-            if committed:
-                continue
 
         selected = None
         if swallow_fallback and (

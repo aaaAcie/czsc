@@ -187,6 +187,57 @@ def find_center(
 
         a_norm = a_val * sign
         b_norm = b_val * sign
+        early_entry_has_structural_ab = (
+            a_idx <= seg_end_index(seg_12)
+            and seg_start_index(seg_23) <= b_idx <= seg_end_index(seg_23)
+        )
+        if early_entry_has_structural_ab and check_price_reentry(seg_34, a_norm, b_norm, sign):
+            ma34_in_ab = check_ma34_overlap(seg_34, a_norm, b_norm, ma_array, sign)
+            if ma34_in_ab:
+                d_idx, d_val = find_best_local_extreme(
+                    ma_array,
+                    seg_end_index(seg_34) + 1,
+                    seg_end_index(seg_45),
+                    True,
+                    sign,
+                )
+                if d_val is not None:
+                    c_idx, c_val = find_c_point(b_idx, d_idx, ma_array, sign)
+                    if c_val is not None:
+                        upper_norm = min(b_val * sign, d_val * sign)
+                        lower_norm = max(a_val * sign, c_val * sign)
+                        if lower_norm < upper_norm:
+                            high = max(upper_norm * sign, lower_norm * sign)
+                            low = min(upper_norm * sign, lower_norm * sign)
+                            return {
+                                "high": high,
+                                "low": low,
+                                "overlap_type": 3,
+                                "center_kind": "trend_class",
+                                "status": "FINAL",
+                                "segments": list(segments[i : i + 4]),
+                                "points": {
+                                    "A": (a_idx, a_val),
+                                    "B": (b_idx, b_val),
+                                    "C": (c_idx, c_val),
+                                    "D": (d_idx, d_val),
+                                },
+                            }
+            if ma34_in_ab:
+                # MA34 has entered AB, so this path must satisfy BADC;
+                # do not silently downgrade a failed BADC attempt to T1.
+                pass
+            else:
+                return {
+                    "high": max(a_val, b_val),
+                    "low": min(a_val, b_val),
+                    "overlap_type": 1,
+                    "center_kind": "trend_class",
+                    "status": "FINAL",
+                    "segments": list(segments[i : i + 4]),
+                    "points": {"A": (a_idx, a_val), "B": (b_idx, b_val)},
+                }
+
         if not check_price_reentry(seg_45, a_norm, b_norm, sign):
             return {
                 "high": max(a_val, b_val),
@@ -200,6 +251,45 @@ def find_center(
 
         ma34_in_ab = check_ma34_overlap(seg_45, a_norm, b_norm, ma_array, sign)
         if not ma34_in_ab:
+            for promote_end in range(i + 4, len(segments)):
+                entry_seg = segments[promote_end]
+                if not check_price_reentry(entry_seg, a_norm, b_norm, sign):
+                    continue
+                if not check_ma34_overlap(entry_seg, a_norm, b_norm, ma_array, sign):
+                    continue
+                d_idx, d_val = find_best_local_extreme(
+                    ma_array,
+                    seg_start_index(entry_seg),
+                    seg_end_index(entry_seg),
+                    True,
+                    sign,
+                )
+                if d_val is None:
+                    continue
+                c_idx, c_val = find_c_point(b_idx, d_idx, ma_array, sign)
+                if c_val is None:
+                    continue
+
+                upper_norm = min(b_val * sign, d_val * sign)
+                lower_norm = max(a_val * sign, c_val * sign)
+                if lower_norm >= upper_norm:
+                    continue
+                high = max(upper_norm * sign, lower_norm * sign)
+                low = min(upper_norm * sign, lower_norm * sign)
+                return {
+                    "high": high,
+                    "low": low,
+                    "overlap_type": 3,
+                    "center_kind": "trend_class",
+                    "status": "FINAL",
+                    "segments": list(segments[i : promote_end + 1]),
+                    "points": {
+                        "A": (a_idx, a_val),
+                        "B": (b_idx, b_val),
+                        "C": (c_idx, c_val),
+                        "D": (d_idx, d_val),
+                    },
+                }
             return {
                 "high": max(a_val, b_val),
                 "low": min(a_val, b_val),

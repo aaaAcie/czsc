@@ -61,10 +61,40 @@ class DailySegmentCenter:
     def check_price_overlap(self, other: "DailySegmentCenter") -> bool:
         return max(self.low, other.low) <= min(self.high, other.high)
 
-    def check_segment_overlap(self, other: "DailySegmentCenter") -> bool:
-        a_keys = {(seg.sdt, seg.edt) for seg in self.segments}
-        b_keys = {(seg.sdt, seg.edt) for seg in other.segments}
-        return bool(a_keys & b_keys)
+    def endpoint_keys(self) -> set:
+        endpoint_keys = set()
+        for seg in self.segments:
+            endpoint_keys.add(
+                (
+                    seg.start_k.k_index,
+                    _turning_dt(seg.start_k),
+                    seg.start_k.price,
+                    seg.start_k.mark.value,
+                )
+            )
+            endpoint_keys.add(
+                (
+                    seg.end_k.k_index,
+                    _turning_dt(seg.end_k),
+                    seg.end_k.price,
+                    seg.end_k.mark.value,
+                )
+            )
+        return endpoint_keys
+
+    def shared_endpoint_count(self, other: "DailySegmentCenter") -> int:
+        self_axis = self.cache.get("endpoint_axis")
+        other_axis = other.cache.get("endpoint_axis")
+        self_span = self.cache.get("endpoint_span")
+        other_span = other.cache.get("endpoint_span")
+        if self_axis and self_axis == other_axis and self_span and other_span:
+            left = max(self_span[0], other_span[0])
+            right = min(self_span[1], other_span[1])
+            return max(0, right - left + 1)
+        return len(self.endpoint_keys() & other.endpoint_keys())
+
+    def check_segment_overlap(self, other: "DailySegmentCenter", min_shared_endpoints: int = 3) -> bool:
+        return self.shared_endpoint_count(other) >= min_shared_endpoints
 
 
 @dataclass

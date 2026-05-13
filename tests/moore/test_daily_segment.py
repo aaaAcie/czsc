@@ -547,7 +547,7 @@ def test_live_processing_locks_ready_segment_and_restarts_from_its_endpoint():
 
     assert analyzer.daily_segments == []
     assert analyzer.state.current_segments == segs
-    assert analyzer.state.pending_daily_segments == segs[:3]
+    assert analyzer.state.pending_daily_segments == segs[3:]
 
 
 def test_breaking_lag_segment_can_confirm_previous_window_before_reset():
@@ -584,9 +584,10 @@ def test_live_processing_extends_by_two_until_reverse_trend_forms():
     for seg in segs:
         analyzer._process_new_segment(seg)
 
-    assert analyzer.daily_segments == []
-    assert analyzer.state.current_segments == segs
-    assert analyzer.state.pending_daily_segments
+    assert len(analyzer.daily_segments) == 1
+    assert analyzer.daily_segments[0].segments == segs[2:5]
+    assert analyzer.state.current_segments == segs[5:]
+    assert analyzer.state.pending_daily_segments == segs[5:]
 
 
 def test_non_same_processing_marks_reverse_dashed_start_as_pending_candidate():
@@ -779,9 +780,10 @@ def test_cold_start_skips_warmup_segments_and_waits_for_reverse_confirmation():
     for seg in up:
         analyzer._process_new_segment(seg)
 
-    assert analyzer.daily_segments == []
-    assert analyzer.state.current_segments == [warmup, *down, *up]
-    assert analyzer.state.pending_daily_segments == down
+    assert len(analyzer.daily_segments) == 1
+    assert analyzer.daily_segments[0].segments == down[0:3]
+    assert analyzer.state.current_segments == up
+    assert analyzer.state.pending_daily_segments == up
 
 
 def test_delayed_confirmation_keeps_best_endpoint_until_reverse_daily_candidate_forms():
@@ -812,14 +814,16 @@ def test_delayed_confirmation_keeps_best_endpoint_until_reverse_daily_candidate_
     for seg in down:
         analyzer._process_new_segment(seg)
     assert len(analyzer.daily_segments) == 1
+    assert analyzer.daily_segments[0].segments == [prev]
     assert analyzer.state.pending_daily_segments == down
 
     for seg in up:
         analyzer._process_new_segment(seg)
 
-    assert len(analyzer.daily_segments) == 1
-    assert analyzer.state.current_segments == down + up
-    assert analyzer.state.pending_daily_segments == down
+    assert len(analyzer.daily_segments) == 2
+    assert analyzer.daily_segments[1].segments == down
+    assert analyzer.state.current_segments == up
+    assert analyzer.state.pending_daily_segments == up
 
 
 def test_600707_daily_segments_match_expected_long_trend_and_swallow():
@@ -871,15 +875,14 @@ def test_regression_002346_pending_reverse_confirms_previous_daily_segments():
         replay_centers_after_macro_swallow=False,
     )
     spans = daily_date_spans(engine)
-    # 非冷启动时仍不能用旧近端反向枢轴确认；若开启微观冷启动，允许首锚启动后
-    # 形成前置日线段，但必须固定在绝对日期边界上。
-    assert spans in (
-        [],
-        [("2017-01-09", "2018-10-19", "Down")],
-    )
-    if not spans:
-        assert engine.daily_pending_segments == []
-        assert engine.daily_centers == []
+    assert spans == [
+        ("2017-01-09", "2018-10-19", "Down"),
+        ("2018-10-19", "2019-04-08", "Up"),
+        ("2019-04-08", "2020-04-28", "Down"),
+        ("2020-04-28", "2020-09-04", "Up"),
+        ("2020-09-04", "2021-01-04", "Down"),
+    ]
+    assert engine.daily_segments[1].cache["independence_kind"] == "no_daily_center"
 
 
 def test_regression_002346_daily_window_rejects_non_extreme_end():
@@ -1122,16 +1125,18 @@ def test_regression_300339_daily_segments_split_on_confirmed_independence():
     label, _ = make_visible_labelers(engine)
 
     daily_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_segments]
-    assert daily_pairs[:3] == [("mV3T", "mV16B"), ("mV16B", "mV21T"), ("mV21T", "mV24B")]
+    assert daily_pairs[:4] == [("mV4B", "mV7T"), ("mV7T", "mV24B"), ("mV24B", "mV27T"), ("mV27T", "mV38B")]
+    assert engine.daily_segments[0].cache["independence_kind"] == "no_daily_center"
     assert engine.daily_segments[1].cache["independence_kind"] == "third_buy_sell"
-    assert engine.daily_segments[1].cache["center_kind"] == "trend_class"
-    assert engine.daily_segments[1].cache["new_extreme_ok"] is True
-    assert engine.daily_segments[1].cache["third_point_price"] == pytest.approx(11.364)
-    assert engine.daily_segments[1].cache["new_extreme_price"] == pytest.approx(8.448)
-    assert engine.daily_segments[2].cache["independence_kind"] == "third_buy_sell"
+    assert engine.daily_segments[1].cache["center_kind"] == "turning"
+    assert engine.daily_segments[2].cache["independence_kind"] == "no_daily_center"
+    assert engine.daily_segments[3].cache["independence_kind"] == "third_buy_sell"
+    assert engine.daily_segments[3].cache["center_kind"] == "turning"
 
     center_spans = {(label(c.segments[0].start_k), label(c.segments[-1].end_k), c.overlap_type) for c in engine.daily_centers}
-    assert ("mV3T", "mV8B", 3) in center_spans
+    assert ("mV11T", "mV22B", 3) not in center_spans
+    assert ("mV12B", "mV21T", 3) in center_spans
+    assert ("mV8B", "mV12B", 1) in center_spans
 
 
 def test_overlapping_daily_centers_keep_first_generated_type3():
@@ -1224,18 +1229,14 @@ def test_002613_daily_segments_match_expected_blue_split():
         replay_centers_after_macro_swallow=False,
     )
     spans = daily_date_spans(engine)
-    assert spans[:3] in (
-        [
-            ("2017-02-10", "2018-10-19", "Down"),
-            ("2018-10-19", "2019-04-22", "Up"),
-            ("2019-04-22", "2020-02-04", "Down"),
-        ],
-        [
-            ("2016-11-28", "2018-10-19", "Down"),
-            ("2018-10-19", "2019-04-22", "Up"),
-            ("2019-04-22", "2020-02-04", "Down"),
-        ],
-    )
-    assert non_same_date_spans(engine)[:1] == [("2020-02-04", "2020-07-10", "Up")]
+    assert spans == [
+        ("2016-11-28", "2018-02-09", "Down"),
+        ("2018-02-09", "2018-04-11", "Up"),
+        ("2018-04-11", "2018-10-19", "Down"),
+        ("2018-10-19", "2019-04-22", "Up"),
+        ("2019-04-22", "2020-02-04", "Down"),
+        ("2020-02-04", "2020-07-10", "Up"),
+    ]
+    assert non_same_date_spans(engine) == []
     assert pending_date_spans(engine)[:1] == [("2020-07-10", "2021-02-10", "Down")]
-    assert engine.daily_non_same_segments[0].cache["candidate_kind"] == "non_same"
+    assert engine.daily_segments[0].cache["independence_kind"] == "swallow_one_segment"

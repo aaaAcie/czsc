@@ -215,6 +215,7 @@ def plot_moore_structure_echarts(
     ma34_list = _ma(close_s, 34)
     ma170_list = _ma(close_s, 170)
     vol_list  = [b.vol for b in bars]
+    dt_by_index = {i: b.dt for i, b in enumerate(bars)}
 
     # ── 2. 引擎数据提取 ───────────────────────────────────────────────
     macro_segments = getattr(engine, "segments", [])
@@ -494,12 +495,32 @@ def plot_moore_structure_echarts(
     ghost_area_data = _prepare_area_data(ghost_centers, "ghost")
 
     def _prepare_daily_center_area_data(clist, layer_name):
+        def _display_end_dt(ct):
+            repair = getattr(ct, "cache", {}).get("repair") or {}
+            refined_segments = repair.get("refined_segments") or []
+            if not refined_segments:
+                return ct.end_dt
+            end_dt = refined_segments[-1].end_k.dt
+            right_indexes = []
+            if "D" in getattr(ct, "points", {}):
+                right_indexes.append(ct.points["D"][0])
+            third_entry_index = getattr(ct, "cache", {}).get("third_entry_index")
+            if third_entry_index is not None:
+                right_indexes.append(third_entry_index)
+            if right_indexes:
+                right_index = min(max(right_indexes) + 1, len(bars) - 1)
+                end_dt = max(pd.Timestamp(end_dt), pd.Timestamp(dt_by_index.get(right_index, end_dt)))
+            return end_dt
+
         data = []
-        for idx, ct in enumerate(clist):
+        display_idx = 0
+        for ct in clist:
             if not ct.segments:
                 continue
+            if ct.overlap_type not in (1, 3):
+                continue
             start_dt = ct.start_dt
-            end_dt = ct.end_dt
+            end_dt = _display_end_dt(ct)
             y_lo, y_hi = ct.low, ct.high
 
             if layer_name == "daily":
@@ -516,7 +537,7 @@ def plot_moore_structure_echarts(
                 border_type = "dashed"
 
             prefix = "PD" if layer_name == "daily_pending" else "D"
-            label_txt = f"{prefix}{idx} T{ct.overlap_type} {ct.status}\n上:{y_hi:.3f} 下:{y_lo:.3f}"
+            label_txt = f"{prefix}{display_idx} T{ct.overlap_type} {ct.status}\n上:{y_hi:.3f} 下:{y_lo:.3f}"
             data.append([
                 {
                     "xAxis": _dt_str(start_dt), "yAxis": y_lo,
@@ -525,6 +546,7 @@ def plot_moore_structure_echarts(
                 },
                 {"xAxis": _dt_str(end_dt), "yAxis": y_hi}
             ])
+            display_idx += 1
         return data
 
     if not daily_centers:
@@ -1116,13 +1138,15 @@ if __name__ == "__main__":
         AnalyzeTask("300490", sdt="20160115", edt="20210701", desc="华自科技"),
         AnalyzeTask("603178", sdt="20171015", edt="20211101", desc="圣龙股份"),
         AnalyzeTask("300339", sdt="20150415", edt="20210701", desc="润和软件"),
+        AnalyzeTask("300311", sdt="20170115", edt="20210801", desc="任子行"),
+        AnalyzeTask("603020", sdt="20150515", edt="20210801", desc="爱普股份"),
 
         # AnalyzeTask("002222", sdt="20220415", edt="20250201", desc="福晶科技"),
     ]
 
     # 🎯 切换这里
-    task = tasks[-2]
-    # task = tasks[1]
+    task = tasks[-3]
+    # task = tasks[-4]
     try:
         symbol = task.symbol
         logger.info(f"正在拉取标的 {symbol} ({task.desc}) | 时间: {task.sdt} ~ {task.edt}")
@@ -1155,6 +1179,7 @@ if __name__ == "__main__":
         daily_centers = getattr(engine, "daily_centers", [])
         fallback_daily_center = daily_active_center or (daily_archived_centers[-1] if daily_archived_centers else None)
         debug_daily_centers = daily_centers or ([fallback_daily_center] if fallback_daily_center else [])
+        debug_daily_centers = [c for c in debug_daily_centers if c and c.overlap_type in (1, 3)]
         if debug_daily_centers:
             center_source = "daily_center_source_30f" if daily_centers else ("active" if daily_active_center else "archived_last")
             print(
