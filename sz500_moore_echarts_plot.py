@@ -69,6 +69,53 @@ def _dt_str(dt) -> str:
     return pd.Timestamp(dt).strftime("%Y-%m-%d")
 
 
+def _build_dt_resolver(bars: list):
+    """Resolve Moore k_index to chart dt.
+
+    Daily-center A/B/C/D points store absolute `k_index` values derived from
+    the analyzer's `bars_raw` sequence, which is zero-based within the loaded
+    chart window. `RawBar.id` is a separate external sequence and may start from
+    a non-zero offset, so point plotting must prefer positional lookup.
+    """
+    dt_by_pos = {i: b.dt for i, b in enumerate(bars)}
+    dt_by_id = {getattr(b, "id", i): b.dt for i, b in enumerate(bars)}
+
+    def _resolve(point_idx: int):
+        if point_idx in dt_by_pos:
+            return dt_by_pos[point_idx]
+        return dt_by_id.get(point_idx)
+
+    return _resolve
+
+
+def _build_visible_tk_index_resolver(display_tks: list):
+    key4_map = {}
+    key3_map = {}
+    index_map = {}
+    for i, tk in enumerate(display_tks):
+        key4 = (tk.k_index, pd.Timestamp(tk.dt), tk.price, tk.mark.value)
+        key3 = (tk.k_index, pd.Timestamp(tk.dt), tk.price)
+        key4_map[key4] = i
+        key3_map[key3] = i
+        index_map.setdefault(tk.k_index, []).append(i)
+
+    def _resolve(owner_endpoint):
+        if not owner_endpoint:
+            return None
+        if owner_endpoint in key4_map:
+            return key4_map[owner_endpoint]
+        if isinstance(owner_endpoint, tuple) and len(owner_endpoint) >= 3:
+            key3 = (owner_endpoint[0], pd.Timestamp(owner_endpoint[1]), owner_endpoint[2])
+            if key3 in key3_map:
+                return key3_map[key3]
+        matches = index_map.get(owner_endpoint[0], []) if isinstance(owner_endpoint, tuple) and owner_endpoint else []
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    return _resolve
+
+
 def _ma(series: pd.Series, n: int) -> list:
     return [round(v, 3) if not pd.isna(v) else None
             for v in series.rolling(n).mean()]
@@ -215,7 +262,7 @@ def plot_moore_structure_echarts(
     ma34_list = _ma(close_s, 34)
     ma170_list = _ma(close_s, 170)
     vol_list  = [b.vol for b in bars]
-    dt_by_index = {i: b.dt for i, b in enumerate(bars)}
+    resolve_point_dt = _build_dt_resolver(bars)
 
     # ── 2. 引擎数据提取 ───────────────────────────────────────────────
     macro_segments = getattr(engine, "segments", [])
@@ -253,6 +300,7 @@ def plot_moore_structure_echarts(
     display_tks = getattr(engine, "micro_turning_ks", engine.turning_ks)
     ghost_forks = getattr(engine, "ghost_forks", [])
     refreshed_segments = getattr(engine, "refreshed_segments", [])
+    resolve_visible_tk_index = _build_visible_tk_index_resolver(display_tks)
     
     display_tks = getattr(engine, "micro_turning_ks", engine.turning_ks)
     ghost_forks = getattr(engine, "ghost_forks", [])
@@ -494,34 +542,30 @@ def plot_moore_structure_echarts(
     micro_area_data = _prepare_area_data(micro_centers, "micro")
     ghost_area_data = _prepare_area_data(ghost_centers, "ghost")
 
-    def _prepare_daily_center_area_data(clist, layer_name):
-        def _display_end_dt(ct):
-            repair = getattr(ct, "cache", {}).get("repair") or {}
-            refined_segments = repair.get("refined_segments") or []
-            if not refined_segments:
-                return ct.end_dt
-            end_dt = refined_segments[-1].end_k.dt
-            right_indexes = []
-            if "D" in getattr(ct, "points", {}):
-                right_indexes.append(ct.points["D"][0])
-            third_entry_index = getattr(ct, "cache", {}).get("third_entry_index")
-            if third_entry_index is not None:
-                right_indexes.append(third_entry_index)
-            if right_indexes:
-                right_index = min(max(right_indexes) + 1, len(bars) - 1)
-                end_dt = max(pd.Timestamp(end_dt), pd.Timestamp(dt_by_index.get(right_index, end_dt)))
-            return end_dt
+    def _display_daily_center_end_dt(ct):
+        repair = getattr(ct, "cache", {}).get("repair") or {}
+        refined_segments = repair.get("refined_segments") or []
+        if not refined_segments:
+            return ct.end_dt
+        end_dt = refined_segments[-1].end_k.dt
+        right_indexes = []
+        if "D" in getattr(ct, "points", {}):
+            right_indexes.append(ct.points["D"][0])
+        third_entry_index = getattr(ct, "cache", {}).get("third_entry_index")
+        if third_entry_index is not None:
+            right_indexes.append(third_entry_index)
+        if right_indexes:
+            right_index = min(max(right_indexes) + 1, len(bars) - 1)
+            end_dt = max(pd.Timestamp(end_dt), pd.Timestamp(resolve_point_dt(right_index) or end_dt))
+        return end_dt
 
-        data = []
+    def _iter_daily_center_display_entries(clist, layer_name):
         display_idx = 0
         for ct in clist:
             if not ct.segments:
                 continue
             if ct.overlap_type not in (1, 3):
                 continue
-            start_dt = ct.start_dt
-            end_dt = _display_end_dt(ct)
-            y_lo, y_hi = ct.low, ct.high
 
             if layer_name == "daily":
                 fill, border = "rgba(231, 76, 60, 0.12)", "#C0392B"
@@ -537,16 +581,89 @@ def plot_moore_structure_echarts(
                 border_type = "dashed"
 
             prefix = "PD" if layer_name == "daily_pending" else "D"
-            label_txt = f"{prefix}{display_idx} T{ct.overlap_type} {ct.status}\n上:{y_hi:.3f} 下:{y_lo:.3f}"
+            yield {
+                "ct": ct,
+                "display_idx": display_idx,
+                "prefix": prefix,
+                "fill": fill,
+                "border": border,
+                "border_type": border_type,
+                "start_dt": ct.start_dt,
+                "end_dt": _display_daily_center_end_dt(ct),
+                "y_lo": ct.low,
+                "y_hi": ct.high,
+            }
+            display_idx += 1
+
+    def _prepare_daily_center_area_data(clist, layer_name):
+        data = []
+        for entry in _iter_daily_center_display_entries(clist, layer_name):
+            ct = entry["ct"]
+            prefix = entry["prefix"]
+            display_idx = entry["display_idx"]
+            label_txt = f"{prefix}{display_idx} T{ct.overlap_type} {ct.status}\n上:{entry['y_hi']:.3f} 下:{entry['y_lo']:.3f}"
             data.append([
                 {
-                    "xAxis": _dt_str(start_dt), "yAxis": y_lo,
-                    "label": {"show": True, "position": "top", "formatter": label_txt, "fontSize": 9, "color": border, "opacity": 0.85},
-                    "itemStyle": {"color": fill, "borderWidth": 1.6, "borderColor": border, "opacity": 0.65, "borderType": border_type}
+                    "xAxis": _dt_str(entry["start_dt"]), "yAxis": entry["y_lo"],
+                    "label": {"show": True, "position": "top", "formatter": label_txt, "fontSize": 9, "color": entry["border"], "opacity": 0.85},
+                    "itemStyle": {
+                        "color": entry["fill"],
+                        "borderWidth": 1.6,
+                        "borderColor": entry["border"],
+                        "opacity": 0.65,
+                        "borderType": entry["border_type"],
+                    }
                 },
-                {"xAxis": _dt_str(end_dt), "yAxis": y_hi}
+                {"xAxis": _dt_str(entry["end_dt"]), "yAxis": entry["y_hi"]}
             ])
-            display_idx += 1
+        return data
+
+    def _prepare_daily_center_point_markers(clist, layer_name):
+        data = []
+        for entry in _iter_daily_center_display_entries(clist, layer_name):
+            ct = entry["ct"]
+            prefix = entry["prefix"]
+            display_idx = entry["display_idx"]
+            point_color = entry["border"]
+            direction_value = (getattr(ct, "cache", {}) or {}).get("daily_segment_direction", "")
+            is_up = direction_value in {"向上", "Up", "up"}
+            for point_name in ("A", "B", "C", "D"):
+                point = getattr(ct, "points", {}).get(point_name)
+                if not point:
+                    continue
+                point_idx, point_val = point
+                point_dt = resolve_point_dt(point_idx)
+                if point_dt is None:
+                    continue
+                point_owner = ((getattr(ct, "cache", {}) or {}).get("point_owners") or {}).get(point_name) or {}
+                owner_endpoint = point_owner.get("owner_endpoint")
+                owner_v_index = resolve_visible_tk_index(owner_endpoint)
+                label_text = f"{prefix}{display_idx}.{point_name}"
+                if owner_v_index is not None:
+                    label_text = f"{label_text}({owner_v_index})"
+                if is_up:
+                    label_pos = "top" if point_name in {"A", "C"} else "bottom"
+                else:
+                    label_pos = "bottom" if point_name in {"A", "C"} else "top"
+                data.append({
+                    "name": label_text,
+                    "coord": [_dt_str(point_dt), round(point_val, 6)],
+                    "symbol": "circle",
+                    "symbolSize": 5,
+                    "label": {
+                        "show": True,
+                        "position": label_pos,
+                        "formatter": label_text,
+                        "fontSize": 10,
+                        "fontWeight": "bold",
+                        "color": point_color,
+                    },
+                    "itemStyle": {
+                        "color": point_color,
+                        "borderColor": point_color,
+                        "borderWidth": 1,
+                    },
+                })
         return data
 
     if not daily_centers:
@@ -554,6 +671,8 @@ def plot_moore_structure_echarts(
         daily_centers = [final_daily_center] if final_daily_center else []
     daily_center_area_data = _prepare_daily_center_area_data(daily_centers, "daily_active")
     daily_pending_center_area_data = _prepare_daily_center_area_data(daily_pending_centers, "daily_pending")
+    daily_center_point_markers = _prepare_daily_center_point_markers(daily_centers, "daily_active")
+    daily_pending_center_point_markers = _prepare_daily_center_point_markers(daily_pending_centers, "daily_pending")
     # ── 6. 构建各图例系列 ─────────────────────────────────────────────
     def _seg_series(name, seg_list, color, width, alpha=0.85):
         data = _seg_markline_data(seg_list, color, width, alpha)
@@ -707,6 +826,13 @@ def plot_moore_structure_echarts(
     s = _markpoint_series(dates, "30分钟中枢确认k", "#BA68C8", tk_points_micro)
     if s:
         minute_series.append(s)
+
+    s = _markpoint_series(dates, "日线中枢 BADC 点", "#27AE60", daily_center_point_markers)
+    if s:
+        daily_series.append(s)
+    s = _markpoint_series(dates, "日线中枢 BADC 点(Pending)", "#E67E22", daily_pending_center_point_markers)
+    if s:
+        daily_series.append(s)
 
     # 转折K箭头（指向触发K线的高低点）
     arr_up = _arrow_series("向上转折确立", bot_tks, is_up=True)
@@ -935,7 +1061,8 @@ def plot_moore_structure_echarts(
     )
 
     # ── 10. Grid 布局 ─────────────────────────────────────────────────
-    chart_id = f"grid_{symbol}"
+    chart_symbol = getattr(bars[0], "symbol", "moore") if bars else "moore"
+    chart_id = f"grid_{chart_symbol}"
     grid = (
         Grid(init_opts=opts.InitOpts(
             width="100%",
@@ -965,7 +1092,7 @@ def plot_moore_structure_echarts(
     # ------------------------------------------------------------------
     zoom_persistence_js = f"""
     (function() {{
-        var storageKey = "echarts_zoom_{symbol}";
+        var storageKey = "echarts_zoom_{chart_symbol}";
         setTimeout(function() {{
             // 尝试通过类名获取，更鲁棒
             var container = document.querySelector(".chart-container");
@@ -1145,8 +1272,8 @@ if __name__ == "__main__":
     ]
 
     # 🎯 切换这里
-    task = tasks[-3]
-    # task = tasks[-4]
+    # task = tasks[-1]
+    task = tasks[-2]
     try:
         symbol = task.symbol
         logger.info(f"正在拉取标的 {symbol} ({task.desc}) | 时间: {task.sdt} ~ {task.edt}")

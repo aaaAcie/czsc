@@ -1139,6 +1139,61 @@ def test_regression_300339_daily_segments_split_on_confirmed_independence():
     assert ("mV8B", "mV12B", 1) in center_spans
 
 
+def test_regression_603020_tail_extension_yields_to_reverse_independence():
+    bars = research.get_raw_bars_origin("603020", sdt="20150515", edt="20210801")
+    if not bars:
+        pytest.skip("no bars for 603020")
+
+    engine = MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+        rebuild_daily_centers_after_segment_change=True,
+    )
+    label, _ = make_visible_labelers(engine)
+
+    daily_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_segments]
+    assert daily_pairs == [("mV2T", "mV21B"), ("mV21B", "mV38T"), ("mV38T", "mV45B")]
+
+    assert engine.daily_segments[1].cache["independence_kind"] == "no_daily_center"
+    assert engine.daily_segments[1].cache["extended_from_unfrozen_end"] is True
+    assert engine.daily_segments[2].cache["independence_kind"] == "third_buy_sell"
+    assert engine.daily_segments[2].cache["center_kind"] == "turning"
+
+    pending_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_pending_segments]
+    assert pending_pairs[:1] == [("mV45B", "mV48T")]
+
+
+def test_regression_300311_rejects_type3_with_invalid_owner_chain():
+    bars = research.get_raw_bars_origin("300311", sdt="20170115", edt="20210801")
+    if not bars:
+        pytest.skip("no bars for 300311")
+
+    engine = MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+        rebuild_daily_centers_after_segment_change=True,
+    )
+    label, _ = make_visible_labelers(engine)
+
+    refined_spans = {(label(seg.start_k), label(seg.end_k)) for seg in engine.daily_refined_segments}
+    assert ("mV24B", "mV27T") not in refined_spans
+
+    center_spans = {
+        (label(center.segments[0].start_k), label(center.segments[-1].end_k), center.overlap_type)
+        for center in engine.daily_centers
+    }
+    assert ("mV23T", "mV28B", 3) not in center_spans
+    assert all(center.cache["owner_chain_valid"] for center in engine.daily_centers if center.overlap_type == 3)
+
+
 def test_overlapping_daily_centers_keep_first_generated_type3():
     analyzer = DailySegmentAnalyzer()
     shared_1 = make_seg(20, 30, Direction.Down, 12, 9)

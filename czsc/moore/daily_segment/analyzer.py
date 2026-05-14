@@ -22,7 +22,7 @@ from .helpers.commit import (
 )
 from .helpers.continuity import check_daily_segment_continuity
 from .helpers.cold_start import find_cold_start_decision
-from .helpers.extension import is_extension_same_trend
+from .helpers.extension import is_extension_same_trend, is_opposite_direction
 from .helpers.ma_cross import (
     check_ma_cross_correlation,
     has_ma_cross_between,
@@ -412,6 +412,14 @@ class DailySegmentAnalyzer:
             "owner_chain_valid": continuous,
         }
 
+    def _owner_keys_valid_for_source(self, owner_keys: Sequence[tuple], source_segments: Sequence[MooreSegment]) -> bool:
+        if len(owner_keys) < 2 or len(owner_keys) != len(set(owner_keys)):
+            return False
+        for left, right in zip(owner_keys, owner_keys[1:]):
+            if not any(self._tk_key(seg.start_k) == left and self._tk_key(seg.end_k) == right for seg in source_segments):
+                return False
+        return True
+
     def _bars_between_tks(self, start_tk, end_tk) -> List[RawBar]:
         left = min(start_tk.k_index, end_tk.k_index)
         right = max(start_tk.k_index, end_tk.k_index)
@@ -524,75 +532,87 @@ class DailySegmentAnalyzer:
         proposals: List[RepairProposal] = []
         seen = set()
         seed_offset = self._find_source_segment_offset(source_segments, segs[0])
-        repair_start_offset = self._find_source_segment_offset(source_segments, segs[3])
-        if seed_offset is None or repair_start_offset is None:
+        if seed_offset is None:
             return []
 
-        repair_start_seg = source_segments[repair_start_offset]
-        start_tk = repair_start_seg.start_k
-        for end_offset in range(repair_start_offset + 2, len(source_segments) - 1):
-            end_tk = source_segments[end_offset].end_k
-            if start_tk.mark == end_tk.mark:
-                continue
-            if self._segment_between_endpoints(start_tk, end_tk, source_segments) is not None:
-                continue
+        repair_seed_segments = [segs[3]]
+        if candidate_result.get("overlap_type") == 1:
+            repair_seed_segments.insert(0, segs[2])
 
-            refined = self._make_refined_segment(start_tk, end_tk, candidate_result)
-            if refined.direction != repair_start_seg.direction:
-                continue
-            replaced_span = list(source_segments[repair_start_offset : end_offset + 1])
-            if not ma_reverses_against_window(replaced_span, self.state.ma34):
-                continue
+        repair_start_offsets = []
+        for repair_seed in repair_seed_segments:
+            repair_start_offset = self._find_source_segment_offset(source_segments, repair_seed)
+            if repair_start_offset is not None and repair_start_offset not in repair_start_offsets:
+                repair_start_offsets.append(repair_start_offset)
 
-            refined.cache.update(
-                {
-                    "repair_context": "owner_chain_proposal",
-                    "repair_reason": "daily_center_source_non_same",
-                    "promoted_overlap_type": candidate_result.get("overlap_type"),
-                }
-            )
-            refined_key = self._seg_key(refined)
-            if refined_key in seen:
-                continue
-            repaired_source_segments = self._replace_source_span_with_refined(source_segments, refined)
-            if repaired_source_segments is None:
-                continue
+        for repair_start_offset in repair_start_offsets:
+            repair_start_seg = source_segments[repair_start_offset]
+            start_tk = repair_start_seg.start_k
+            for end_offset in range(repair_start_offset + 2, len(source_segments) - 1):
+                end_tk = source_segments[end_offset].end_k
+                if start_tk.mark == end_tk.mark:
+                    continue
+                if self._segment_between_endpoints(start_tk, end_tk, source_segments) is not None:
+                    continue
 
-            if candidate_result.get("overlap_type") == 0:
-                promoted = self._find_promoted_type3_with_refined(
-                    repaired_source_segments,
-                    seed_offset,
-                    refined,
-                    trend_direction,
+                refined = self._make_refined_segment(start_tk, end_tk, candidate_result)
+                if refined.direction != repair_start_seg.direction:
+                    continue
+                replaced_span = list(source_segments[repair_start_offset : end_offset + 1])
+                if not ma_reverses_against_window(replaced_span, self.state.ma34):
+                    continue
+
+                refined.cache.update(
+                    {
+                        "repair_context": "owner_chain_proposal",
+                        "repair_reason": "daily_center_source_non_same",
+                        "promoted_overlap_type": candidate_result.get("overlap_type"),
+                    }
                 )
-            else:
-                promoted = find_center(repaired_source_segments[seed_offset:], self.state.ma34, trend_direction=trend_direction)
-                if not (
-                    promoted
-                    and promoted.get("overlap_type") == 3
-                    and promoted.get("status") == "FINAL"
-                    and self._variant_contains_segment(promoted, refined)
-                ):
-                    promoted = None
-            if promoted:
-                promoted_entry_index = self._third_segment_entry_index(promoted, self.state.ma34)
-                if candidate_result.get("overlap_type") == 0 and self._has_intermediate_direct_type3(
-                    source_segments,
-                    repair_start_offset,
-                    end_offset + 1,
-                    trend_direction,
-                    before_index=promoted_entry_index,
-                ):
-                    return []
-                seen.add(refined_key)
-                proposals.append(
-                    RepairProposal(
-                        seed_result=candidate_result,
-                        refined_segment=refined,
-                        source_segments=repaired_source_segments,
-                        promoted_result=promoted,
+                refined_key = self._seg_key(refined)
+                if refined_key in seen:
+                    continue
+                repaired_source_segments = self._replace_source_span_with_refined(source_segments, refined)
+                if repaired_source_segments is None:
+                    continue
+
+                if candidate_result.get("overlap_type") == 0:
+                    promoted = self._find_promoted_type3_with_refined(
+                        repaired_source_segments,
+                        seed_offset,
+                        refined,
+                        trend_direction,
                     )
-                )
+                else:
+                    promoted = find_center(repaired_source_segments[seed_offset:], self.state.ma34, trend_direction=trend_direction)
+                    if not (
+                        promoted
+                        and promoted.get("overlap_type") == 3
+                        and promoted.get("status") == "FINAL"
+                        and self._variant_contains_segment(promoted, refined)
+                    ):
+                        promoted = None
+                if promoted:
+                    promoted_entry_index = self._third_segment_entry_index(promoted, self.state.ma34)
+                    if candidate_result.get("overlap_type") == 0 and self._has_intermediate_direct_type3(
+                        source_segments,
+                        repair_start_offset,
+                        end_offset + 1,
+                        trend_direction,
+                        before_index=promoted_entry_index,
+                    ):
+                        return []
+                    seen.add(refined_key)
+                    proposals.append(
+                        RepairProposal(
+                            seed_result=candidate_result,
+                            refined_segment=refined,
+                            source_segments=repaired_source_segments,
+                            promoted_result=promoted,
+                        )
+                    )
+                    break
+            if proposals:
                 break
         return proposals
 
@@ -763,8 +783,27 @@ class DailySegmentAnalyzer:
                     existing.add(self._seg_key(refined))
             repair_evidence["repair_reason"] = repair_evidence.get("repair_reason") or forced_repair_reason
             if repair_evidence.get("refined_segments"):
-                repair_evidence["owner_chain_repaired"] = True
-                repair_evidence["owner_chain_valid"] = True
+                repair_keys = [
+                    owner.get("owner_endpoint")
+                    for owner in repair_evidence.get("point_owners", {}).values()
+                    if owner
+                ]
+                repair_valid = self._owner_keys_valid_for_source(repair_keys, source_segments)
+                repair_evidence["owner_chain_repaired"] = repair_valid
+                repair_evidence["owner_chain_valid"] = repair_valid
+
+        effective_evidence = repair_evidence if repair_evidence else owner_evidence
+        owner_keys = [
+            owner.get("owner_endpoint")
+            for owner in effective_evidence.get("point_owners", {}).values()
+            if owner
+        ]
+        if (
+            result.get("overlap_type") == 3
+            and result.get("status") == "FINAL"
+            and not self._owner_keys_valid_for_source(owner_keys, source_segments)
+        ):
+            return
 
         if repair_evidence:
             for refined in repair_evidence.get("refined_segments", []):
@@ -1349,6 +1388,29 @@ class DailySegmentAnalyzer:
             s.anchor_dt = None
             s.pending_anchor_snapshot = True
 
+    def _tail_extension_independence_decision(
+        self,
+        segments: Sequence[MooreSegment],
+    ) -> Optional[CommitDecision]:
+        if not self.state.pending_after_tail_extension or not self.state.completed_segments:
+            return None
+        decision = find_delayed_commit_decision(
+            segments,
+            self.state.completed_segments,
+            self.state.ma34,
+            self.state.ma170,
+            continuity_broken=self.state.continuity_broken,
+            allow_cold_start=False,
+        )
+        if not decision or not decision.segments or not decision.independence:
+            return None
+        completed = self.state.completed_segments[-1]
+        if not is_opposite_direction(decision.segments[0].direction, completed.direction):
+            return None
+        if decision.independence.kind != "third_buy_sell" or decision.independence.center_kind != "turning":
+            return None
+        return decision
+
     def _rebuild_pending_display_segments(self):
         s = self.state
         s.pending_display_segments = []
@@ -1414,7 +1476,7 @@ class DailySegmentAnalyzer:
         if self.state.continuity_broken:
             return None
         if self.state.pending_after_tail_extension:
-            return None
+            return self._tail_extension_independence_decision(segments)
         if not self.state.completed_segments and len(segments) >= 3:
             return find_cold_start_decision(segments, self.state.ma34, self.state.ma170)
         if self.state.completed_segments and should_commit_leading_swallow(
