@@ -903,6 +903,8 @@ class DailySegmentAnalyzer:
             source_accumulator.extend(source_segments)
             candidate_results = []
             for start in range(max(0, len(source_segments) - 3)):
+                if source_segments[start].direction != daily_segment.direction:
+                    continue
                 result = find_center(source_segments[start:], self.state.ma34, trend_direction=daily_segment.direction)
                 if not result:
                     continue
@@ -1423,6 +1425,8 @@ class DailySegmentAnalyzer:
         completed = self.state.completed_segments[-1]
         if not is_opposite_direction(decision.segments[0].direction, completed.direction):
             return None
+        if decision.independence.kind == "no_daily_center":
+            return decision
         if decision.independence.kind != "third_buy_sell" or decision.independence.center_kind != "turning":
             return None
         return decision

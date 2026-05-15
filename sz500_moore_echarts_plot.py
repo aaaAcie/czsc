@@ -34,6 +34,7 @@ ECHARTS_ASSET_URLS = (
 
 from czsc.connectors import research
 from czsc.moore.analyze import MooreCZSC
+from czsc.moore.daily_segment.centers.maturity_event import build_shadow_b_daily_plan
 from czsc.py.enum import Direction, Mark
 
 NON_SAME_LINE_COLOR = "#D35400"
@@ -249,6 +250,7 @@ def plot_moore_structure_echarts(
     output_file: str = "moore_czsc_echarts.html",
     title: str = "摩尔缠论结构图 (ECharts)",
     desc_text: str = "",
+    show_daily_shadow_b: bool = True,
 ):
     # ── 1. 基础数据 ───────────────────────────────────────────────────
     dates, ohlcv = [], []
@@ -286,6 +288,16 @@ def plot_moore_structure_echarts(
     daily_refined_segments = getattr(engine, "daily_refined_segments", None)
     if daily_refined_segments is None:
         daily_refined_segments = getattr(getattr(engine, "daily_segment_analyzer", None), "refined_segments", [])
+    shadow_b_plan = None
+    if show_daily_shadow_b:
+        daily_analyzer = getattr(engine, "daily_segment_analyzer", None)
+        daily_state = getattr(daily_analyzer, "state", None)
+        shadow_b_plan = build_shadow_b_daily_plan(
+            getattr(engine, "segments", []),
+            getattr(daily_state, "ma34", []),
+            getattr(daily_state, "ma170", []),
+            completed_segments=(),
+        )
 
     # --- 【增压逻辑】：中枢层级过滤 ---
     # 1. 微观过滤：排除已被宏观审计拆解（进入幽灵仓）的微观中枢
@@ -673,6 +685,8 @@ def plot_moore_structure_echarts(
     daily_pending_center_area_data = _prepare_daily_center_area_data(daily_pending_centers, "daily_pending")
     daily_center_point_markers = _prepare_daily_center_point_markers(daily_centers, "daily_active")
     daily_pending_center_point_markers = _prepare_daily_center_point_markers(daily_pending_centers, "daily_pending")
+    shadow_daily_segments = list(shadow_b_plan.daily_segments) if shadow_b_plan else []
+    shadow_daily_center_events = list(getattr(shadow_b_plan, "center_events", ())) if shadow_b_plan else []
     # ── 6. 构建各图例系列 ─────────────────────────────────────────────
     def _seg_series(name, seg_list, color, width, alpha=0.85):
         data = _seg_markline_data(seg_list, color, width, alpha)
@@ -707,6 +721,68 @@ def plot_moore_structure_echarts(
                 label_opts=opts.LabelOpts(is_show=True),
             ))
         )
+
+    def _shadow_b_center_area_data(events: list, *, invalid_only: bool | None = None):
+        if not events:
+            return []
+        data = []
+        for idx, event in enumerate(events):
+            if not event.center:
+                continue
+            if event.overlap_type not in (1, 3):
+                continue
+            owner_invalid = bool(getattr(event.owner_evidence, "invalid_reasons", ()))
+            if invalid_only is not None and invalid_only != owner_invalid:
+                continue
+            center_segments = event.center.get("segments") or event.candidate.segments
+            if not center_segments:
+                continue
+            start_dt = center_segments[0].start_k.dt
+            end_dt = center_segments[-1].end_k.dt
+            y_lo = event.low if event.low is not None else event.center.get("low")
+            y_hi = event.high if event.high is not None else event.center.get("high")
+            if y_lo is None or y_hi is None:
+                continue
+            y_lo, y_hi = sorted((float(y_lo), float(y_hi)))
+            if owner_invalid:
+                fill, border = "rgba(231, 76, 60, 0.10)", "#E74C3C"
+                prefix = "BX"
+                reason = ",".join(getattr(event.owner_evidence, "invalid_reasons", ())[:2])
+            else:
+                fill, border = "rgba(243, 156, 18, 0.10)", "#F39C12"
+                prefix = "B"
+                reason = event.independence_kind or "center"
+            owner_ok = 0 if owner_invalid else 1
+            new_ok = event.new_extreme_ok
+            new_text = "NA" if new_ok is None else int(bool(new_ok))
+            label_txt = (
+                f"{prefix}{idx} T{event.overlap_type} {event.center_kind}\n"
+                f"{reason} owner:{owner_ok} new:{new_text}\n"
+                f"上:{y_hi:.3f} 下:{y_lo:.3f}"
+            )
+            data.append([
+                {
+                    "xAxis": _dt_str(start_dt),
+                    "yAxis": y_lo,
+                    "label": {
+                        "show": True,
+                        "position": "top",
+                        "formatter": label_txt,
+                        "fontSize": 9,
+                        "color": border,
+                        "opacity": 0.88,
+                    },
+                    "itemStyle": {
+                        "color": fill,
+                        "borderWidth": 1.6,
+                        "borderColor": border,
+                        "opacity": 0.68,
+                        "borderType": "dashed",
+                    },
+                },
+                {"xAxis": _dt_str(end_dt), "yAxis": y_hi},
+            ])
+        return data
 
     overlay_series = []
 
@@ -787,6 +863,15 @@ def plot_moore_structure_echarts(
     if s:
         daily_series.append(s)
 
+    if show_daily_shadow_b and shadow_daily_segments:
+        s = _raw_seg_series(
+            "Daily Shadow B",
+            _daily_seg_markline_data(shadow_daily_segments, "#95A5A6", 2.8, alpha=0.72, line_type="dashed"),
+            "#95A5A6",
+        )
+        if s:
+            daily_series.append(s)
+
     s = _raw_seg_series("演变路径", refresh_data, "#BBBBBB")
     if s:
         minute_series.append(s)
@@ -814,6 +899,11 @@ def plot_moore_structure_echarts(
         else:
             minute_series.append(s)
 
+    if show_daily_shadow_b:
+        s = _center_series("B Shadow Centers", _shadow_b_center_area_data(shadow_daily_center_events), "#F39C12")
+        if s:
+            daily_series.append(s)
+
     # 顶底极值 Scatter（顶标签在上，底标签在下）
     sc_top = _tk_scatter("微观顶极值", top_tks, "top")
     sc_bot = _tk_scatter("微观底极值", bot_tks, "bottom")
@@ -833,7 +923,6 @@ def plot_moore_structure_echarts(
     s = _markpoint_series(dates, "日线中枢 BADC 点(Pending)", "#E67E22", daily_pending_center_point_markers)
     if s:
         daily_series.append(s)
-
     # 转折K箭头（指向触发K线的高低点）
     arr_up = _arrow_series("向上转折确立", bot_tks, is_up=True)
     arr_dn = _arrow_series("向下转折确立", top_tks, is_up=False)
@@ -1002,6 +1091,10 @@ def plot_moore_structure_echarts(
                     "向上转折确立": False,
                     "向下转折确立": False,
                     "日线级别中枢": True,
+                    **({
+                        "Daily Shadow B": True,
+                        "B Shadow Centers": True,
+                    } if show_daily_shadow_b else {}),
                 }
             ),
             yaxis_opts=opts.AxisOpts(
@@ -1090,6 +1183,11 @@ def plot_moore_structure_echarts(
     # ── 11. 持久化 Zoom 状态 ──────────────────────────────────────────
     # 使用 localStorage 存储最近一次的缩放范围，刷新页面后自动恢复
     # ------------------------------------------------------------------
+    shadow_daily_legend_js = (
+        ', "Daily Shadow B", "B Shadow Centers"'
+        if show_daily_shadow_b
+        else ""
+    )
     zoom_persistence_js = f"""
     (function() {{
         var storageKey = "echarts_zoom_{chart_symbol}";
@@ -1137,7 +1235,7 @@ def plot_moore_structure_echarts(
                 "向上转折确立", "向下转折确立"
             ];
             var legendGroupDaily = [
-                "日线级别线段", "日线级别线段(Pending)", "日线非同处理", "日线级别中枢"
+                "日线级别线段", "日线级别线段(Pending)", "日线非同处理", "日线级别中枢"{shadow_daily_legend_js}
             ];
             var legendGuard = false;
 
@@ -1257,7 +1355,6 @@ if __name__ == "__main__":
         AnalyzeTask("000993", sdt="20190515",edt="20200920", desc="闽东电力"),
         AnalyzeTask("002286", sdt="20200328", edt="20200810", desc="保龄宝"),
         AnalyzeTask("300428", sdt="20200108", edt="20200520", desc="四通新材"),
-        AnalyzeTask("002772", sdt="20160401", edt="20210701", desc="众兴菌业"),
         AnalyzeTask("000411", sdt="20160401", edt="20210701", desc="英特集团"),
         AnalyzeTask("000553", sdt="20181015", edt="20210701", desc="安道麦A"),
         AnalyzeTask("002613", sdt="20160801", edt="20210820", desc="北玻股份"),
@@ -1267,13 +1364,14 @@ if __name__ == "__main__":
         AnalyzeTask("300339", sdt="20150415", edt="20210701", desc="润和软件"),
         AnalyzeTask("300311", sdt="20170115", edt="20210801", desc="任子行"),
         AnalyzeTask("603020", sdt="20150515", edt="20210801", desc="爱普股份"),
+        AnalyzeTask("002772", sdt="20160114", edt="20210701", desc="众兴菌业"),
 
         # AnalyzeTask("002222", sdt="20220415", edt="20250201", desc="福晶科技"),
     ]
 
     # 🎯 切换这里
-    # task = tasks[-1]
-    task = tasks[-2]
+    task = tasks[-1]
+    # task = tasks[-2]
     try:
         symbol = task.symbol
         logger.info(f"正在拉取标的 {symbol} ({task.desc}) | 时间: {task.sdt} ~ {task.edt}")

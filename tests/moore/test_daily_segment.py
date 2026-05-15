@@ -7,6 +7,7 @@ from czsc.connectors import research
 from czsc.moore.analyze import MooreCZSC
 from czsc.moore.daily_segment import DailySegment, DailySegmentAnalyzer, DailySegmentCenter
 from czsc.moore.daily_segment.center_algo import find_b_point, find_center, find_d_point
+from czsc.moore.daily_segment.centers.maturity_event import build_candidate_event_trace, build_shadow_b_daily_plan
 from czsc.moore.daily_segment.helpers.commit import WindowCandidate, check_daily_segment_independence
 from czsc.moore.daily_segment.utils import slice_segments_from_anchor
 from czsc.moore.objects import MooreSegment, TurningK
@@ -1178,6 +1179,9 @@ def test_regression_603020_tail_extension_yields_to_reverse_independence():
     assert engine.daily_segments[1].cache["extended_from_unfrozen_end"] is True
     assert engine.daily_segments[2].cache["independence_kind"] == "third_buy_sell"
     assert engine.daily_segments[2].cache["center_kind"] == "turning"
+    center_pairs = [(label(c.segments[0].start_k), label(c.segments[-1].end_k), c.overlap_type) for c in engine.daily_centers]
+    assert ("mV38T", "mV44T", 0) in center_pairs
+    assert ("mV39B", "mV45B", 1) not in center_pairs
 
     pending_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_pending_segments]
     assert pending_pairs[:1] == [("mV45B", "mV48T")]
@@ -1217,6 +1221,185 @@ def test_regression_300311_uses_mature_barrier_and_same_trend_chain():
     pending_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_pending_segments]
     assert pending_pairs[:1] == [("mV36B", "mV42B")]
     assert engine.daily_pending_segments[0].cache["open_ended"] is True
+
+
+def test_shadow_b_300311_maturity_trace_and_owner_filter():
+    engine = make_300311_engine()
+    label, _ = make_visible_labelers(engine)
+    analyzer = engine.daily_segment_analyzer
+
+    plan = build_shadow_b_daily_plan(engine.segments, analyzer.state.ma34, analyzer.state.ma170)
+    shadow_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in plan.daily_segments]
+    assert shadow_pairs[:4] == [
+        ("mV10B", "mV23T"),
+        ("mV23T", "mV26B"),
+        ("mV26B", "mV31T"),
+        ("mV31T", "mV36B"),
+    ]
+
+    event_by_pair = {
+        (label(event.candidate.segments[0].start_k), label(event.candidate.segments[-1].end_k)): event
+        for event in plan.maturity_events
+    }
+    assert event_by_pair[("mV10B", "mV15T")].has_maturity_barrier is False
+    assert event_by_pair[("mV10B", "mV23T")].has_maturity_barrier is True
+    assert event_by_pair[("mV10B", "mV23T")].owner_evidence.owner_chain_valid is True
+
+    selected_v10 = next(
+        trace
+        for trace in plan.traces
+        if trace.selected
+        and (label(trace.primary.segments[0].start_k), label(trace.primary.segments[-1].end_k)) == ("mV10B", "mV23T")
+    )
+    ignored_pairs = [(label(reverse.segments[0].start_k), label(reverse.segments[-1].end_k)) for reverse in selected_v10.ignored_reverse_candidates]
+    assert ("mV15T", "mV18B") in ignored_pairs
+
+    start = next(i for i, seg in enumerate(engine.segments) if label(seg.start_k) == "mV23T")
+    end = next(i for i, seg in enumerate(engine.segments) if label(seg.end_k) == "mV28B") + 1
+    candidate = WindowCandidate(start, end, list(engine.segments[start:end]))
+    trace = build_candidate_event_trace(candidate, analyzer.state.ma34, source_segments=engine.segments, trend_direction=candidate.direction)
+    assert trace.event.owner_evidence.owner_chain_valid is False
+    assert trace.event.has_maturity_barrier is False
+
+    center_spans = {
+        (label(event.center["segments"][0].start_k), label(event.center["segments"][-1].end_k))
+        for event in plan.center_events
+        if event.center
+    }
+    assert all(event.owner_evidence.owner_chain_valid for event in plan.center_events)
+    assert ("mV12B", "mV21T") in center_spans
+    assert ("mV26B", "mV31T") in center_spans
+
+
+def test_shadow_b_002613_centers_are_scanned_inside_shadow_segments():
+    bars = research.get_raw_bars_origin("002613", sdt="20160801", edt="20210820")
+    if not bars:
+        pytest.skip("no bars for 002613")
+
+    engine = MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+    )
+    label, _ = make_visible_labelers(engine)
+    analyzer = engine.daily_segment_analyzer
+
+    plan = build_shadow_b_daily_plan(engine.segments, analyzer.state.ma34, analyzer.state.ma170)
+    shadow_center_spans = {
+        (label(event.center["segments"][0].start_k), label(event.center["segments"][-1].end_k))
+        for event in plan.center_events
+        if event.center
+    }
+    a_center_spans = {
+        (label(center.segments[0].start_k), label(center.segments[-1].end_k))
+        for center in engine.daily_centers
+    }
+
+    assert len(plan.center_events) > len(plan.maturity_events)
+    assert plan.invalid_center_events
+    assert all(event.owner_evidence.owner_chain_valid for event in plan.center_events)
+    assert all(not event.owner_evidence.owner_chain_valid for event in plan.invalid_center_events)
+    assert {
+        ("mV1T", "mV5T"),
+        ("mV3T", "mV7T"),
+        ("mV11T", "mV17T"),
+        ("mV19T", "mV28B"),
+        ("mV25T", "mV31T"),
+    } <= shadow_center_spans
+    assert ("mV1T", "mV6B") not in shadow_center_spans
+    assert ("mV3T", "mV10B") not in shadow_center_spans
+    assert ("mV12B", "mV18B") not in shadow_center_spans
+    assert len(shadow_center_spans & a_center_spans) >= 2
+
+
+def test_regression_002772_manual_candidate_uses_latest_center():
+    bars = research.get_raw_bars_origin("002772", sdt="20160401", edt="20210701")
+    if not bars:
+        pytest.skip("no bars for 002772")
+
+    engine = MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+        rebuild_daily_centers_after_segment_change=True,
+    )
+    label, _ = make_visible_labelers(engine)
+    analyzer = engine.daily_segment_analyzer
+
+    start = next(i for i, seg in enumerate(engine.segments) if label(seg.start_k) == "mV2T")
+    end = next(i for i, seg in enumerate(engine.segments) if label(seg.end_k) == "mV13B") + 1
+    trace = build_candidate_event_trace(
+        WindowCandidate(start, end, list(engine.segments[start:end])),
+        analyzer.state.ma34,
+        source_segments=engine.segments,
+    )
+    assert trace.event.has_maturity_barrier is False
+    assert trace.event.center_kind == "trend_class"
+    assert (label(trace.event.center["segments"][0].start_k), label(trace.event.center["segments"][-1].end_k)) == (
+        "mV8T",
+        "mV13B",
+    )
+
+
+def test_shadow_b_603020_keeps_mature_v21_to_v38():
+    bars = research.get_raw_bars_origin("603020", sdt="20150515", edt="20210801")
+    if not bars:
+        pytest.skip("no bars for 603020")
+
+    engine = MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+        rebuild_daily_centers_after_segment_change=True,
+    )
+    label, _ = make_visible_labelers(engine)
+    analyzer = engine.daily_segment_analyzer
+
+    plan = build_shadow_b_daily_plan(engine.segments, analyzer.state.ma34, analyzer.state.ma170)
+    event = next(
+        event
+        for event in plan.maturity_events
+        if (label(event.candidate.segments[0].start_k), label(event.candidate.segments[-1].end_k)) == ("mV21B", "mV38T")
+    )
+    shadow_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in plan.daily_segments]
+
+    assert ("mV21B", "mV38T") in shadow_pairs
+    assert event.has_maturity_barrier is True
+    assert event.center_kind == "turning"
+    assert event.overlap_type == 0
+    assert event.owner_evidence.owner_chain_valid is True
+
+
+def test_shadow_b_echarts_overlay_is_opt_in(tmp_path):
+    from sz500_moore_echarts_plot import plot_moore_structure_echarts
+
+    engine = make_300311_engine()
+    bars = engine.segment_analyzer.state.bars_raw
+    off_file = tmp_path / "shadow_off.html"
+    on_file = tmp_path / "shadow_on.html"
+
+    plot_moore_structure_echarts(bars, engine, output_file=str(off_file), show_daily_shadow_b=False)
+    plot_moore_structure_echarts(bars, engine, output_file=str(on_file), show_daily_shadow_b=True)
+
+    off_html = off_file.read_text(encoding="utf-8")
+    on_html = on_file.read_text(encoding="utf-8")
+    assert "Daily Shadow B" not in off_html
+    assert "B Shadow Centers" not in off_html
+    assert "B Maturity Events" not in off_html
+    assert "B Invalid Centers" not in off_html
+    assert "Daily Shadow B" in on_html
+    assert "B Shadow Centers" in on_html
+    assert "B Maturity Events" not in on_html
+    assert "B Invalid Centers" not in on_html
 
 
 def test_overlapping_daily_centers_keep_first_generated_type3():

@@ -218,7 +218,17 @@ def _reverse_strictly_breaks_primary_start(primary: WindowCandidate, reverse: Wi
 
 
 def _find_candidate_center(candidate: WindowCandidate, ma34) -> Optional[dict]:
-    return find_center(candidate.segments, ma34, trend_direction=candidate.direction)
+    centers = []
+    for local_start in range(max(1, len(candidate.segments) - 2)):
+        if candidate.segments[local_start].direction != candidate.direction:
+            continue
+        center = find_center(candidate.segments[local_start:], ma34, trend_direction=candidate.direction)
+        if center is not None:
+            center_segments = center.get("segments") or []
+            centers.append((local_start + len(center_segments), local_start, center))
+    if not centers:
+        return None
+    return max(centers, key=lambda item: (item[0], item[1]))[2]
 
 
 def _tk_key(tk) -> tuple:
