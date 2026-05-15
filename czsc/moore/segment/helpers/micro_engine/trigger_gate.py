@@ -47,12 +47,8 @@ class TriggerGateHelper:
         is_solid_gap_down: bool,
         bar,
     ) -> bool:
-        if prev2_ma5 is None:
-            ma5_turn_down = ma5 < last_ma5
-            ma5_turn_up = ma5 > last_ma5
-        else:
-            ma5_turn_down = (ma5 < last_ma5) and (last_ma5 >= prev2_ma5)
-            ma5_turn_up = (ma5 > last_ma5) and (last_ma5 <= prev2_ma5)
+        ma5_turn_down = ma5 <= last_ma5
+        ma5_turn_up = ma5 >= last_ma5
 
         if target_mark == Mark.G:
             return (ma5_turn_down or is_solid_gap_down) and (min(bar.open, bar.close) < ma5)

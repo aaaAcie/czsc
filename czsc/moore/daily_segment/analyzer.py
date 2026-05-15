@@ -288,7 +288,8 @@ class DailySegmentAnalyzer:
 
     @classmethod
     def _center_can_squeeze(cls, weaker: DailySegmentCenter, stronger: DailySegmentCenter) -> bool:
-        if cls._center_segment_overlap_count(weaker, stronger) < 3:
+      # 一个去重/挤压规则：如果 Type3 和 Type1 共享足够多的端点，Type3 会 squeeze 掉 Type1
+        if cls._center_segment_overlap_count(weaker, stronger) < 5:
             return False
         if stronger.overlap_type == 3 and weaker.overlap_type == 1:
             return True

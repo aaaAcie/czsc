@@ -120,3 +120,22 @@ def test_603126_refresh_trigger_prefers_special_rule_before_left_search():
     target = next(tk for tk in engine.micro_turning_ks if tk.trigger_k and tk.trigger_k.dt.strftime("%Y-%m-%d") == "2019-09-18")
     assert target.dt.strftime("%Y-%m-%d") == "2019-09-17"
     assert target.turning_k.dt.strftime("%Y-%m-%d") == "2019-09-18"
+
+
+def test_603908_reversal_trigger_20190923_confirms_top_20190920():
+    bars = _safe_get_bars("603908", "20170501", "20210701")
+    engine = MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+    )
+
+    target = next(
+        tk for tk in engine.micro_turning_ks
+        if tk.dt.strftime("%Y-%m-%d") == "2019-09-20"
+    )
+    assert target.mark.name == "G"
+    assert target.turning_k.dt.strftime("%Y-%m-%d") == "2019-09-23"
