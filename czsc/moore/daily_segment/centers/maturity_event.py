@@ -501,8 +501,11 @@ def _collect_shadow_b_center_events(
         segment_invalid_events: list[CenterMaturityEvent] = []
         global_start = daily_segment.cache.get("shadow_start_offset", 0)
         global_end = daily_segment.cache.get("shadow_end_offset", global_start + len(source_segments))
-        for local_start in range(max(0, len(source_segments) - 3)):
+        source_offsets = {_seg_key(seg): idx for idx, seg in enumerate(source_segments)}
+        local_start = 0
+        while local_start < max(0, len(source_segments) - 3):
             if source_segments[local_start].direction != daily_segment.direction:
+                local_start += 1
                 continue
             candidate = WindowCandidate(
                 global_start + local_start,
@@ -511,10 +514,12 @@ def _collect_shadow_b_center_events(
             )
             center = find_center(candidate.segments, ma34, trend_direction=daily_segment.direction)
             if center is None:
+                local_start += 1
                 continue
             event = _event_from_center(candidate, center, ma34, source_segments, daily_segment.direction)
             key = _event_key(event)
             if key in seen:
+                local_start += 1
                 continue
             seen.add(key)
             if event.owner_evidence.invalid_reasons:
@@ -523,6 +528,19 @@ def _collect_shadow_b_center_events(
                 segment_turning_events.append(event)
             else:
                 segment_events.append(event)
+            if (
+                event.center_role == "trend"
+                and event.overlap_type == 3
+                and event.status == "FINAL"
+                and not event.owner_evidence.invalid_reasons
+                and event.center
+            ):
+                center_segments = event.center.get("segments") or ()
+                end_offset = source_offsets.get(_seg_key(center_segments[-1])) if center_segments else None
+                if end_offset is not None:
+                    local_start = max(local_start + 1, end_offset + 1)
+                    continue
+            local_start += 1
         trend_events.extend(_canonicalize_center_windows(segment_events, source_segments))
         turning_events.extend(_canonicalize_center_windows(segment_turning_events, source_segments))
         invalid_events.extend(_canonicalize_center_windows(segment_invalid_events, source_segments))

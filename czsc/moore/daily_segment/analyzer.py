@@ -757,7 +757,7 @@ class DailySegmentAnalyzer:
         source_segments_kind: str,
         endpoint_source_segments: Optional[Sequence[MooreSegment]] = None,
         forced_refined_segments: Optional[Sequence[MooreSegment]] = None,
-    ) -> None:
+    ) -> bool:
         seg_slice = result["segments"]
         endpoint_source_segments = endpoint_source_segments or source_segments
         owner_evidence = self._owner_chain_evidence(result, source_segments, daily_segment.direction)
@@ -805,7 +805,7 @@ class DailySegmentAnalyzer:
             and result.get("status") == "FINAL"
             and not self._owner_keys_valid_for_source(owner_keys, source_segments)
         ):
-            return
+            return False
 
         if repair_evidence:
             for refined in repair_evidence.get("refined_segments", []):
@@ -846,7 +846,7 @@ class DailySegmentAnalyzer:
             result["status"],
         )
         if key in seen:
-            return
+            return False
         seen.add(key)
         endpoint_axis = self._endpoint_axis(endpoint_source_segments)
         endpoint_span = self._center_endpoint_span(seg_slice, endpoint_source_segments)
@@ -886,6 +886,23 @@ class DailySegmentAnalyzer:
                 },
             )
         )
+        return True
+
+    def _next_center_scan_start(
+        self,
+        current_start: int,
+        result: dict,
+        source_segments: Sequence[MooreSegment],
+    ) -> int:
+        if result.get("overlap_type") != 3 or result.get("status") != "FINAL":
+            return current_start + 1
+        result_segments = result.get("segments") or []
+        if not result_segments:
+            return current_start + 1
+        end_offset = self._find_source_segment_offset(source_segments, result_segments[-1])
+        if end_offset is None:
+            return current_start + 1
+        return max(current_start + 1, end_offset + 1)
 
     def _collect_centers_for_daily_segments(
         self,
@@ -903,14 +920,17 @@ class DailySegmentAnalyzer:
             source_segments = self._daily_segment_center_source_segments(daily_segment)
             source_accumulator.extend(source_segments)
             candidate_results = []
-            for start in range(max(0, len(source_segments) - 3)):
+            start = 0
+            while start < max(0, len(source_segments) - 3):
                 if source_segments[start].direction != daily_segment.direction:
+                    start += 1
                     continue
                 result = find_center(source_segments[start:], self.state.ma34, trend_direction=daily_segment.direction)
                 if not result:
+                    start += 1
                     continue
                 candidate_results.append(result)
-                self._record_center_result(
+                recorded = self._record_center_result(
                     centers,
                     seen,
                     refined_seen,
@@ -924,6 +944,10 @@ class DailySegmentAnalyzer:
                     "expanded_continuous_30f",
                     endpoint_source_segments=source_segments,
                 )
+                if recorded:
+                    start = self._next_center_scan_start(start, result, source_segments)
+                else:
+                    start += 1
 
             for candidate_result in candidate_results:
                 for proposal in self._build_owner_chain_repair_proposals(source_segments, candidate_result, daily_segment.direction):

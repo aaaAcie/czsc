@@ -1394,6 +1394,42 @@ def test_shadow_b_603020_keeps_mature_v21_to_v38():
     assert event.owner_evidence.owner_chain_valid is True
 
 
+def test_regression_603908_type3_center_advances_next_scan_from_window_end():
+    bars = research.get_raw_bars_origin("603908", sdt="20180101", edt="20210820")
+    if not bars:
+        pytest.skip("no bars for 603908")
+
+    engine = MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+        rebuild_daily_centers_after_segment_change=True,
+    )
+    label, _ = make_visible_labelers(engine)
+    analyzer = engine.daily_segment_analyzer
+    source = list(engine.segments[9:25])
+    daily_segment = DailySegment(
+        symbol=source[0].symbol,
+        direction=source[0].direction,
+        start_seg=source[0],
+        end_seg=source[-1],
+        segments=source,
+        cache={},
+    )
+
+    centers, _, _ = analyzer._collect_construction_centers_for_daily_segment(daily_segment)
+    spans = {
+        (label(center.segments[0].start_k), label(center.segments[-1].end_k), center.overlap_type)
+        for center in centers
+    }
+
+    assert ("mV11T", "mV20B", 3) in spans
+    assert ("mV13T", "mV22B", 3) not in spans
+
+
 def test_shadow_b_echarts_overlay_is_opt_in(tmp_path):
     from sz500_moore_echarts_plot import plot_moore_structure_echarts
 
