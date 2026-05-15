@@ -663,6 +663,7 @@ class DailySegmentAnalyzer:
             refined_segment = self._make_refined_segment(c_tk, d_tk, result)
 
         owner_chain = [self._tk_key(tk) for tk in (a_tk, b_tk, c_tk, d_tk)]
+        owner_chain_valid = self._owner_keys_valid_for_source(owner_chain, source_segments)
         return {
             "source": "daily_segment_owner_chain_repair",
             "source_segments_kind": "owner_chain_repair",
@@ -675,7 +676,7 @@ class DailySegmentAnalyzer:
             },
             "owner_chain": owner_chain,
             "owner_chain_repaired": refined_segment is not None,
-            "owner_chain_valid": True,
+            "owner_chain_valid": owner_chain_valid,
             "refined_segments": [refined_segment] if refined_segment else [],
         }
 
@@ -1185,6 +1186,9 @@ class DailySegmentAnalyzer:
         if independence.new_extreme_index is not None:
             cache["new_extreme_index"] = independence.new_extreme_index
             cache["new_extreme_price"] = independence.new_extreme_price
+        if independence.chain_confirmed_by is not None:
+            cache["chain_confirmed_by"] = independence.chain_confirmed_by
+            cache["chain_confirm_kind"] = independence.chain_confirm_kind
         return {k: v for k, v in cache.items() if v is not None and v != ""}
 
     def _append_daily_segment(
@@ -1195,6 +1199,8 @@ class DailySegmentAnalyzer:
     ):
         cache = {"from_macro_swallow": True} if len(segments) == 1 and segments[0].cache.get("is_macro_swallow") else {}
         cache.update(self._independence_cache(independence))
+        if independence and independence.center_kind in {"trend_class", "turning"}:
+            cache["end_state"] = "frozen_end"
         if candidate_kind:
             cache["candidate_kind"] = candidate_kind
         daily_segment = DailySegment(
@@ -1308,6 +1314,16 @@ class DailySegmentAnalyzer:
 
         completed = s.completed_segments[-1]
         if completed.cache.get("end_state") != "extendable_end":
+            return False
+        reverse_decision = find_delayed_commit_decision(
+            s.current_segments,
+            s.completed_segments,
+            s.ma34,
+            s.ma170,
+            continuity_broken=s.continuity_broken,
+            allow_cold_start=False,
+        )
+        if reverse_decision and reverse_decision.segments and reverse_decision.independence:
             return False
 
         extension_offset = self._tail_extension_offset(completed, s.current_segments)
@@ -1434,6 +1450,22 @@ class DailySegmentAnalyzer:
                 require_ma=False,
             )
             if not candidates:
+                if offset == 0 and len(segments) >= 3:
+                    s.pending_display_segments.append(
+                        DailySegment(
+                            symbol=segments[0].symbol,
+                            direction=segments[0].direction,
+                            start_seg=segments[0],
+                            end_seg=segments[-1],
+                            segments=list(segments),
+                            cache={
+                                "status": "PENDING",
+                                "source": "daily_segment_open_tail",
+                                "open_ended": True,
+                                "source_end_segment": self._seg_key(segments[-1]),
+                            },
+                        )
+                    )
                 break
             selected = candidates[-1]
             if selected.end_offset <= offset:

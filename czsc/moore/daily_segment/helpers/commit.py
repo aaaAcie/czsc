@@ -61,6 +61,8 @@ class IndependenceDecision:
     third_point_price: Optional[float] = None
     new_extreme_index: Optional[int] = None
     new_extreme_price: Optional[float] = None
+    chain_confirmed_by: Optional[tuple] = None
+    chain_confirm_kind: str = ""
     reason: str = ""
 
 
@@ -217,6 +219,81 @@ def _reverse_strictly_breaks_primary_start(primary: WindowCandidate, reverse: Wi
 
 def _find_candidate_center(candidate: WindowCandidate, ma34) -> Optional[dict]:
     return find_center(candidate.segments, ma34, trend_direction=candidate.direction)
+
+
+def _tk_key(tk) -> tuple:
+    return (tk.k_index, tk.dt, tk.price, tk.mark.value)
+
+
+def _candidate_strictly_extends_after_center(candidate: WindowCandidate, center: dict) -> bool:
+    center_segments = center.get("segments") or []
+    if not center_segments or len(center_segments) >= len(candidate.segments):
+        return False
+
+    center_prices = []
+    for seg in center_segments:
+        center_prices.extend([seg.start_k.price, seg.end_k.price])
+    if not center_prices:
+        return False
+
+    candidate_end = seg_end_price(candidate.segments[-1])
+    if candidate.direction == Direction.Up:
+        return candidate_end > max(center_prices)
+    if candidate.direction == Direction.Down:
+        return candidate_end < min(center_prices)
+    return False
+
+
+def check_candidate_self_independence(candidate: WindowCandidate, ma34) -> IndependenceDecision:
+    """Judge whether a candidate already carries its own independence evidence."""
+    center = _find_candidate_center(candidate, ma34)
+    if center is None:
+        return IndependenceDecision(
+            ok=True,
+            kind="no_daily_center",
+            reason="candidate itself is a valid daily segment and has no daily center",
+        )
+
+    center_kind = center.get("center_kind", "")
+    if center_kind == "turning":
+        return _decision_from_center(
+            "third_buy_sell",
+            center,
+            requires_new_extreme=False,
+            new_extreme_ok=None,
+            reason="candidate turning center third buy/sell confirms independence",
+        )
+
+    new_extreme_ok = _candidate_strictly_extends_after_center(candidate, center)
+    if center_kind == "trend_class" and new_extreme_ok:
+        return _decision_from_center(
+            "strict_new_extreme",
+            center,
+            requires_new_extreme=True,
+            new_extreme_ok=True,
+            reason="candidate trend-class center is followed by a strict new extreme",
+        )
+
+    if center_kind == "trend_class":
+        return IndependenceDecision(
+            ok=False,
+            kind="third_buy_sell",
+            center_kind=center_kind,
+            center_low=center.get("low"),
+            center_high=center.get("high"),
+            requires_new_extreme=True,
+            new_extreme_ok=False,
+            reason="trend-class center has not produced a later strict new extreme inside candidate",
+        )
+
+    return IndependenceDecision(
+        ok=False,
+        kind="unknown",
+        center_kind=center_kind,
+        center_low=center.get("low"),
+        center_high=center.get("high"),
+        reason="candidate center did not satisfy any self-independence rule",
+    )
 
 
 def _find_boundary_turning_center(primary: WindowCandidate, reverse: WindowCandidate, ma34) -> Optional[dict]:
@@ -436,6 +513,38 @@ def should_commit_leading_swallow(
     return True
 
 
+def _has_maturity_barrier(independence: IndependenceDecision) -> bool:
+    return independence.ok and independence.center_kind in {"trend_class", "turning"}
+
+
+def _chain_independence(
+    primary_self: IndependenceDecision,
+    reverse: WindowCandidate,
+    reverse_self: IndependenceDecision,
+) -> IndependenceDecision:
+    return IndependenceDecision(
+        ok=True,
+        kind="same_trend_chain",
+        center_kind=primary_self.center_kind,
+        center_low=primary_self.center_low,
+        center_high=primary_self.center_high,
+        requires_new_extreme=primary_self.requires_new_extreme,
+        new_extreme_ok=primary_self.new_extreme_ok,
+        chain_confirmed_by=_tk_key(reverse.segments[-1].end_k),
+        chain_confirm_kind=reverse_self.kind,
+        reason="confirmed by following independent segment",
+    )
+
+
+def _cold_start_relax_allowed(primary: WindowCandidate, completed_segments: Sequence) -> bool:
+    return (
+        ENABLE_COLD_START_RELAX_PIVOT_BREAK
+        and len(completed_segments) == 0
+        and primary.start_offset == 0
+        and primary.segments[0].cache.get("is_macro_swallow")
+    )
+
+
 def find_delayed_commit_decision(
     segments: Sequence,
     completed_segments: Sequence,
@@ -470,11 +579,13 @@ def find_delayed_commit_decision(
             best_pending = primary_candidates[-1].segments
 
         swallow_fallback: Optional[CommitDecision] = None
-        chosen_decision: Optional[CommitDecision] = None
+        mature_decisions: list[CommitDecision] = []
+        fallback_decision: Optional[CommitDecision] = None
         for primary in _iter_terminal_candidates(primary_candidates, segments):
             if primary.kind == "swallow":
                 best_pending = primary.segments
                 continue
+            primary_self = check_candidate_self_independence(primary, ma34)
             reverse_candidates = find_reverse_confirmation_candidates(
                 segments,
                 primary.end_offset,
@@ -500,14 +611,7 @@ def find_delayed_commit_decision(
                     completed_segments,
                 )
                 if not independence.ok:
-                    is_cold_start = len(completed_segments) == 0
-                    can_relax_cold_start = (
-                        ENABLE_COLD_START_RELAX_PIVOT_BREAK
-                        and is_cold_start
-                        and primary.start_offset == 0
-                        and primary.segments[0].cache.get("is_macro_swallow")
-                    )
-                    if not can_relax_cold_start:
+                    if not _cold_start_relax_allowed(primary, completed_segments):
                         best_pending = primary.segments
                         continue
                     independence = IndependenceDecision(
@@ -516,29 +620,56 @@ def find_delayed_commit_decision(
                         reason="cold start primary swallow keeps legacy relax behavior",
                     )
 
+                reverse_self = check_candidate_self_independence(reverse, ma34)
+                extra_segments = ()
+                tail_offset = primary.end_offset
+                if primary_self.ok:
+                    commit_independence = primary_self
+                elif reverse_self.ok:
+                    commit_independence = _chain_independence(
+                        primary_self,
+                        reverse,
+                        reverse_self,
+                    )
+                    extra_segments = ((reverse.segments, reverse_self),)
+                    tail_offset = reverse.end_offset
+                else:
+                    commit_independence = independence
+                if (
+                    allow_cold_start
+                    and not _has_maturity_barrier(commit_independence)
+                    and not _reverse_strictly_breaks_primary_start(primary, reverse)
+                ):
+                    best_pending = reverse.segments
+                    continue
                 possible_decision = CommitDecision(
                     start_offset=primary.start_offset,
                     end_offset=primary.end_offset,
                     segments=primary.segments,
                     pending_segments=reverse.segments,
-                    tail_offset=primary.end_offset,
-                    independence=independence,
+                    tail_offset=tail_offset,
+                    independence=commit_independence,
+                    extra_segments=extra_segments,
                     candidate_kind=primary.kind,
                 )
                 if allow_cold_start and primary.start_offset == 0 and primary.segments[0].cache.get("is_macro_swallow"):
                     return possible_decision
 
-                chosen_decision = possible_decision
+                if _has_maturity_barrier(commit_independence):
+                    mature_decisions.append(possible_decision)
+                fallback_decision = possible_decision
                 best_pending = reverse.segments
                 break
 
         selected = None
         if swallow_fallback and (
-            chosen_decision is None or swallow_fallback.end_offset > chosen_decision.end_offset
+            fallback_decision is None or swallow_fallback.end_offset > fallback_decision.end_offset
         ):
             selected = swallow_fallback
-        elif chosen_decision:
-            selected = chosen_decision
+        elif mature_decisions:
+            selected = mature_decisions[0]
+        elif fallback_decision:
+            selected = fallback_decision
         if selected:
             if allow_cold_start and start_offset == 0:
                 cold_start_fallback = selected
@@ -548,10 +679,10 @@ def find_delayed_commit_decision(
         if allow_cold_start and start_offset > 0:
             break
 
-    if best_pending:
-        return CommitDecision(start_offset=-1, end_offset=-1, segments=[], pending_segments=best_pending)
     if cold_start_fallback:
         return cold_start_fallback
+    if best_pending:
+        return CommitDecision(start_offset=-1, end_offset=-1, segments=[], pending_segments=best_pending)
     return None
 
 

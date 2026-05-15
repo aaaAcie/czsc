@@ -130,6 +130,21 @@ def make_603178_engine() -> MooreCZSC:
     )
 
 
+def make_300311_engine() -> MooreCZSC:
+    bars = research.get_raw_bars_origin("300311", sdt="20170115", edt="20210801")
+    if not bars:
+        pytest.skip("no bars for 300311")
+    return MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+        rebuild_daily_centers_after_segment_change=True,
+    )
+
+
 def make_visible_labelers(engine: MooreCZSC, prefix: str = "mV"):
     display_tks = getattr(engine, "micro_turning_ks", engine.turning_ks)
     label_by_key = {
@@ -585,7 +600,8 @@ def test_live_processing_extends_by_two_until_reverse_trend_forms():
         analyzer._process_new_segment(seg)
 
     assert len(analyzer.daily_segments) == 1
-    assert analyzer.daily_segments[0].segments == segs[2:5]
+    assert analyzer.daily_segments[0].segments == segs[:5]
+    assert analyzer.daily_segments[0].cache["independence_kind"] == "no_daily_center"
     assert analyzer.state.current_segments == segs[5:]
     assert analyzer.state.pending_daily_segments == segs[5:]
 
@@ -1168,19 +1184,7 @@ def test_regression_603020_tail_extension_yields_to_reverse_independence():
 
 
 def test_regression_300311_rejects_type3_with_invalid_owner_chain():
-    bars = research.get_raw_bars_origin("300311", sdt="20170115", edt="20210801")
-    if not bars:
-        pytest.skip("no bars for 300311")
-
-    engine = MooreCZSC(
-        bars,
-        ma34_cross_as_valid_gate=True,
-        ma34_cross_expand_one_k=False,
-        audit_link_rounds=3,
-        enable_pre_round=True,
-        replay_centers_after_macro_swallow=False,
-        rebuild_daily_centers_after_segment_change=True,
-    )
+    engine = make_300311_engine()
     label, _ = make_visible_labelers(engine)
 
     refined_spans = {(label(seg.start_k), label(seg.end_k)) for seg in engine.daily_refined_segments}
@@ -1192,6 +1196,27 @@ def test_regression_300311_rejects_type3_with_invalid_owner_chain():
     }
     assert ("mV23T", "mV28B", 3) not in center_spans
     assert all(center.cache["owner_chain_valid"] for center in engine.daily_centers if center.overlap_type == 3)
+
+
+def test_regression_300311_uses_mature_barrier_and_same_trend_chain():
+    engine = make_300311_engine()
+    label, _ = make_visible_labelers(engine)
+
+    daily_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_segments]
+
+    assert daily_pairs == [
+        ("mV10B", "mV23T"),
+        ("mV23T", "mV26B"),
+        ("mV26B", "mV31T"),
+        ("mV31T", "mV36B"),
+    ]
+    assert ("mV10B", "mV15T") not in daily_pairs
+    assert engine.daily_segments[2].cache["independence_kind"] == "same_trend_chain"
+    assert engine.daily_segments[2].cache["chain_confirm_kind"] == "no_daily_center"
+
+    pending_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_pending_segments]
+    assert pending_pairs[:1] == [("mV36B", "mV42B")]
+    assert engine.daily_pending_segments[0].cache["open_ended"] is True
 
 
 def test_overlapping_daily_centers_keep_first_generated_type3():
