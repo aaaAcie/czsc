@@ -38,6 +38,7 @@ class CenterMaturityEvent:
     candidate: WindowCandidate
     center: Optional[dict] = None
     center_kind: str = "none"
+    center_role: str = ""
     overlap_type: Optional[int] = None
     status: str = ""
     high: Optional[float] = None
@@ -55,7 +56,7 @@ class CenterMaturityEvent:
 
     @property
     def independent(self) -> bool:
-        if self.center_kind == "none":
+        if self.center_kind == "none" or self.center_role == "turning":
             return True
         return self.has_maturity_barrier
 
@@ -78,6 +79,8 @@ class ShadowBDailyPlan:
     daily_segments: tuple[DailySegment, ...] = ()
     traces: tuple[CandidateEventTrace, ...] = ()
     center_events: tuple[CenterMaturityEvent, ...] = ()
+    trend_center_events: tuple[CenterMaturityEvent, ...] = ()
+    turning_center_events: tuple[CenterMaturityEvent, ...] = ()
     invalid_center_events: tuple[CenterMaturityEvent, ...] = ()
     maturity_events: tuple[CenterMaturityEvent, ...] = ()
     invalid_events: tuple[CenterMaturityEvent, ...] = ()
@@ -236,6 +239,7 @@ def _event_from_center(
     owner_evidence = _owner_evidence_for_center(center, source_segments, trend_direction)
     center_kind = center.get("center_kind", "")
     overlap_type = center.get("overlap_type")
+    center_role = "turning" if overlap_type == 0 or center_kind == "turning" else "trend"
     invalid_reasons = list(owner_evidence.invalid_reasons)
     has_maturity_barrier = False
     requires_new_extreme = False
@@ -245,12 +249,12 @@ def _event_from_center(
     independence_kind = ""
 
     if overlap_type == 0 or center_kind == "turning":
-        has_maturity_barrier = True
+        has_maturity_barrier = False
         requires_new_extreme = False
         new_extreme_ok = None
-        maturity_end_offset = candidate.end_offset
-        maturity_end_segment = candidate.segments[-1]
-        independence_kind = "third_buy_sell"
+        maturity_end_offset = None
+        maturity_end_segment = None
+        independence_kind = "turning_center"
     elif center_kind == "trend_class" and overlap_type in {1, 3}:
         requires_new_extreme = True
         if owner_evidence.owner_chain_valid:
@@ -272,6 +276,7 @@ def _event_from_center(
         candidate=candidate,
         center=center,
         center_kind=center_kind,
+        center_role=center_role,
         overlap_type=overlap_type,
         status=center.get("status", ""),
         high=center.get("high"),
@@ -301,10 +306,26 @@ def build_candidate_event_trace(
     center = _find_latest_candidate_center(candidate, ma34, trend_direction)
 
     if center is None:
+        turning_center = _find_latest_candidate_center(candidate, ma34, trend_direction, center_role="turning")
+        turning_owner_evidence = (
+            _owner_evidence_for_center(turning_center, source_segments, trend_direction)
+            if turning_center
+            else CenterOwnerEvidence()
+        )
+        if turning_owner_evidence.invalid_reasons:
+            turning_center = None
+            turning_owner_evidence = CenterOwnerEvidence()
         event = CenterMaturityEvent(
             candidate=candidate,
-            center=None,
-            center_kind="none",
+            center=turning_center,
+            center_kind=turning_center.get("center_kind", "none") if turning_center else "none",
+            center_role="turning" if turning_center else "none",
+            overlap_type=turning_center.get("overlap_type") if turning_center else None,
+            status=turning_center.get("status", "") if turning_center else "",
+            high=turning_center.get("high") if turning_center else None,
+            low=turning_center.get("low") if turning_center else None,
+            points=turning_center.get("points") or {} if turning_center else {},
+            owner_evidence=turning_owner_evidence,
             independence_kind="no_daily_center",
             has_maturity_barrier=False,
         )
@@ -331,6 +352,7 @@ def _find_latest_candidate_center(
     candidate: WindowCandidate,
     ma34,
     trend_direction: Direction,
+    center_role: str = "trend",
 ) -> Optional[dict]:
     centers = []
     for local_start in range(max(1, len(candidate.segments) - 2)):
@@ -338,6 +360,10 @@ def _find_latest_candidate_center(
             continue
         center = find_center(candidate.segments[local_start:], ma34, trend_direction=trend_direction)
         if center is None:
+            continue
+        if center_role == "trend" and center.get("center_kind") != "trend_class":
+            continue
+        if center_role == "turning" and not (center.get("overlap_type") == 0 or center.get("center_kind") == "turning"):
             continue
         center_segments = center.get("segments") or []
         centers.append((local_start + len(center_segments), local_start, center))
@@ -357,7 +383,7 @@ def _reverse_strictly_breaks_primary_start(primary: WindowCandidate, reverse: Wi
 
 
 def _candidate_is_independent(event: CenterMaturityEvent) -> bool:
-    return event.center_kind == "none" or event.has_maturity_barrier
+    return event.center_kind == "none" or event.center_role == "turning" or event.has_maturity_barrier
 
 
 def _daily_segment_from_candidate(candidate: WindowCandidate, event: CenterMaturityEvent, cache_extra: Optional[dict] = None) -> DailySegment:
@@ -367,6 +393,7 @@ def _daily_segment_from_candidate(candidate: WindowCandidate, event: CenterMatur
         "shadow_end_offset": candidate.end_offset,
         "independence_kind": event.independence_kind,
         "center_kind": event.center_kind,
+        "center_role": event.center_role,
         "owner_chain_valid": event.owner_evidence.owner_chain_valid,
         "new_extreme_ok": event.new_extreme_ok,
     }
@@ -461,14 +488,16 @@ def _canonicalize_center_windows(
 def _collect_shadow_b_center_events(
     daily_segments: Sequence[DailySegment],
     ma34,
-) -> tuple[tuple[CenterMaturityEvent, ...], tuple[CenterMaturityEvent, ...]]:
+) -> tuple[tuple[CenterMaturityEvent, ...], tuple[CenterMaturityEvent, ...], tuple[CenterMaturityEvent, ...]]:
     """Build the Shadow-B center warehouse by sliding inside selected B segments."""
-    events: list[CenterMaturityEvent] = []
+    trend_events: list[CenterMaturityEvent] = []
+    turning_events: list[CenterMaturityEvent] = []
     invalid_events: list[CenterMaturityEvent] = []
     seen = set()
     for daily_segment in daily_segments:
         source_segments = list(daily_segment.segments)
         segment_events: list[CenterMaturityEvent] = []
+        segment_turning_events: list[CenterMaturityEvent] = []
         segment_invalid_events: list[CenterMaturityEvent] = []
         global_start = daily_segment.cache.get("shadow_start_offset", 0)
         global_end = daily_segment.cache.get("shadow_end_offset", global_start + len(source_segments))
@@ -490,11 +519,14 @@ def _collect_shadow_b_center_events(
             seen.add(key)
             if event.owner_evidence.invalid_reasons:
                 segment_invalid_events.append(event)
+            elif event.center_role == "turning":
+                segment_turning_events.append(event)
             else:
                 segment_events.append(event)
-        events.extend(_canonicalize_center_windows(segment_events, source_segments))
+        trend_events.extend(_canonicalize_center_windows(segment_events, source_segments))
+        turning_events.extend(_canonicalize_center_windows(segment_turning_events, source_segments))
         invalid_events.extend(_canonicalize_center_windows(segment_invalid_events, source_segments))
-    return tuple(events), tuple(invalid_events)
+    return tuple(trend_events), tuple(turning_events), tuple(invalid_events)
 
 
 def build_shadow_b_daily_plan(
@@ -654,12 +686,14 @@ def build_shadow_b_daily_plan(
         else:
             offset = selected_trace.primary.end_offset
 
-    center_events, invalid_center_events = _collect_shadow_b_center_events(daily_segments, ma34)
+    trend_center_events, turning_center_events, invalid_center_events = _collect_shadow_b_center_events(daily_segments, ma34)
 
     return ShadowBDailyPlan(
         daily_segments=tuple(daily_segments),
         traces=tuple(traces),
-        center_events=center_events,
+        center_events=trend_center_events,
+        trend_center_events=trend_center_events,
+        turning_center_events=turning_center_events,
         invalid_center_events=invalid_center_events,
         maturity_events=tuple(maturity_events),
         invalid_events=_dedupe_events([*invalid_events, *invalid_center_events]),

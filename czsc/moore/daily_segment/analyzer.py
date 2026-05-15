@@ -1427,9 +1427,7 @@ class DailySegmentAnalyzer:
             return None
         if decision.independence.kind == "no_daily_center":
             return decision
-        if decision.independence.kind != "third_buy_sell" or decision.independence.center_kind != "turning":
-            return None
-        return decision
+        return None
 
     def _rebuild_pending_display_segments(self):
         s = self.state

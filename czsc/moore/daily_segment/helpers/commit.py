@@ -218,12 +218,26 @@ def _reverse_strictly_breaks_primary_start(primary: WindowCandidate, reverse: Wi
 
 
 def _find_candidate_center(candidate: WindowCandidate, ma34) -> Optional[dict]:
+    return _find_latest_candidate_center(candidate, ma34, center_kind="trend_class")
+
+
+def _find_latest_turning_center(candidate: WindowCandidate, ma34) -> Optional[dict]:
+    return _find_latest_candidate_center(candidate, ma34, center_kind="turning")
+
+
+def _find_latest_candidate_center(
+    candidate: WindowCandidate,
+    ma34,
+    center_kind: Optional[str] = None,
+) -> Optional[dict]:
     centers = []
     for local_start in range(max(1, len(candidate.segments) - 2)):
         if candidate.segments[local_start].direction != candidate.direction:
             continue
         center = find_center(candidate.segments[local_start:], ma34, trend_direction=candidate.direction)
         if center is not None:
+            if center_kind is not None and center.get("center_kind") != center_kind:
+                continue
             center_segments = center.get("segments") or []
             centers.append((local_start + len(center_segments), local_start, center))
     if not centers:
@@ -258,22 +272,22 @@ def check_candidate_self_independence(candidate: WindowCandidate, ma34) -> Indep
     """Judge whether a candidate already carries its own independence evidence."""
     center = _find_candidate_center(candidate, ma34)
     if center is None:
+        turning_center = _find_latest_turning_center(candidate, ma34)
+        if turning_center is not None:
+            return _decision_from_center(
+                "no_daily_center",
+                turning_center,
+                requires_new_extreme=False,
+                new_extreme_ok=None,
+                reason="candidate has no trend-class daily center; turning center is recorded only",
+            )
         return IndependenceDecision(
             ok=True,
             kind="no_daily_center",
-            reason="candidate itself is a valid daily segment and has no daily center",
+            reason="candidate itself is a valid daily segment and has no trend-class daily center",
         )
 
     center_kind = center.get("center_kind", "")
-    if center_kind == "turning":
-        return _decision_from_center(
-            "third_buy_sell",
-            center,
-            requires_new_extreme=False,
-            new_extreme_ok=None,
-            reason="candidate turning center third buy/sell confirms independence",
-        )
-
     new_extreme_ok = _candidate_strictly_extends_after_center(candidate, center)
     if center_kind == "trend_class" and new_extreme_ok:
         return _decision_from_center(
@@ -350,36 +364,26 @@ def check_daily_segment_independence(
                 reason="macro swallow segment can be promoted as one daily segment",
             )
 
-    boundary_turning = _find_boundary_turning_center(primary, reverse, ma34)
-    if boundary_turning:
-        return _decision_from_center(
-            "third_buy_sell",
-            boundary_turning,
-            requires_new_extreme=False,
-            new_extreme_ok=None,
-            reason="boundary turning center third buy/sell confirms independence",
-        )
-
     candidate_center = _find_candidate_center(reverse, ma34)
     new_extreme_ok = _reverse_strictly_breaks_primary_start(primary, reverse)
 
     if candidate_center is None:
+        turning_center = _find_latest_turning_center(reverse, ma34) or _find_boundary_turning_center(primary, reverse, ma34)
+        if turning_center is not None:
+            return _decision_from_center(
+                "no_daily_center",
+                turning_center,
+                requires_new_extreme=False,
+                new_extreme_ok=None,
+                reason="candidate has no trend-class daily center; turning center is recorded only",
+            )
         return IndependenceDecision(
             ok=True,
             kind="no_daily_center",
-            reason="candidate itself is a valid daily segment and has no daily center",
+            reason="candidate itself is a valid daily segment and has no trend-class daily center",
         )
 
     center_kind = candidate_center.get("center_kind", "")
-    if center_kind == "turning":
-        return _decision_from_center(
-            "third_buy_sell",
-            candidate_center,
-            requires_new_extreme=False,
-            new_extreme_ok=None,
-            reason="candidate turning center third buy/sell confirms independence",
-        )
-
     if new_extreme_ok:
         return _decision_from_center(
             "strict_new_extreme",
@@ -524,7 +528,7 @@ def should_commit_leading_swallow(
 
 
 def _has_maturity_barrier(independence: IndependenceDecision) -> bool:
-    return independence.ok and independence.center_kind in {"trend_class", "turning"}
+    return independence.ok and independence.center_kind == "trend_class"
 
 
 def _chain_independence(

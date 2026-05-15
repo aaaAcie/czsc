@@ -900,7 +900,7 @@ def plot_moore_structure_echarts(
             minute_series.append(s)
 
     if show_daily_shadow_b:
-        s = _center_series("B Shadow Centers", _shadow_b_center_area_data(shadow_daily_center_events), "#F39C12")
+        s = _center_series("B Shadow Centers", _shadow_b_center_area_data(shadow_daily_center_events), "#95A5A6")
         if s:
             daily_series.append(s)
 
@@ -1370,7 +1370,7 @@ if __name__ == "__main__":
     ]
 
     # 🎯 切换这里
-    task = tasks[-1]
+    task = tasks[-3]
     # task = tasks[-2]
     try:
         symbol = task.symbol
