@@ -15,7 +15,6 @@ from .helpers.commit import (
     IndependenceDecision,
     WindowCandidate,
     candidates_from_start,
-    check_candidate_self_independence,
     find_delayed_commit_decision,
     is_valid_regular_window,
     select_valid_daily_window,
@@ -172,12 +171,14 @@ class DailySegmentAnalyzer:
         )
         if s.anchor_k_index is None or should_fallback or danger is None:
             self._full_rebuild_from_scratch()
+            self._extend_final_unfrozen_tail_if_needed()
             self._rebuild_daily_centers()
             return
 
         self._restore_from_anchor_snapshot()
         for seg in danger:
             self._process_new_segment(seg)
+        self._extend_final_unfrozen_tail_if_needed()
         self._rebuild_daily_centers()
 
     def _full_rebuild_from_scratch(self):
@@ -1280,13 +1281,9 @@ class DailySegmentAnalyzer:
         while True:
             decision = self._find_commit_decision(s.current_segments)
             if not decision:
-                if self._extend_unfrozen_completed_tail_if_needed():
-                    continue
                 self._rebuild_pending_display_segments()
                 return
             if not decision.segments:
-                if self._extend_unfrozen_completed_tail_if_needed():
-                    continue
                 s.pending_daily_segments = decision.pending_segments
                 self._rebuild_pending_display_segments()
                 return
@@ -1335,38 +1332,7 @@ class DailySegmentAnalyzer:
                 best_price = price
         return best_offset
 
-    def _completed_confirms_previous_chain(self, completed: DailySegment) -> bool:
-        if len(self.state.completed_segments) < 2:
-            return False
-        previous = self.state.completed_segments[-2]
-        return (
-            previous.cache.get("independence_kind") == "same_trend_chain"
-            and previous.cache.get("chain_confirmed_by") == self._tk_key(completed.end_seg.end_k)
-        )
-
-    def _rollback_chain_confirmation_for_reselection(self) -> bool:
-        s = self.state
-        if len(s.completed_segments) < 2:
-            return False
-        previous = s.completed_segments[-2]
-        completed = s.completed_segments[-1]
-        if not self._completed_confirms_previous_chain(completed):
-            return False
-
-        s.completed_segments = s.completed_segments[:-2]
-        s.current_segments = [*previous.segments, *completed.segments, *s.current_segments]
-        s.pending_daily_segments = []
-        s.pending_display_segments = []
-        s.pending_centers = []
-        s.anchor_completed_segments = clone_completed_segments_snapshot(s.completed_segments)
-        s.pending_after_tail_extension = False
-        self._reset_daily_center_state()
-        if s.current_segments:
-            self._advance_anchor_snapshot(s.current_segments[0])
-            self._rebuild_candidates_for_current_segments()
-        return True
-
-    def _extend_unfrozen_completed_tail_if_needed(self) -> bool:
+    def _extend_final_unfrozen_tail_if_needed(self) -> bool:
         s = self.state
         if not s.completed_segments or not s.current_segments:
             return False
@@ -1387,18 +1353,11 @@ class DailySegmentAnalyzer:
         if reverse_decision and reverse_decision.pending_segments:
             pending = reverse_decision.pending_segments
             if pending and is_opposite_direction(pending[0].direction, completed.direction):
-                independence = check_candidate_self_independence(
-                    WindowCandidate(0, len(pending), list(pending)),
-                    s.ma34,
-                )
-                if not independence.ok and independence.center_kind == "trend_class":
-                    return False
+                return False
 
         extension_offset = self._tail_extension_offset(completed, s.current_segments)
         if extension_offset is None:
             return False
-        if self._completed_confirms_previous_chain(completed):
-            return self._rollback_chain_confirmation_for_reselection()
 
         extension_segments = list(s.current_segments[: extension_offset + 1])
         extended_cache = dict(completed.cache)

@@ -9,7 +9,11 @@ from czsc.moore.daily_segment import DailySegment, DailySegmentAnalyzer, DailySe
 from czsc.moore.daily_segment.center_algo import find_b_point, find_center, find_d_point
 from czsc.moore.daily_segment.centers.maturity_event import build_candidate_event_trace, build_shadow_b_daily_plan
 import czsc.moore.daily_segment.helpers.commit as daily_commit
-from czsc.moore.daily_segment.helpers.commit import WindowCandidate, check_daily_segment_independence
+from czsc.moore.daily_segment.helpers.commit import (
+    WindowCandidate,
+    check_candidate_self_independence,
+    check_daily_segment_independence,
+)
 from czsc.moore.daily_segment.utils import slice_segments_from_anchor
 from czsc.moore.objects import MooreSegment, TurningK
 from czsc.py.enum import Direction, Freq, Mark
@@ -396,9 +400,51 @@ def test_independence_accepts_boundary_turning_center_without_new_extreme():
     decision = check_daily_segment_independence(primary, reverse, primary.segments + reverse.segments, ma34, ma170, [])
 
     assert decision.ok
-    assert decision.kind == "no_daily_center"
+    assert decision.kind == "turning_third_buy_sell"
     assert decision.center_kind == "turning"
     assert decision.requires_new_extreme is False
+    assert decision.new_extreme_ok is False
+
+
+def test_turning_center_accepts_strict_new_extreme_independence():
+    candidate = WindowCandidate(0, 5, [
+        make_seg(0, 10, Direction.Down, 20, 10),
+        make_seg(10, 20, Direction.Up, 10, 12),
+        make_seg(20, 30, Direction.Down, 12, 8.5),
+        make_seg(30, 40, Direction.Up, 8.5, 8.8),
+        make_seg(40, 50, Direction.Down, 8.8, 7),
+    ])
+    ma34, _ = make_empty_ma(90)
+    ma34[7], ma34[8], ma34[9] = 10, 9, 10
+    ma34[18], ma34[19], ma34[20] = 11, 12, 11
+
+    decision = check_candidate_self_independence(candidate, ma34)
+
+    assert decision.ok
+    assert decision.kind == "turning_new_extreme"
+    assert decision.center_kind == "turning"
+    assert decision.requires_new_extreme is False
+    assert decision.new_extreme_ok is True
+
+
+def test_turning_center_equal_price_is_not_new_extreme():
+    candidate = WindowCandidate(0, 5, [
+        make_seg(0, 10, Direction.Down, 20, 10),
+        make_seg(10, 20, Direction.Up, 10, 12),
+        make_seg(20, 30, Direction.Down, 12, 8.5),
+        make_seg(30, 40, Direction.Up, 8.5, 8.8),
+        make_seg(40, 50, Direction.Down, 8.8, 8.5),
+    ])
+    ma34, _ = make_empty_ma(90)
+    ma34[7], ma34[8], ma34[9] = 10, 9, 10
+    ma34[18], ma34[19], ma34[20] = 11, 12, 11
+
+    decision = check_candidate_self_independence(candidate, ma34)
+
+    assert decision.ok
+    assert decision.kind == "turning_third_buy_sell"
+    assert decision.center_kind == "turning"
+    assert decision.new_extreme_ok is False
 
 
 def test_swallow_segment_direct_commit_and_moore_aliases():
@@ -1488,23 +1534,27 @@ def test_regression_603908_reverse_confirmed_chain_independence(monkeypatch):
     label, _ = make_visible_labelers(engine)
 
     daily_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_segments]
-    assert daily_pairs[:4] == [
+    assert daily_pairs[:6] == [
         ("mV0T", "mV7B"),
         ("mV7B", "mV10T"),
-        ("mV10T", "mV25B"),
+        ("mV10T", "mV17B"),
+        ("mV17B", "mV22T"),
+        ("mV22T", "mV25B"),
         ("mV25B", "mV38T"),
     ]
 
-    first, first_confirm, third, third_confirm = engine.daily_segments[:4]
+    first, first_confirm, third, third_confirm, _, mature_confirm = engine.daily_segments[:6]
     assert first.cache["independence_kind"] == "same_trend_chain"
     assert first.cache["chain_confirm_kind"] == "no_daily_center"
     assert first.cache["chain_confirmed_by"][0] == first_confirm.end_seg.end_k.k_index
 
     assert third.cache["independence_kind"] == "same_trend_chain"
-    assert third.cache["chain_confirm_kind"] == "strict_new_extreme"
+    assert third.cache["chain_confirm_kind"] == "no_daily_center"
     assert third.cache["chain_confirmed_by"][0] == third_confirm.end_seg.end_k.k_index
-    assert third_confirm.cache["independence_kind"] == "strict_new_extreme"
+    assert third_confirm.cache["from_macro_swallow"] is True
     assert third_confirm.cache.get("extended_from_unfrozen_end") is None
+    assert mature_confirm.cache["independence_kind"] == "strict_new_extreme"
+    assert mature_confirm.cache.get("extended_from_unfrozen_end") is None
 
 
 def test_shadow_b_echarts_overlay_is_opt_in(tmp_path):

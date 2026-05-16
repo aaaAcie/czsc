@@ -268,18 +268,67 @@ def _candidate_strictly_extends_after_center(candidate: WindowCandidate, center:
     return False
 
 
+def _turning_center_has_third_buy_sell(center: dict) -> bool:
+    return (
+        center.get("center_kind") == "turning"
+        and center.get("overlap_type") == 0
+        and center.get("status") == "FINAL"
+        and {"A", "B"} <= set(center.get("points") or {})
+        and len(center.get("segments") or []) >= 4
+    )
+
+
+def check_turning_center_independence(
+    center: dict,
+    *,
+    new_extreme_ok: bool,
+    reason_prefix: str,
+) -> IndependenceDecision:
+    """Judge Type0 / turning-center independence.
+
+    Turning centers are not trend-class centers, so they do not require a later
+    strict new extreme.  A strict new high / low is still recorded as a stronger
+    turning-specific independence reason when it is present.
+    """
+    if new_extreme_ok:
+        return _decision_from_center(
+            "turning_new_extreme",
+            center,
+            requires_new_extreme=False,
+            new_extreme_ok=True,
+            reason=f"{reason_prefix}; turning center is followed by a strict new extreme",
+        )
+    if _turning_center_has_third_buy_sell(center):
+        return _decision_from_center(
+            "turning_third_buy_sell",
+            center,
+            requires_new_extreme=False,
+            new_extreme_ok=False,
+            reason=f"{reason_prefix}; turning center confirms independence without requiring a later strict new extreme",
+        )
+
+    return IndependenceDecision(
+        ok=False,
+        kind="turning_unconfirmed",
+        center_kind=center.get("center_kind", ""),
+        center_low=center.get("low"),
+        center_high=center.get("high"),
+        requires_new_extreme=False,
+        new_extreme_ok=False,
+        reason=f"{reason_prefix}; turning center has neither strict new extreme nor confirmed third buy/sell",
+    )
+
+
 def check_candidate_self_independence(candidate: WindowCandidate, ma34) -> IndependenceDecision:
     """Judge whether a candidate already carries its own independence evidence."""
     center = _find_candidate_center(candidate, ma34)
     if center is None:
         turning_center = _find_latest_turning_center(candidate, ma34)
         if turning_center is not None:
-            return _decision_from_center(
-                "no_daily_center",
+            return check_turning_center_independence(
                 turning_center,
-                requires_new_extreme=False,
-                new_extreme_ok=None,
-                reason="candidate has no trend-class daily center; turning center is recorded only",
+                new_extreme_ok=_candidate_strictly_extends_after_center(candidate, turning_center),
+                reason_prefix="candidate has a turning center and no trend-class daily center",
             )
         return IndependenceDecision(
             ok=True,
@@ -370,12 +419,14 @@ def check_daily_segment_independence(
     if candidate_center is None:
         turning_center = _find_latest_turning_center(reverse, ma34) or _find_boundary_turning_center(primary, reverse, ma34)
         if turning_center is not None:
-            return _decision_from_center(
-                "no_daily_center",
+            turning_new_extreme_ok = (
+                _candidate_strictly_extends_after_center(reverse, turning_center)
+                or _reverse_strictly_breaks_primary_start(primary, reverse)
+            )
+            return check_turning_center_independence(
                 turning_center,
-                requires_new_extreme=False,
-                new_extreme_ok=None,
-                reason="candidate has no trend-class daily center; turning center is recorded only",
+                new_extreme_ok=turning_new_extreme_ok,
+                reason_prefix="reverse candidate has a turning center and no trend-class daily center",
             )
         return IndependenceDecision(
             ok=True,
@@ -562,16 +613,12 @@ def _can_chain_confirm(
     )
 
 
-def _is_open_swallow_chain_probe(reverse: WindowCandidate, segments: Sequence) -> bool:
-    return reverse.kind == "swallow" and reverse.end_offset < len(segments)
-
-
 def _reverse_selection_key(reverse: WindowCandidate, reverse_self: IndependenceDecision) -> tuple:
     """Prefer the most structural independent reverse before short special cases."""
     return (
         1 if reverse.kind == "regular" else 0,
         1 if reverse_self.center_kind == "trend_class" else 0,
-        1 if reverse_self.kind == "strict_new_extreme" else 0,
+        1 if reverse_self.kind in {"strict_new_extreme", "turning_new_extreme"} else 0,
         reverse.end_offset,
     )
 
@@ -669,9 +716,6 @@ def find_delayed_commit_decision(
                 if primary_self.ok:
                     commit_independence = primary_self
                 elif _can_chain_confirm(primary_self, reverse, reverse_self):
-                    if _is_open_swallow_chain_probe(reverse, segments):
-                        best_pending = primary.segments
-                        continue
                     commit_independence = _chain_independence(
                         primary_self,
                         reverse,

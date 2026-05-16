@@ -14,6 +14,7 @@ describe: 用 pyecharts (Apache ECharts) 实现摩尔缠论 K 线结构图。
 import os
 import ssl
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +36,7 @@ ECHARTS_ASSET_URLS = (
 from czsc.connectors import research
 from czsc.moore.analyze import MooreCZSC
 from czsc.moore.daily_segment.centers.maturity_event import build_shadow_b_daily_plan
+import czsc.moore.daily_segment.helpers.commit as daily_commit
 from czsc.py.enum import Direction, Mark
 
 NON_SAME_LINE_COLOR = "#D35400"
@@ -120,6 +122,34 @@ def _build_visible_tk_index_resolver(display_tks: list):
 def _ma(series: pd.Series, n: int) -> list:
     return [round(v, 3) if not pd.isna(v) else None
             for v in series.rolling(n).mean()]
+
+
+@contextmanager
+def _initial_daily_ma_relax(enabled: bool):
+    """Plot-only helper: allow the earliest daily candidate to start without MA gate."""
+    if not enabled:
+        yield
+        return
+
+    original_check = daily_commit.check_ma_cross_correlation
+    first_start_key = None
+
+    def patched_check(window, ma34, ma170, lag_segment=None):
+        nonlocal first_start_key
+        if window:
+            start_k = window[0].start_k
+            start_key = (start_k.k_index, start_k.dt, start_k.price, start_k.mark.value)
+            if first_start_key is None:
+                first_start_key = start_key
+            if start_key == first_start_key:
+                return True
+        return original_check(window, ma34, ma170, lag_segment=lag_segment)
+
+    daily_commit.check_ma_cross_correlation = patched_check
+    try:
+        yield
+    finally:
+        daily_commit.check_ma_cross_correlation = original_check
 
 
 def _dummy_line(dates: list, name: str, icon_color: str) -> Line:
@@ -749,7 +779,7 @@ def plot_moore_structure_echarts(
                 prefix = "BX"
                 reason = ",".join(getattr(event.owner_evidence, "invalid_reasons", ())[:2])
             else:
-                fill, border = "rgba(243, 156, 18, 0.10)", "#F39C12"
+                fill, border = "rgba(149, 165, 166, 0.12)", "#95A5A6"
                 prefix = "B"
                 reason = event.independence_kind or "center"
             owner_ok = 0 if owner_invalid else 1
@@ -1235,7 +1265,14 @@ def plot_moore_structure_echarts(
                 "向上转折确立", "向下转折确立"
             ];
             var legendGroupDaily = [
-                "日线级别线段", "日线级别线段(Pending)", "日线非同处理", "日线级别中枢"{shadow_daily_legend_js}
+                "日线级别线段",
+                "日线级别线段(Pending)",
+                "日线级别线段(Pending Open)",
+                "日线非同处理",
+                "日线级别中枢",
+                "日线级别中枢(Pending)",
+                "日线中枢 BADC 点",
+                "日线中枢 BADC 点(Pending)"{shadow_daily_legend_js}
             ];
             var legendGuard = false;
 
@@ -1342,6 +1379,7 @@ class AnalyzeTask:
     sdt: str
     edt: str
     desc: str = ""
+    allow_initial_daily_ma_relax: bool = False
 
 
 if __name__ == "__main__":
@@ -1365,7 +1403,7 @@ if __name__ == "__main__":
         AnalyzeTask("300311", sdt="20170115", edt="20210801", desc="任子行"),
         AnalyzeTask("603020", sdt="20150515", edt="20210801", desc="爱普股份"),
         AnalyzeTask("002772", sdt="20160114", edt="20210701", desc="众兴菌业"),
-        AnalyzeTask("603908", sdt="20170301", edt="20221001", desc="牧高笛"),
+        AnalyzeTask("603908", sdt="20170301", edt="20221001", desc="牧高笛", allow_initial_daily_ma_relax=True),
 
         # AnalyzeTask("002222", sdt="20220415", edt="20250201", desc="福晶科技"),
     ]
@@ -1380,14 +1418,15 @@ if __name__ == "__main__":
 
         replay_centers_after_macro_swallow = False
         enable_pre_round = True
-        engine = MooreCZSC(
-            bars,
-            ma34_cross_as_valid_gate=True,
-            ma34_cross_expand_one_k=False,
-            audit_link_rounds=3,
-            enable_pre_round=enable_pre_round,
-            replay_centers_after_macro_swallow=replay_centers_after_macro_swallow,
-        )
+        with _initial_daily_ma_relax(task.allow_initial_daily_ma_relax):
+            engine = MooreCZSC(
+                bars,
+                ma34_cross_as_valid_gate=True,
+                ma34_cross_expand_one_k=False,
+                audit_link_rounds=3,
+                enable_pre_round=enable_pre_round,
+                replay_centers_after_macro_swallow=replay_centers_after_macro_swallow,
+            )
         # logger.info(
         #     f"[配置] macro_audit=True | audit_link_rounds=3 | "
         #     f"ma34_cross_as_valid_gate=False | "
