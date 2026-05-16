@@ -43,8 +43,13 @@ class SegmentBuilderHelper:
             direction = Direction.Up if tk2.mark.name == "G" else Direction.Down
             seg = MooreSegment(symbol=tk1.symbol, start_k=tk1, end_k=tk2, direction=direction)
             seg.centers = []
+            seg_key = (tk1.cache.get("micro_id"), tk2.cache.get("micro_id"))
             for c in s.micro_centers:
                 if getattr(c, "is_ghost", False):
+                    continue
+                if c.owner_seg_key is not None:
+                    if c.owner_seg_key == seg_key:
+                        seg.centers.append(c)
                     continue
                 c_confirm_dt = c.confirm_k.dt if c.confirm_k else c.start_dt
                 if not c_confirm_dt:

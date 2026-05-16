@@ -238,6 +238,7 @@ class SegmentAnalyzer:
         self._center_engine  = CenterEngine(self.state)
         self._fractal_engine = MicroStructureEngine(self.state, self._trend_engine, self._center_engine)
         self._macro_engine   = MacroAuditEngine(self.state, self._fractal_engine, self._trend_engine)
+        self.state.cache["_settle_centers_by_endpoints"] = self._settle_centers_by_endpoints
 
         # 4. 历史状态推演：执行全量 update，物理化重建所有转折点与中枢
         for bar in bars:
@@ -304,6 +305,7 @@ class SegmentAnalyzer:
 
         # 4.2 事实仓维护 (ALWAYS 同步 micro_centers)
         self._sync_potential_to_micro_warehouse()
+        self._settle_centers_by_endpoints()
 
         # --- 5. 宏观同步与审计 (Stage 2) ---
         macro_changed = False
@@ -485,8 +487,7 @@ class SegmentAnalyzer:
     def _sync_potential_to_micro_warehouse(self):
         """维护微观事实仓：将运行态 potential_centers 同步到 micro_centers，并打上所有权标。"""
         s = self.state
-        current_mids = {tk.cache.get("micro_id") for tk in s.turning_ks if tk.cache.get("micro_id") is not None}
-        
+
         # 1. 增量导入
         for c in s.potential_centers:
             if c not in s.micro_centers:
@@ -494,11 +495,16 @@ class SegmentAnalyzer:
                 s.micro_centers.append(c)
 
         # 2. 补齐所有权标 (owner_seg_key)
+        self._assign_missing_center_owner_keys()
+
+    def _assign_missing_center_owner_keys(self):
+        """为缺少 owner 的微观中枢补齐当前线段端点主键。"""
+        s = self.state
         # 微观仓中枢的所有权始终基于当前微观线段划分。
         for c in s.micro_centers:
             if c.owner_seg_key is not None:
                 continue
-            
+
             # 判定中枢归属哪段微观线段
             c_confirm_dt = c.confirm_k.dt if c.confirm_k else c.start_dt
             for seg in s.segments:
@@ -508,6 +514,56 @@ class SegmentAnalyzer:
                     if ms_id is not None and me_id is not None:
                         c.owner_seg_key = (ms_id, me_id)
                     break
+
+    def _settle_centers_by_endpoints(self):
+        """按当前有效端点结算微观/宏观复用中枢，清理已被回滚分支留下的残留。"""
+        s = self.state
+        self._assign_missing_center_owner_keys()
+
+        valid_owner_keys = {
+            (seg.start_k.cache.get("micro_id"), seg.end_k.cache.get("micro_id"))
+            for seg in s.segments
+            if seg.start_k.cache.get("micro_id") is not None and seg.end_k.cache.get("micro_id") is not None
+        }
+        unresolved = {"wait_anchor_start", "wait_anchor_real", "ready_resolve"}
+        pending_owner_ids = set()
+        for node_id in list(s.pending_judgements):
+            node = s.judgement_nodes.get(node_id)
+            if not node or node.stage not in unresolved:
+                continue
+            for mid in (node.base_id, node.candidate_id, getattr(node, "c_candidate_id", None)):
+                if mid is not None:
+                    pending_owner_ids.add(mid)
+
+        invalid_center_ids = {
+            c.center_id
+            for c in s.micro_centers
+            if (
+                c.owner_seg_key is not None
+                and c.owner_seg_key not in valid_owner_keys
+                and not any(mid in pending_owner_ids for mid in c.owner_seg_key)
+            )
+        }
+        if not invalid_center_ids:
+            self._fractal_engine._update_segments()
+            return
+
+        s.micro_centers = [
+            c for c in s.micro_centers
+            if getattr(c, "center_id", None) not in invalid_center_ids
+        ]
+        s.potential_centers = [
+            c for c in s.potential_centers
+            if getattr(c, "center_id", None) not in invalid_center_ids
+        ]
+        s.macro_centers = [
+            c for c in s.macro_centers
+            if not (
+                getattr(c, "center_id", None) in invalid_center_ids
+                and getattr(c, "source_layer", "") != "macro"
+            )
+        ]
+        self._fractal_engine._update_segments()
 
     def _update_macro_segments(self):
         """根据宏观顶底重建宏观线段，并挂载现有中枢快照。"""

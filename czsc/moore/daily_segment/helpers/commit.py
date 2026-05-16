@@ -550,6 +550,54 @@ def _chain_independence(
     )
 
 
+def _can_chain_confirm(
+    primary_self: IndependenceDecision,
+    reverse: WindowCandidate,
+    reverse_self: IndependenceDecision,
+) -> bool:
+    return (
+        not primary_self.ok
+        and primary_self.center_kind == "trend_class"
+        and reverse_self.ok
+    )
+
+
+def _is_open_swallow_chain_probe(reverse: WindowCandidate, segments: Sequence) -> bool:
+    return reverse.kind == "swallow" and reverse.end_offset < len(segments)
+
+
+def _reverse_selection_key(reverse: WindowCandidate, reverse_self: IndependenceDecision) -> tuple:
+    """Prefer the most structural independent reverse before short special cases."""
+    return (
+        1 if reverse.kind == "regular" else 0,
+        1 if reverse_self.center_kind == "trend_class" else 0,
+        1 if reverse_self.kind == "strict_new_extreme" else 0,
+        reverse.end_offset,
+    )
+
+
+def _iter_reverse_independence_candidates(
+    reverse_candidates: Sequence[WindowCandidate],
+    ma34,
+) -> list[tuple[WindowCandidate, IndependenceDecision]]:
+    pairs = [(reverse, check_candidate_self_independence(reverse, ma34)) for reverse in reverse_candidates]
+    independent = [(reverse, reverse_self) for reverse, reverse_self in pairs if reverse_self.ok]
+    if not independent:
+        return pairs
+    return sorted(independent, key=lambda item: _reverse_selection_key(item[0], item[1]), reverse=True)
+
+
+def _select_mature_commit_decision(decisions: Sequence[CommitDecision]) -> Optional[CommitDecision]:
+    chain_decisions = [
+        decision
+        for decision in decisions
+        if decision.independence is not None and decision.independence.kind == "same_trend_chain"
+    ]
+    if chain_decisions:
+        return max(chain_decisions, key=lambda decision: (decision.end_offset, decision.next_tail_offset))
+    return decisions[0] if decisions else None
+
+
 def _cold_start_relax_allowed(primary: WindowCandidate, completed_segments: Sequence) -> bool:
     return (
         ENABLE_COLD_START_RELAX_PIVOT_BREAK
@@ -612,34 +660,18 @@ def find_delayed_commit_decision(
                 best_pending = primary.segments
                 continue
 
-            for reverse in reverse_candidates:
+            for reverse, reverse_self in _iter_reverse_independence_candidates(reverse_candidates, ma34):
                 if reverse.kind == "swallow" and len(primary.segments) <= 3:
                     best_pending = primary.segments
                     continue
-                independence = check_daily_segment_independence(
-                    primary,
-                    reverse,
-                    segments,
-                    ma34,
-                    ma170,
-                    completed_segments,
-                )
-                if not independence.ok:
-                    if not _cold_start_relax_allowed(primary, completed_segments):
-                        best_pending = primary.segments
-                        continue
-                    independence = IndependenceDecision(
-                        ok=True,
-                        kind="cold_start_swallow_primary_relax",
-                        reason="cold start primary swallow keeps legacy relax behavior",
-                    )
-
-                reverse_self = check_candidate_self_independence(reverse, ma34)
                 extra_segments = ()
                 tail_offset = primary.end_offset
                 if primary_self.ok:
                     commit_independence = primary_self
-                elif reverse_self.ok:
+                elif _can_chain_confirm(primary_self, reverse, reverse_self):
+                    if _is_open_swallow_chain_probe(reverse, segments):
+                        best_pending = primary.segments
+                        continue
                     commit_independence = _chain_independence(
                         primary_self,
                         reverse,
@@ -647,11 +679,32 @@ def find_delayed_commit_decision(
                     )
                     extra_segments = ((reverse.segments, reverse_self),)
                     tail_offset = reverse.end_offset
+                elif primary_self.center_kind == "trend_class":
+                    best_pending = primary.segments
+                    continue
                 else:
+                    independence = check_daily_segment_independence(
+                        primary,
+                        reverse,
+                        segments,
+                        ma34,
+                        ma170,
+                        completed_segments,
+                    )
+                    if not independence.ok:
+                        if not _cold_start_relax_allowed(primary, completed_segments):
+                            best_pending = primary.segments
+                            continue
+                        independence = IndependenceDecision(
+                            ok=True,
+                            kind="cold_start_swallow_primary_relax",
+                            reason="cold start primary swallow keeps legacy relax behavior",
+                        )
                     commit_independence = independence
                 if (
                     allow_cold_start
                     and not _has_maturity_barrier(commit_independence)
+                    and commit_independence.kind != "same_trend_chain"
                     and not _reverse_strictly_breaks_primary_start(primary, reverse)
                 ):
                     best_pending = reverse.segments
@@ -673,7 +726,6 @@ def find_delayed_commit_decision(
                     mature_decisions.append(possible_decision)
                 fallback_decision = possible_decision
                 best_pending = reverse.segments
-                break
 
         selected = None
         if swallow_fallback and (
@@ -681,10 +733,12 @@ def find_delayed_commit_decision(
         ):
             selected = swallow_fallback
         elif mature_decisions:
-            selected = mature_decisions[0]
+            selected = _select_mature_commit_decision(mature_decisions)
         elif fallback_decision:
             selected = fallback_decision
         if selected:
+            if allow_cold_start and start_offset == 0 and _has_maturity_barrier(selected.independence):
+                return selected
             if allow_cold_start and start_offset == 0:
                 cold_start_fallback = selected
             else:

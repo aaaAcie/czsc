@@ -38,6 +38,7 @@ class MicroStructureEngine:
             has_center_between=lambda a, b: self._segment_builder.has_center_between(a, b),
             reset_locks=lambda: self._segment_builder.reset_locks(),
             update_segments=lambda: self._segment_builder.update_segments(),
+            settle_centers_by_endpoints=lambda: self.s.cache.get("_settle_centers_by_endpoints", lambda: None)(),
         )
         self._candidate_commit = CandidateCommitHelper(
             state,

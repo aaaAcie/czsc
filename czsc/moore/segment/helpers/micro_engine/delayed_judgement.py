@@ -5,11 +5,12 @@ from ....objects import PendingJudgementNode
 
 
 class DelayedJudgementHelper:
-    def __init__(self, state, has_center_between, reset_locks, update_segments):
+    def __init__(self, state, has_center_between, reset_locks, update_segments, settle_centers_by_endpoints):
         self.s = state
         self._has_center_between = has_center_between
         self._reset_locks = reset_locks
         self._update_segments = update_segments
+        self._settle_centers_by_endpoints = settle_centers_by_endpoints
 
     def _find_tk_in_turnings(self, micro_id: int):
         for i, tk in enumerate(self.s.turning_ks):
@@ -169,6 +170,7 @@ class DelayedJudgementHelper:
         if changed:
             self._reset_locks()
             self._update_segments()
+            self._settle_centers_by_endpoints()
 
     def _apply_rollback_to_base(self, node: PendingJudgementNode):
         cand_idx, _ = self._find_tk_in_turnings(node.candidate_id)

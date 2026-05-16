@@ -82,3 +82,32 @@ def test_regression_center_5k_leavek_300339():
         and c.method == "5K重叠"
     ]
     assert hit, "expected 2019-02-20/02-21 center to include leave-K date 2019-02-25"
+
+
+def test_603908_delayed_rollback_settles_centers_by_endpoint_owner():
+    bars = _safe_get_bars("603908", "20170501", "20210701")
+    engine = MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+    )
+
+    micro_ids = {c.center_id for c in engine.micro_centers}
+    macro_ids = {c.center_id for c in engine.macro_centers}
+    assert 77 in micro_ids
+    assert 78 not in micro_ids
+    assert 79 not in micro_ids
+    assert 78 not in macro_ids
+    assert 79 not in macro_ids
+
+    target = next(c for c in engine.micro_centers if c.center_id == 77)
+    valid_owner_keys = {
+        (seg.start_k.cache.get("micro_id"), seg.end_k.cache.get("micro_id"))
+        for seg in engine.micro_segments
+        if seg.start_k.cache.get("micro_id") is not None and seg.end_k.cache.get("micro_id") is not None
+    }
+    assert target.owner_seg_key == (38, 39)
+    assert target.owner_seg_key in valid_owner_keys
