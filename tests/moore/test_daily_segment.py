@@ -893,7 +893,7 @@ def test_delayed_confirmation_keeps_best_endpoint_until_reverse_daily_candidate_
 @pytest.mark.skip(reason="旧日线独立/中枢基线待按新 primary/center 语义重算")
 def test_600707_daily_segments_match_expected_long_trend_and_swallow():
     engine = make_600707_engine()
-    label, _ = make_visible_labelers(engine)
+    label, owner_label = make_visible_labelers(engine)
 
     daily_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_segments]
 
@@ -979,7 +979,7 @@ def test_regression_002346_daily_window_rejects_non_extreme_end():
 @pytest.mark.skip(reason="旧日线独立/中枢基线待按新 primary/center 语义重算")
 def test_600707_daily_centers_use_completed_source_and_owner_chain():
     engine = make_600707_engine()
-    label, _ = make_visible_labelers(engine)
+    label, owner_label = make_visible_labelers(engine)
 
     centers = engine.daily_centers
     assert centers
@@ -1101,7 +1101,7 @@ def test_regression_603178_source_non_same_proposal_builds_v28_to_v35_when_regio
 @pytest.mark.skip(reason="旧日线独立基线待按新 primary/center 语义重算")
 def test_regression_603178_unfrozen_tail_extends_and_pending_stays_open_ended():
     engine = make_603178_engine()
-    label, _ = make_visible_labelers(engine)
+    label, owner_label = make_visible_labelers(engine)
 
     daily_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_segments]
     assert daily_pairs == [("mV2T", "mV25B")]
@@ -1531,7 +1531,7 @@ def test_regression_603908_reverse_confirmed_chain_independence(monkeypatch):
         replay_centers_after_macro_swallow=False,
         rebuild_daily_centers_after_segment_change=True,
     )
-    label, _ = make_visible_labelers(engine)
+    label, owner_label = make_visible_labelers(engine)
 
     daily_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_segments]
     assert daily_pairs[:6] == [
@@ -1543,7 +1543,7 @@ def test_regression_603908_reverse_confirmed_chain_independence(monkeypatch):
         ("mV25B", "mV38T"),
     ]
 
-    first, first_confirm, third, third_confirm, _, mature_confirm = engine.daily_segments[:6]
+    first, first_confirm, third, third_confirm, turning_confirm, mature_confirm = engine.daily_segments[:6]
     assert first.cache["independence_kind"] == "same_trend_chain"
     assert first.cache["chain_confirm_kind"] == "no_daily_center"
     assert first.cache["chain_confirmed_by"][0] == first_confirm.end_seg.end_k.k_index
@@ -1553,6 +1553,10 @@ def test_regression_603908_reverse_confirmed_chain_independence(monkeypatch):
     assert third.cache["chain_confirmed_by"][0] == third_confirm.end_seg.end_k.k_index
     assert third_confirm.cache["from_macro_swallow"] is True
     assert third_confirm.cache.get("extended_from_unfrozen_end") is None
+    assert turning_confirm.cache["independence_kind"] == "turning_third_buy_sell"
+    assert turning_confirm.cache["center_kind"] == "turning"
+    assert tuple(owner_label(key) for key in turning_confirm.cache["owner_span"]) == ("mV22T", "mV25B")
+    assert tuple(owner_label(key) for key in turning_confirm.cache["evidence_span"]) == ("mV22T", "mV26T")
     assert mature_confirm.cache["independence_kind"] == "strict_new_extreme"
     assert mature_confirm.cache.get("extended_from_unfrozen_end") is None
 

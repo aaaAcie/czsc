@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from typing import Callable, List, Optional, Sequence
 
 from czsc.py.enum import Direction
 
 from ..centers.algo import find_center
+from ..centers.window_event import (
+    CenterWindowEvent,
+    find_latest_center_window_event,
+    segment_span_key,
+    strictly_extends_after_event,
+)
 from .continuity import check_daily_segment_continuity
 from .extension import is_extension_same_trend, is_opposite_direction
 from .ma_cross import check_ma_cross_correlation
@@ -30,6 +36,9 @@ class WindowCandidate:
     @property
     def direction(self):
         return self.segments[0].direction
+
+
+CenterEvidenceBuilder = Callable[["WindowCandidate", Sequence], Sequence]
 
 
 @dataclass(frozen=True)
@@ -63,6 +72,11 @@ class IndependenceDecision:
     new_extreme_price: Optional[float] = None
     chain_confirmed_by: Optional[tuple] = None
     chain_confirm_kind: str = ""
+    owner_span: Optional[tuple] = None
+    evidence_span: Optional[tuple] = None
+    maturity_span: Optional[tuple] = None
+    owner_chain_valid: Optional[bool] = None
+    invalid_reasons: tuple[str, ...] = ()
     reason: str = ""
 
 
@@ -217,32 +231,65 @@ def _reverse_strictly_breaks_primary_start(primary: WindowCandidate, reverse: Wi
     return False
 
 
+def _candidate_evidence_segments(
+    candidate: WindowCandidate,
+    all_segments: Optional[Sequence] = None,
+    evidence_segments: Optional[Sequence] = None,
+) -> list:
+    if evidence_segments is not None:
+        return list(evidence_segments)
+    if all_segments is None or candidate.start_offset < 0:
+        return list(candidate.segments)
+    return list(all_segments[candidate.start_offset:min(len(all_segments), candidate.end_offset + 1)])
+
+
+def _find_candidate_center_event(
+    candidate: WindowCandidate,
+    ma34,
+    all_segments: Optional[Sequence] = None,
+) -> Optional[CenterWindowEvent]:
+    return _find_latest_candidate_center_event(candidate, ma34, all_segments=all_segments, center_kind="trend_class")
+
+
+def _find_latest_turning_center_event(
+    candidate: WindowCandidate,
+    ma34,
+    all_segments: Optional[Sequence] = None,
+    evidence_segments: Optional[Sequence] = None,
+) -> Optional[CenterWindowEvent]:
+    return _find_latest_candidate_center_event(
+        candidate,
+        ma34,
+        all_segments=all_segments,
+        evidence_segments=evidence_segments,
+        center_kind="turning",
+    )
+
+
+def _find_latest_candidate_center_event(
+    candidate: WindowCandidate,
+    ma34,
+    all_segments: Optional[Sequence] = None,
+    evidence_segments: Optional[Sequence] = None,
+    center_kind: Optional[str] = None,
+) -> Optional[CenterWindowEvent]:
+    return find_latest_center_window_event(
+        candidate.segments,
+        _candidate_evidence_segments(candidate, all_segments, evidence_segments=evidence_segments),
+        ma34,
+        candidate.direction,
+        center_kind=center_kind,
+    )
+
+
 def _find_candidate_center(candidate: WindowCandidate, ma34) -> Optional[dict]:
-    return _find_latest_candidate_center(candidate, ma34, center_kind="trend_class")
+    event = _find_candidate_center_event(candidate, ma34)
+    return event.raw.center if event else None
 
 
 def _find_latest_turning_center(candidate: WindowCandidate, ma34) -> Optional[dict]:
-    return _find_latest_candidate_center(candidate, ma34, center_kind="turning")
-
-
-def _find_latest_candidate_center(
-    candidate: WindowCandidate,
-    ma34,
-    center_kind: Optional[str] = None,
-) -> Optional[dict]:
-    centers = []
-    for local_start in range(max(1, len(candidate.segments) - 2)):
-        if candidate.segments[local_start].direction != candidate.direction:
-            continue
-        center = find_center(candidate.segments[local_start:], ma34, trend_direction=candidate.direction)
-        if center is not None:
-            if center_kind is not None and center.get("center_kind") != center_kind:
-                continue
-            center_segments = center.get("segments") or []
-            centers.append((local_start + len(center_segments), local_start, center))
-    if not centers:
-        return None
-    return max(centers, key=lambda item: (item[0], item[1]))[2]
+    event = _find_latest_turning_center_event(candidate, ma34)
+    return event.raw.center if event else None
 
 
 def _tk_key(tk) -> tuple:
@@ -268,6 +315,10 @@ def _candidate_strictly_extends_after_center(candidate: WindowCandidate, center:
     return False
 
 
+def _candidate_strictly_extends_after_center_event(candidate: WindowCandidate, event: CenterWindowEvent) -> bool:
+    return strictly_extends_after_event(candidate.segments, event)
+
+
 def _turning_center_has_third_buy_sell(center: dict) -> bool:
     return (
         center.get("center_kind") == "turning"
@@ -279,7 +330,7 @@ def _turning_center_has_third_buy_sell(center: dict) -> bool:
 
 
 def check_turning_center_independence(
-    center: dict,
+    center_event: CenterWindowEvent,
     *,
     new_extreme_ok: bool,
     reason_prefix: str,
@@ -290,18 +341,19 @@ def check_turning_center_independence(
     strict new extreme.  A strict new high / low is still recorded as a stronger
     turning-specific independence reason when it is present.
     """
+    center = center_event.raw.center
     if new_extreme_ok:
-        return _decision_from_center(
+        return _decision_from_center_event(
             "turning_new_extreme",
-            center,
+            center_event,
             requires_new_extreme=False,
             new_extreme_ok=True,
             reason=f"{reason_prefix}; turning center is followed by a strict new extreme",
         )
     if _turning_center_has_third_buy_sell(center):
-        return _decision_from_center(
+        return _decision_from_center_event(
             "turning_third_buy_sell",
-            center,
+            center_event,
             requires_new_extreme=False,
             new_extreme_ok=False,
             reason=f"{reason_prefix}; turning center confirms independence without requiring a later strict new extreme",
@@ -315,19 +367,33 @@ def check_turning_center_independence(
         center_high=center.get("high"),
         requires_new_extreme=False,
         new_extreme_ok=False,
+        owner_span=center_event.owner_span,
+        evidence_span=center_event.evidence_span,
+        owner_chain_valid=center_event.owner_chain_valid,
+        invalid_reasons=center_event.invalid_reasons,
         reason=f"{reason_prefix}; turning center has neither strict new extreme nor confirmed third buy/sell",
     )
 
 
-def check_candidate_self_independence(candidate: WindowCandidate, ma34) -> IndependenceDecision:
+def check_candidate_self_independence(
+    candidate: WindowCandidate,
+    ma34,
+    all_segments: Optional[Sequence] = None,
+    boundary_evidence_segments: Optional[Sequence] = None,
+) -> IndependenceDecision:
     """Judge whether a candidate already carries its own independence evidence."""
-    center = _find_candidate_center(candidate, ma34)
-    if center is None:
-        turning_center = _find_latest_turning_center(candidate, ma34)
-        if turning_center is not None:
+    center_event = _find_candidate_center_event(candidate, ma34, all_segments=all_segments)
+    if center_event is None or not center_event.valid:
+        turning_event = _find_latest_turning_center_event(
+            candidate,
+            ma34,
+            all_segments=all_segments,
+            evidence_segments=boundary_evidence_segments,
+        )
+        if turning_event is not None and turning_event.valid:
             return check_turning_center_independence(
-                turning_center,
-                new_extreme_ok=_candidate_strictly_extends_after_center(candidate, turning_center),
+                turning_event,
+                new_extreme_ok=_candidate_strictly_extends_after_center_event(candidate, turning_event),
                 reason_prefix="candidate has a turning center and no trend-class daily center",
             )
         return IndependenceDecision(
@@ -336,14 +402,16 @@ def check_candidate_self_independence(candidate: WindowCandidate, ma34) -> Indep
             reason="candidate itself is a valid daily segment and has no trend-class daily center",
         )
 
-    center_kind = center.get("center_kind", "")
-    new_extreme_ok = _candidate_strictly_extends_after_center(candidate, center)
+    center = center_event.raw.center
+    center_kind = center_event.center_kind
+    new_extreme_ok = _candidate_strictly_extends_after_center_event(candidate, center_event)
     if center_kind == "trend_class" and new_extreme_ok:
-        return _decision_from_center(
+        return _decision_from_center_event(
             "strict_new_extreme",
-            center,
+            center_event,
             requires_new_extreme=True,
             new_extreme_ok=True,
+            maturity_span=segment_span_key(candidate.segments),
             reason="candidate trend-class center is followed by a strict new extreme",
         )
 
@@ -356,6 +424,10 @@ def check_candidate_self_independence(candidate: WindowCandidate, ma34) -> Indep
             center_high=center.get("high"),
             requires_new_extreme=True,
             new_extreme_ok=False,
+            owner_span=center_event.owner_span,
+            evidence_span=center_event.evidence_span,
+            owner_chain_valid=center_event.owner_chain_valid,
+            invalid_reasons=center_event.invalid_reasons,
             reason="trend-class center has not produced a later strict new extreme inside candidate",
         )
 
@@ -379,6 +451,18 @@ def _find_boundary_turning_center(primary: WindowCandidate, reverse: WindowCandi
     return None
 
 
+def _find_boundary_turning_event(primary: WindowCandidate, reverse: WindowCandidate, ma34) -> Optional[CenterWindowEvent]:
+    if not primary.segments or not reverse.segments:
+        return None
+    return find_latest_center_window_event(
+        primary.segments,
+        [*primary.segments, reverse.segments[0]],
+        ma34,
+        primary.direction,
+        center_kind="turning",
+    )
+
+
 def _decision_from_center(kind: str, center: dict, **kwargs) -> IndependenceDecision:
     return IndependenceDecision(
         ok=True,
@@ -386,6 +470,21 @@ def _decision_from_center(kind: str, center: dict, **kwargs) -> IndependenceDeci
         center_kind=center.get("center_kind", ""),
         center_low=center.get("low"),
         center_high=center.get("high"),
+        **kwargs,
+    )
+
+
+def _decision_from_center_event(kind: str, event: CenterWindowEvent, **kwargs) -> IndependenceDecision:
+    return IndependenceDecision(
+        ok=True,
+        kind=kind,
+        center_kind=event.center_kind,
+        center_low=event.low,
+        center_high=event.high,
+        owner_span=event.owner_span,
+        evidence_span=event.evidence_span,
+        owner_chain_valid=event.owner_chain_valid,
+        invalid_reasons=event.invalid_reasons,
         **kwargs,
     )
 
@@ -413,18 +512,21 @@ def check_daily_segment_independence(
                 reason="macro swallow segment can be promoted as one daily segment",
             )
 
-    candidate_center = _find_candidate_center(reverse, ma34)
+    candidate_center_event = _find_candidate_center_event(reverse, ma34, all_segments=segments)
     new_extreme_ok = _reverse_strictly_breaks_primary_start(primary, reverse)
 
-    if candidate_center is None:
-        turning_center = _find_latest_turning_center(reverse, ma34) or _find_boundary_turning_center(primary, reverse, ma34)
-        if turning_center is not None:
+    if candidate_center_event is None or not candidate_center_event.valid:
+        turning_event = (
+            _find_latest_turning_center_event(reverse, ma34, all_segments=segments)
+            or _find_boundary_turning_event(primary, reverse, ma34)
+        )
+        if turning_event is not None and turning_event.valid:
             turning_new_extreme_ok = (
-                _candidate_strictly_extends_after_center(reverse, turning_center)
+                _candidate_strictly_extends_after_center_event(reverse, turning_event)
                 or _reverse_strictly_breaks_primary_start(primary, reverse)
             )
             return check_turning_center_independence(
-                turning_center,
+                turning_event,
                 new_extreme_ok=turning_new_extreme_ok,
                 reason_prefix="reverse candidate has a turning center and no trend-class daily center",
             )
@@ -434,13 +536,15 @@ def check_daily_segment_independence(
             reason="candidate itself is a valid daily segment and has no trend-class daily center",
         )
 
-    center_kind = candidate_center.get("center_kind", "")
+    candidate_center = candidate_center_event.raw.center
+    center_kind = candidate_center_event.center_kind
     if new_extreme_ok:
-        return _decision_from_center(
+        return _decision_from_center_event(
             "strict_new_extreme",
-            candidate_center,
+            candidate_center_event,
             requires_new_extreme=True,
             new_extreme_ok=True,
+            maturity_span=segment_span_key(reverse.segments),
             reason="reverse candidate strictly breaks primary start extreme",
         )
 
@@ -453,6 +557,10 @@ def check_daily_segment_independence(
             center_high=candidate_center.get("high"),
             requires_new_extreme=True,
             new_extreme_ok=False,
+            owner_span=candidate_center_event.owner_span,
+            evidence_span=candidate_center_event.evidence_span,
+            owner_chain_valid=candidate_center_event.owner_chain_valid,
+            invalid_reasons=candidate_center_event.invalid_reasons,
             reason="trend-class center needs third buy/sell plus strict new extreme",
         )
 
@@ -623,11 +731,94 @@ def _reverse_selection_key(reverse: WindowCandidate, reverse_self: IndependenceD
     )
 
 
+def _is_structural_independent(independence: IndependenceDecision) -> bool:
+    return independence.ok and (
+        independence.center_kind in {"trend_class", "turning"}
+        or independence.kind in {
+            "same_trend_chain",
+            "strict_new_extreme",
+            "turning_new_extreme",
+            "turning_third_buy_sell",
+            "swallow_one_segment",
+        }
+    )
+
+
+def _candidate_self_with_one_step_chain(
+    candidate: WindowCandidate,
+    candidate_self: IndependenceDecision,
+    segments: Sequence,
+    ma34,
+    ma170,
+    completed_segments: Sequence,
+    center_evidence_builder: Optional[CenterEvidenceBuilder] = None,
+) -> IndependenceDecision:
+    if candidate_self.ok or candidate_self.center_kind != "trend_class":
+        return candidate_self
+
+    next_reverses = find_reverse_confirmation_candidates(
+        segments,
+        candidate.end_offset,
+        candidate.direction,
+        ma34,
+        ma170,
+        completed_segments,
+    )
+    if not next_reverses:
+        return candidate_self
+
+    pairs = []
+    for next_reverse in next_reverses:
+        next_self = check_candidate_self_independence(
+            next_reverse,
+            ma34,
+            all_segments=segments,
+            boundary_evidence_segments=(
+                center_evidence_builder(next_reverse, segments)
+                if center_evidence_builder
+                else None
+            ),
+        )
+        if next_self.ok:
+            pairs.append((next_reverse, next_self))
+    if not pairs:
+        return candidate_self
+
+    next_reverse, next_self = sorted(pairs, key=lambda item: _reverse_selection_key(item[0], item[1]), reverse=True)[0]
+    return _chain_independence(candidate_self, next_reverse, next_self)
+
+
 def _iter_reverse_independence_candidates(
     reverse_candidates: Sequence[WindowCandidate],
     ma34,
+    all_segments: Optional[Sequence] = None,
+    ma170=None,
+    completed_segments: Sequence = (),
+    center_evidence_builder: Optional[CenterEvidenceBuilder] = None,
 ) -> list[tuple[WindowCandidate, IndependenceDecision]]:
-    pairs = [(reverse, check_candidate_self_independence(reverse, ma34)) for reverse in reverse_candidates]
+    pairs = []
+    for reverse in reverse_candidates:
+        reverse_self = check_candidate_self_independence(
+            reverse,
+            ma34,
+            all_segments=all_segments,
+            boundary_evidence_segments=(
+                center_evidence_builder(reverse, all_segments)
+                if center_evidence_builder and all_segments is not None
+                else None
+            ),
+        )
+        if all_segments is not None and ma170 is not None:
+            reverse_self = _candidate_self_with_one_step_chain(
+                reverse,
+                reverse_self,
+                all_segments,
+                ma34,
+                ma170,
+                completed_segments,
+                center_evidence_builder=center_evidence_builder,
+            )
+        pairs.append((reverse, reverse_self))
     independent = [(reverse, reverse_self) for reverse, reverse_self in pairs if reverse_self.ok]
     if not independent:
         return pairs
@@ -661,6 +852,7 @@ def find_delayed_commit_decision(
     ma170,
     continuity_broken: bool = False,
     allow_cold_start: bool = False,
+    center_evidence_builder: Optional[CenterEvidenceBuilder] = None,
 ) -> Optional[CommitDecision]:
     if continuity_broken or len(segments) < 3:
         return None
@@ -689,12 +881,22 @@ def find_delayed_commit_decision(
 
         swallow_fallback: Optional[CommitDecision] = None
         mature_decisions: list[CommitDecision] = []
+        reverse_freeze_decisions: list[CommitDecision] = []
         fallback_decision: Optional[CommitDecision] = None
         for primary in _iter_terminal_candidates(primary_candidates, segments):
             if primary.kind == "swallow":
                 best_pending = primary.segments
                 continue
-            primary_self = check_candidate_self_independence(primary, ma34)
+            primary_self = check_candidate_self_independence(
+                primary,
+                ma34,
+                all_segments=segments,
+                boundary_evidence_segments=(
+                    center_evidence_builder(primary, segments)
+                    if center_evidence_builder
+                    else None
+                ),
+            )
             reverse_candidates = find_reverse_confirmation_candidates(
                 segments,
                 primary.end_offset,
@@ -707,7 +909,14 @@ def find_delayed_commit_decision(
                 best_pending = primary.segments
                 continue
 
-            for reverse, reverse_self in _iter_reverse_independence_candidates(reverse_candidates, ma34):
+            for reverse, reverse_self in _iter_reverse_independence_candidates(
+                reverse_candidates,
+                ma34,
+                all_segments=segments,
+                ma170=ma170,
+                completed_segments=completed_segments,
+                center_evidence_builder=center_evidence_builder,
+            ):
                 if reverse.kind == "swallow" and len(primary.segments) <= 3:
                     best_pending = primary.segments
                     continue
@@ -768,6 +977,8 @@ def find_delayed_commit_decision(
 
                 if _has_maturity_barrier(commit_independence):
                     mature_decisions.append(possible_decision)
+                elif primary_self.ok and _is_structural_independent(reverse_self):
+                    reverse_freeze_decisions.append(possible_decision)
                 fallback_decision = possible_decision
                 best_pending = reverse.segments
 
@@ -776,6 +987,8 @@ def find_delayed_commit_decision(
             fallback_decision is None or swallow_fallback.end_offset > fallback_decision.end_offset
         ):
             selected = swallow_fallback
+        elif reverse_freeze_decisions:
+            selected = reverse_freeze_decisions[0]
         elif mature_decisions:
             selected = _select_mature_commit_decision(mature_decisions)
         elif fallback_decision:

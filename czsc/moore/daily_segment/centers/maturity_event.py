@@ -15,6 +15,7 @@ from czsc.py.enum import Direction, Mark
 from ..objects import DailySegment
 from ..utils import seg_end_price, seg_start_price
 from .algo import find_center
+from .window_event import RawCenterCandidate, build_center_window_event
 from ..helpers.commit import (
     WindowCandidate,
     candidates_from_start,
@@ -51,6 +52,9 @@ class CenterMaturityEvent:
     new_extreme_ok: Optional[bool] = None
     maturity_end_offset: Optional[int] = None
     maturity_end_segment: object = None
+    owner_span: Optional[tuple] = None
+    evidence_span: Optional[tuple] = None
+    window_event: object = None
     third_entry_index: Optional[int] = None
     invalid_reasons: tuple[str, ...] = ()
 
@@ -236,7 +240,21 @@ def _event_from_center(
     source_segments: Sequence,
     trend_direction: Direction,
 ) -> CenterMaturityEvent:
-    owner_evidence = _owner_evidence_for_center(center, source_segments, trend_direction)
+    window_event = build_center_window_event(
+        RawCenterCandidate(
+            center=center,
+            source_segments=tuple(source_segments),
+            trend_direction=trend_direction,
+        )
+    )
+    owner_evidence = CenterOwnerEvidence(
+        point_owners=window_event.point_owners,
+        owner_chain=list(window_event.owner_chain),
+        raw_owner_chain=list(window_event.owner_chain),
+        owner_chain_valid=window_event.owner_chain_valid,
+        owner_chain_duplicate="duplicate_owner" in window_event.invalid_reasons,
+        invalid_reasons=window_event.invalid_reasons,
+    )
     center_kind = center.get("center_kind", "")
     overlap_type = center.get("overlap_type")
     center_role = "turning" if overlap_type == 0 or center_kind == "turning" else "trend"
@@ -254,7 +272,7 @@ def _event_from_center(
         new_extreme_ok = None
         maturity_end_offset = None
         maturity_end_segment = None
-        independence_kind = "turning_center"
+        independence_kind = "turning_third_buy_sell"
     elif center_kind == "trend_class" and overlap_type in {1, 3}:
         requires_new_extreme = True
         if owner_evidence.owner_chain_valid:
@@ -289,6 +307,9 @@ def _event_from_center(
         new_extreme_ok=new_extreme_ok,
         maturity_end_offset=maturity_end_offset,
         maturity_end_segment=maturity_end_segment,
+        owner_span=window_event.owner_span,
+        evidence_span=window_event.evidence_span,
+        window_event=window_event,
         third_entry_index=_third_segment_entry_index(center, ma34),
         invalid_reasons=tuple(dict.fromkeys(invalid_reasons)),
     )
@@ -307,27 +328,16 @@ def build_candidate_event_trace(
 
     if center is None:
         turning_center = _find_latest_candidate_center(candidate, ma34, trend_direction, center_role="turning")
-        turning_owner_evidence = (
-            _owner_evidence_for_center(turning_center, source_segments, trend_direction)
+        event = (
+            _event_from_center(candidate, turning_center, ma34, source_segments, trend_direction)
             if turning_center
-            else CenterOwnerEvidence()
-        )
-        if turning_owner_evidence.invalid_reasons:
-            turning_center = None
-            turning_owner_evidence = CenterOwnerEvidence()
-        event = CenterMaturityEvent(
-            candidate=candidate,
-            center=turning_center,
-            center_kind=turning_center.get("center_kind", "none") if turning_center else "none",
-            center_role="turning" if turning_center else "none",
-            overlap_type=turning_center.get("overlap_type") if turning_center else None,
-            status=turning_center.get("status", "") if turning_center else "",
-            high=turning_center.get("high") if turning_center else None,
-            low=turning_center.get("low") if turning_center else None,
-            points=turning_center.get("points") or {} if turning_center else {},
-            owner_evidence=turning_owner_evidence,
-            independence_kind="no_daily_center",
-            has_maturity_barrier=False,
+            else CenterMaturityEvent(
+                candidate=candidate,
+                center_kind="none",
+                center_role="none",
+                independence_kind="no_daily_center",
+                has_maturity_barrier=False,
+            )
         )
         reverse_events = tuple(
             build_candidate_event_trace(reverse, ma34, source_segments=source_segments, trend_direction=reverse.direction).event

@@ -280,6 +280,22 @@ class DailySegmentAnalyzer:
                 source_segments.append(seg)
         return sorted(source_segments, key=lambda seg: (seg_start_index(seg), seg_end_index(seg)))
 
+    def _candidate_center_evidence_segments(
+        self,
+        candidate: WindowCandidate,
+        all_segments: Sequence[MooreSegment],
+    ) -> List[MooreSegment]:
+        source_segments: List[MooreSegment] = []
+        raw_window = all_segments[candidate.start_offset:min(len(all_segments), candidate.end_offset + 1)]
+        for seg in raw_window:
+            if self._is_excluded_from_daily_center(seg):
+                continue
+            if seg.cache.get("is_macro_swallow"):
+                source_segments.extend(self._expand_daily_swallow_segment(seg))
+            else:
+                source_segments.append(seg)
+        return sorted(source_segments, key=lambda seg: (seg_start_index(seg), seg_end_index(seg)))
+
     @staticmethod
     def _center_segment_keys(center: DailySegmentCenter) -> set:
         return {(seg_start_index(seg), seg_end_index(seg)) for seg in center.segments}
@@ -1208,6 +1224,11 @@ class DailySegmentAnalyzer:
             "center_high": independence.center_high,
             "requires_new_extreme": independence.requires_new_extreme,
             "new_extreme_ok": independence.new_extreme_ok,
+            "owner_span": independence.owner_span,
+            "evidence_span": independence.evidence_span,
+            "maturity_span": independence.maturity_span,
+            "owner_chain_valid": independence.owner_chain_valid,
+            "invalid_reasons": independence.invalid_reasons,
         }
         if independence.third_point_index is not None:
             cache["third_point_index"] = independence.third_point_index
@@ -1347,6 +1368,7 @@ class DailySegmentAnalyzer:
             s.ma170,
             continuity_broken=s.continuity_broken,
             allow_cold_start=False,
+            center_evidence_builder=self._candidate_center_evidence_segments,
         )
         if reverse_decision and reverse_decision.segments and reverse_decision.independence:
             return False
@@ -1446,6 +1468,7 @@ class DailySegmentAnalyzer:
             self.state.ma170,
             continuity_broken=self.state.continuity_broken,
             allow_cold_start=False,
+            center_evidence_builder=self._candidate_center_evidence_segments,
         )
         if not decision or not decision.segments or not decision.independence:
             return None
@@ -1556,6 +1579,7 @@ class DailySegmentAnalyzer:
             self.state.ma170,
             continuity_broken=self.state.continuity_broken,
             allow_cold_start=False,
+            center_evidence_builder=self._candidate_center_evidence_segments,
         )
 
     def _find_confirmed_daily_window(self, segments: Sequence[MooreSegment]) -> List[MooreSegment]:

@@ -1401,7 +1401,7 @@ if __name__ == "__main__":
         AnalyzeTask("603178", sdt="20171015", edt="20211101", desc="圣龙股份"),
         AnalyzeTask("300339", sdt="20150415", edt="20210701", desc="润和软件"),
         AnalyzeTask("300311", sdt="20170115", edt="20210801", desc="任子行"),
-        AnalyzeTask("603020", sdt="20150515", edt="20210801", desc="爱普股份"),
+        AnalyzeTask("603020", sdt="20151215", edt="20210801", desc="爱普股份"),
         AnalyzeTask("002772", sdt="20160114", edt="20210701", desc="众兴菌业"),
         AnalyzeTask("603908", sdt="20170301", edt="20221001", desc="牧高笛", allow_initial_daily_ma_relax=True),
 
@@ -1409,7 +1409,7 @@ if __name__ == "__main__":
     ]
 
     # 🎯 切换这里
-    # task = tasks[-3]
+    # task = tasks[-4]
     task = tasks[-1]
     try:
         symbol = task.symbol
