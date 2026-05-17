@@ -235,6 +235,9 @@ def find_latest_center_window_event(
     events = find_center_window_events(owner_segments, evidence_segments, ma34, trend_direction, center_kind=center_kind)
     if not events:
         return None
+    valid_events = [event for event in events if event.owner_chain_valid]
+    if valid_events:
+        events = valid_events
     return max(
         events,
         key=lambda event: (

@@ -10,7 +10,9 @@ from czsc.py.enum import Direction
 from ..centers.algo import find_center
 from ..centers.window_event import (
     CenterWindowEvent,
+    find_center_window_events,
     find_latest_center_window_event,
+    seg_key,
     segment_span_key,
     strictly_extends_after_event,
 )
@@ -78,6 +80,16 @@ class IndependenceDecision:
     owner_chain_valid: Optional[bool] = None
     invalid_reasons: tuple[str, ...] = ()
     reason: str = ""
+
+
+@dataclass(frozen=True)
+class SplitPathPlan:
+    primary: WindowCandidate
+    primary_self: IndependenceDecision
+    reverse: WindowCandidate
+    reverse_self: IndependenceDecision
+    next_reverse: WindowCandidate
+    score: tuple
 
 
 def is_valid_regular_window(
@@ -416,19 +428,12 @@ def check_candidate_self_independence(
         )
 
     if center_kind == "trend_class":
-        return IndependenceDecision(
-            ok=False,
-            kind="third_buy_sell",
-            center_kind=center_kind,
-            center_low=center.get("low"),
-            center_high=center.get("high"),
+        return _decision_from_center_event(
+            "trend_class_center",
+            center_event,
             requires_new_extreme=True,
             new_extreme_ok=False,
-            owner_span=center_event.owner_span,
-            evidence_span=center_event.evidence_span,
-            owner_chain_valid=center_event.owner_chain_valid,
-            invalid_reasons=center_event.invalid_reasons,
-            reason="trend-class center has not produced a later strict new extreme inside candidate",
+            reason="candidate has a valid trend-class center; strict new extreme is not required by current independence mode",
         )
 
     return IndependenceDecision(
@@ -549,19 +554,12 @@ def check_daily_segment_independence(
         )
 
     if center_kind == "trend_class":
-        return IndependenceDecision(
-            ok=False,
-            kind="third_buy_sell",
-            center_kind=center_kind,
-            center_low=candidate_center.get("low"),
-            center_high=candidate_center.get("high"),
+        return _decision_from_center_event(
+            "trend_class_center",
+            candidate_center_event,
             requires_new_extreme=True,
             new_extreme_ok=False,
-            owner_span=candidate_center_event.owner_span,
-            evidence_span=candidate_center_event.evidence_span,
-            owner_chain_valid=candidate_center_event.owner_chain_valid,
-            invalid_reasons=candidate_center_event.invalid_reasons,
-            reason="trend-class center needs third buy/sell plus strict new extreme",
+            reason="reverse candidate has a valid trend-class center; strict new extreme is not required by current independence mode",
         )
 
     return IndependenceDecision(
@@ -737,6 +735,7 @@ def _is_structural_independent(independence: IndependenceDecision) -> bool:
         or independence.kind in {
             "same_trend_chain",
             "strict_new_extreme",
+            "trend_class_center",
             "turning_new_extreme",
             "turning_third_buy_sell",
             "swallow_one_segment",
@@ -825,6 +824,358 @@ def _iter_reverse_independence_candidates(
     return sorted(independent, key=lambda item: _reverse_selection_key(item[0], item[1]), reverse=True)
 
 
+def _candidate_independence(
+    candidate: WindowCandidate,
+    segments: Sequence,
+    ma34,
+    center_evidence_builder: Optional[CenterEvidenceBuilder] = None,
+) -> IndependenceDecision:
+    return check_candidate_self_independence(
+        candidate,
+        ma34,
+        all_segments=segments,
+        boundary_evidence_segments=(
+            center_evidence_builder(candidate, segments)
+            if center_evidence_builder
+            else None
+        ),
+    )
+
+
+def _candidate_independence_with_one_step_chain(
+    candidate: WindowCandidate,
+    segments: Sequence,
+    ma34,
+    ma170,
+    completed_segments: Sequence,
+    center_evidence_builder: Optional[CenterEvidenceBuilder] = None,
+) -> IndependenceDecision:
+    candidate_self = _candidate_independence(candidate, segments, ma34, center_evidence_builder)
+    return _candidate_self_with_one_step_chain(
+        candidate,
+        candidate_self,
+        segments,
+        ma34,
+        ma170,
+        completed_segments,
+        center_evidence_builder=center_evidence_builder,
+    )
+
+
+def _has_later_maturity_barrier_for_short_reverse(
+    primary_candidates: Sequence[WindowCandidate],
+    reverse: WindowCandidate,
+    reverse_self: IndependenceDecision,
+    segments: Sequence,
+    ma34,
+    center_evidence_builder: Optional[CenterEvidenceBuilder] = None,
+) -> bool:
+    if reverse_self.kind != "no_daily_center":
+        return False
+    for candidate in primary_candidates:
+        if candidate.end_offset <= reverse.end_offset:
+            continue
+        candidate_self = _candidate_independence(candidate, segments, ma34, center_evidence_builder)
+        if candidate_self.center_kind == "trend_class":
+            return True
+    return False
+
+
+def _first_legal_next_reverse(
+    reverse: WindowCandidate,
+    segments: Sequence,
+    ma34,
+    ma170,
+    completed_segments: Sequence,
+) -> Optional[WindowCandidate]:
+    next_reverses = find_reverse_confirmation_candidates(
+        segments,
+        reverse.end_offset,
+        reverse.direction,
+        ma34,
+        ma170,
+        completed_segments,
+    )
+    return next_reverses[0] if next_reverses else None
+
+
+def _open_tail_reverse_candidate(
+    segments: Sequence,
+    start_offset: int,
+    previous_direction,
+    ma34,
+    ma170,
+    completed_segments: Sequence,
+) -> Optional[WindowCandidate]:
+    candidates = candidates_from_start(
+        segments,
+        start_offset,
+        ma34,
+        ma170,
+        completed_segments=completed_segments,
+        enforce_continuity=False,
+        previous_direction=previous_direction,
+        include_swallow_candidate=True,
+    )
+    valid = [candidate for candidate in candidates if is_opposite_direction(candidate.direction, previous_direction)]
+    if not valid:
+        return None
+    return valid[-1]
+
+
+def _segments_fit_range(event_segments: Sequence, offset_by_key: dict, start_offset: int, end_offset: int) -> bool:
+    if not event_segments:
+        return False
+    offsets = []
+    for seg in event_segments:
+        offset = offset_by_key.get(seg_key(seg))
+        if offset is None:
+            return False
+        offsets.append(offset)
+    return min(offsets) >= start_offset and max(offsets) < end_offset
+
+
+def _event_fits_one_split_part(event: CenterWindowEvent, split_ranges: Sequence[tuple[int, int]], offset_by_key: dict) -> bool:
+    for start_offset, end_offset in split_ranges:
+        owner_ok = _segments_fit_range(event.owner_segments, offset_by_key, start_offset, end_offset)
+        evidence_ok = True
+        if event.evidence_segments:
+            evidence_offsets = [offset_by_key.get(seg_key(seg)) for seg in event.evidence_segments]
+            if all(offset is not None for offset in evidence_offsets):
+                evidence_ok = _segments_fit_range(event.evidence_segments, offset_by_key, start_offset, end_offset)
+        if owner_ok and evidence_ok:
+            return True
+    return False
+
+
+def _split_path_preserves_valid_trend_centers(
+    primary_candidates: Sequence[WindowCandidate],
+    split_ranges: Sequence[tuple[int, int]],
+    segments: Sequence,
+    ma34,
+    center_evidence_builder: Optional[CenterEvidenceBuilder] = None,
+) -> bool:
+    if not split_ranges:
+        return True
+    split_start = split_ranges[0][0]
+    split_end = split_ranges[-1][1]
+    offset_by_key = {seg_key(seg): offset for offset, seg in enumerate(segments)}
+    for candidate in primary_candidates:
+        if candidate.start_offset != split_start or candidate.end_offset < split_end:
+            continue
+        evidence_segments = _candidate_evidence_segments(
+            candidate,
+            segments,
+            evidence_segments=(
+                center_evidence_builder(candidate, segments)
+                if center_evidence_builder
+                else None
+            ),
+        )
+        events = find_center_window_events(
+            candidate.segments,
+            evidence_segments,
+            ma34,
+            candidate.direction,
+            center_kind="trend_class",
+        )
+        for event in events:
+            if not event.valid:
+                continue
+            if not _event_fits_one_split_part(event, split_ranges, offset_by_key):
+                return False
+    return True
+
+
+def _split_path_score(
+    primary: WindowCandidate,
+    primary_self: IndependenceDecision,
+    reverse: WindowCandidate,
+    reverse_self: IndependenceDecision,
+    next_reverse: WindowCandidate,
+) -> tuple:
+    trend_center_count = sum(
+        1
+        for independence in (primary_self, reverse_self)
+        if independence.center_kind == "trend_class"
+    )
+    segment_count = 3 if next_reverse else 2
+    return (
+        trend_center_count,
+        segment_count,
+    )
+
+
+def _build_internal_split_plans(
+    primary_candidates: Sequence[WindowCandidate],
+    segments: Sequence,
+    ma34,
+    ma170,
+    completed_segments: Sequence,
+    center_evidence_builder: Optional[CenterEvidenceBuilder] = None,
+) -> list[SplitPathPlan]:
+    plans: list[SplitPathPlan] = []
+    for primary in primary_candidates:
+        if primary.kind == "swallow":
+            continue
+        primary_self = _candidate_independence(primary, segments, ma34, center_evidence_builder)
+        if not primary_self.ok:
+            continue
+        if primary_self.center_kind == "turning":
+            continue
+        reverse_candidates = find_reverse_confirmation_candidates(
+            segments,
+            primary.end_offset,
+            primary.direction,
+            ma34,
+            ma170,
+            completed_segments,
+        )
+        if not reverse_candidates:
+            continue
+        for reverse, reverse_self in _iter_reverse_independence_candidates(
+            reverse_candidates,
+            ma34,
+            all_segments=segments,
+            ma170=ma170,
+            completed_segments=completed_segments,
+            center_evidence_builder=center_evidence_builder,
+        ):
+            if not reverse_self.ok:
+                continue
+            if reverse_self.kind == "no_daily_center":
+                continue
+            next_reverse = _first_legal_next_reverse(reverse, segments, ma34, ma170, completed_segments)
+            if next_reverse is None:
+                continue
+            if _has_later_maturity_barrier_for_short_reverse(
+                primary_candidates,
+                reverse,
+                reverse_self,
+                segments,
+                ma34,
+                center_evidence_builder,
+            ):
+                continue
+            split_ranges = (
+                (primary.start_offset, primary.end_offset),
+                (reverse.start_offset, reverse.end_offset),
+                (next_reverse.start_offset, next_reverse.end_offset),
+            )
+            if not _split_path_preserves_valid_trend_centers(
+                primary_candidates,
+                split_ranges,
+                segments,
+                ma34,
+                center_evidence_builder=center_evidence_builder,
+            ):
+                continue
+            plans.append(
+                SplitPathPlan(
+                    primary=primary,
+                    primary_self=primary_self,
+                    reverse=reverse,
+                    reverse_self=reverse_self,
+                    next_reverse=next_reverse,
+                    score=_split_path_score(primary, primary_self, reverse, reverse_self, next_reverse),
+                )
+            )
+    return sorted(plans, key=lambda plan: plan.score, reverse=True)
+
+
+def _find_internal_split_decision(
+    primary_candidates: Sequence[WindowCandidate],
+    segments: Sequence,
+    ma34,
+    ma170,
+    completed_segments: Sequence,
+    center_evidence_builder: Optional[CenterEvidenceBuilder] = None,
+) -> Optional[CommitDecision]:
+    plans = _build_internal_split_plans(
+        primary_candidates,
+        segments,
+        ma34,
+        ma170,
+        completed_segments,
+        center_evidence_builder=center_evidence_builder,
+    )
+    if plans:
+        trend_plans = [plan for plan in plans if plan.score[0] > 0]
+        if not trend_plans:
+            return None
+        plan = trend_plans[0]
+        return CommitDecision(
+            start_offset=plan.primary.start_offset,
+            end_offset=plan.primary.end_offset,
+            segments=plan.primary.segments,
+            pending_segments=plan.next_reverse.segments,
+            tail_offset=plan.reverse.end_offset,
+            independence=plan.primary_self,
+            extra_segments=((plan.reverse.segments, plan.reverse_self),),
+            candidate_kind=plan.primary.kind,
+        )
+    return None
+
+
+def _find_open_tail_direct_decision(
+    primary_candidates: Sequence[WindowCandidate],
+    segments: Sequence,
+    ma34,
+    ma170,
+    completed_segments: Sequence,
+    center_evidence_builder: Optional[CenterEvidenceBuilder] = None,
+) -> Optional[CommitDecision]:
+    for primary in sorted(primary_candidates, key=lambda c: (c.end_offset, 1 if c.kind == "regular" else 0), reverse=True):
+        if primary.kind == "swallow":
+            continue
+        primary_self = _candidate_independence(primary, segments, ma34, center_evidence_builder)
+        if not primary_self.ok:
+            continue
+        if primary_self.center_kind == "turning":
+            continue
+        reverse_candidates = find_reverse_confirmation_candidates(
+            segments,
+            primary.end_offset,
+            primary.direction,
+            ma34,
+            ma170,
+            completed_segments,
+        )
+        if not reverse_candidates:
+            open_tail_reverse = _open_tail_reverse_candidate(
+                segments,
+                primary.end_offset,
+                primary.direction,
+                ma34,
+                ma170,
+                completed_segments,
+            )
+            if open_tail_reverse is None:
+                continue
+            return CommitDecision(
+                start_offset=primary.start_offset,
+                end_offset=primary.end_offset,
+                segments=primary.segments,
+                pending_segments=open_tail_reverse.segments,
+                tail_offset=primary.end_offset,
+                independence=primary_self,
+                candidate_kind=primary.kind,
+            )
+        reverse = reverse_candidates[0]
+        if _first_legal_next_reverse(reverse, segments, ma34, ma170, completed_segments) is not None:
+            continue
+        return CommitDecision(
+            start_offset=primary.start_offset,
+            end_offset=primary.end_offset,
+            segments=primary.segments,
+            pending_segments=reverse.segments,
+            tail_offset=primary.end_offset,
+            independence=primary_self,
+            candidate_kind=primary.kind,
+        )
+    return None
+
+
 def _select_mature_commit_decision(decisions: Sequence[CommitDecision]) -> Optional[CommitDecision]:
     chain_decisions = [
         decision
@@ -878,6 +1229,30 @@ def find_delayed_commit_decision(
 
         if not best_pending:
             best_pending = primary_candidates[-1].segments
+
+        internal_split_decision = _find_internal_split_decision(
+            primary_candidates,
+            segments,
+            ma34,
+            ma170,
+            completed_segments,
+            center_evidence_builder=center_evidence_builder,
+        )
+        if internal_split_decision:
+            return internal_split_decision
+
+        open_tail_decision = (
+            None
+            if allow_cold_start
+            else _find_open_tail_direct_decision(
+                primary_candidates,
+                segments,
+                ma34,
+                ma170,
+                completed_segments,
+                center_evidence_builder=center_evidence_builder,
+            )
+        )
 
         swallow_fallback: Optional[CommitDecision] = None
         mature_decisions: list[CommitDecision] = []
@@ -962,6 +1337,9 @@ def find_delayed_commit_decision(
                 ):
                     best_pending = reverse.segments
                     continue
+                if commit_independence.center_kind == "turning" and not _is_structural_independent(reverse_self):
+                    best_pending = primary.segments
+                    continue
                 possible_decision = CommitDecision(
                     start_offset=primary.start_offset,
                     end_offset=primary.end_offset,
@@ -993,6 +1371,8 @@ def find_delayed_commit_decision(
             selected = _select_mature_commit_decision(mature_decisions)
         elif fallback_decision:
             selected = fallback_decision
+        elif open_tail_decision:
+            selected = open_tail_decision
         if selected:
             if allow_cold_start and start_offset == 0 and _has_maturity_barrier(selected.independence):
                 return selected

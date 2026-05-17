@@ -1410,7 +1410,7 @@ if __name__ == "__main__":
     ]
 
     # 🎯 切换这里
-    # task = tasks[-3]
+    # task = tasks[-5]
     task = tasks[-1]
     try:
         symbol = task.symbol

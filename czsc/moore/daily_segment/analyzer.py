@@ -1562,7 +1562,12 @@ class DailySegmentAnalyzer:
         if self.state.pending_after_tail_extension:
             return self._tail_extension_independence_decision(segments)
         if not self.state.completed_segments and len(segments) >= 3:
-            return find_cold_start_decision(segments, self.state.ma34, self.state.ma170)
+            return find_cold_start_decision(
+                segments,
+                self.state.ma34,
+                self.state.ma170,
+                center_evidence_builder=self._candidate_center_evidence_segments,
+            )
         if self.state.completed_segments and should_commit_leading_swallow(
             segments,
             self.state.completed_segments,

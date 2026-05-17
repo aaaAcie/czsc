@@ -333,7 +333,7 @@ def test_independence_accepts_valid_candidate_without_own_daily_center():
     assert decision.kind == "no_daily_center"
 
 
-def test_independence_requires_strict_new_extreme_for_trend_class_center():
+def test_independence_accepts_trend_class_center_without_strict_new_extreme():
     primary = WindowCandidate(0, 3, [
         make_seg(0, 1, Direction.Up, 10, 13),
         make_seg(1, 2, Direction.Down, 13, 11),
@@ -351,7 +351,8 @@ def test_independence_requires_strict_new_extreme_for_trend_class_center():
 
     decision = check_daily_segment_independence(primary, reverse, primary.segments + reverse.segments, ma34, ma170, [])
 
-    assert not decision.ok
+    assert decision.ok
+    assert decision.kind == "trend_class_center"
     assert decision.center_kind == "trend_class"
     assert decision.requires_new_extreme
     assert decision.new_extreme_ok is False
@@ -1247,6 +1248,32 @@ def test_regression_603020_tail_extension_yields_to_reverse_independence():
     assert pending_pairs[:1] == [("mV45B", "mV48T")]
 
 
+def test_regression_603020_long_primary_splits_on_internal_center_chain():
+    bars = research.get_raw_bars_origin("603020", sdt="20151215", edt="20210801")
+    if not bars:
+        pytest.skip("no bars for 603020")
+
+    engine = MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+        rebuild_daily_centers_after_segment_change=True,
+    )
+    label, _ = make_visible_labelers(engine)
+
+    daily_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_segments]
+    assert daily_pairs[:3] == [("mV11B", "mV16T"), ("mV16T", "mV25B"), ("mV25B", "mV28T")]
+    assert engine.daily_segments[1].cache["independence_kind"] == "strict_new_extreme"
+    assert engine.daily_segments[1].cache["center_kind"] == "trend_class"
+    assert engine.daily_segments[2].cache["independence_kind"] == "turning_third_buy_sell"
+
+    pending_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_pending_segments]
+    assert pending_pairs[:1] == [("mV28T", "mV35B")]
+
+
 def test_regression_300311_rejects_type3_with_invalid_owner_chain():
     engine = make_300311_engine()
     label, _ = make_visible_labelers(engine)
@@ -1262,7 +1289,7 @@ def test_regression_300311_rejects_type3_with_invalid_owner_chain():
     assert all(center.cache["owner_chain_valid"] for center in engine.daily_centers if center.overlap_type == 3)
 
 
-def test_regression_300311_uses_mature_barrier_and_same_trend_chain():
+def test_regression_300311_uses_mature_barrier_and_trend_center_independence():
     engine = make_300311_engine()
     label, _ = make_visible_labelers(engine)
 
@@ -1272,15 +1299,45 @@ def test_regression_300311_uses_mature_barrier_and_same_trend_chain():
         ("mV10B", "mV23T"),
         ("mV23T", "mV26B"),
         ("mV26B", "mV31T"),
-        ("mV31T", "mV36B"),
     ]
     assert ("mV10B", "mV15T") not in daily_pairs
-    assert engine.daily_segments[2].cache["independence_kind"] == "same_trend_chain"
-    assert engine.daily_segments[2].cache["chain_confirm_kind"] == "no_daily_center"
+    assert engine.daily_segments[2].cache["independence_kind"] == "trend_class_center"
 
     pending_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_pending_segments]
-    assert pending_pairs[:1] == [("mV36B", "mV42B")]
+    assert pending_pairs[:1] == [("mV31T", "mV36B")]
     assert engine.daily_pending_segments[0].cache["open_ended"] is True
+
+
+def test_long_primary_yields_to_internal_independent_reverse_chain(monkeypatch):
+    monkeypatch.setattr(daily_commit, "check_ma_cross_correlation", lambda *args, **kwargs: True)
+    monkeypatch.setattr(daily_commit, "check_global_trend_relationship", lambda *args, **kwargs: True)
+    segs = [
+        make_seg(0, 10, Direction.Up, 10, 13),
+        make_seg(10, 20, Direction.Down, 13, 11),
+        make_seg(20, 30, Direction.Up, 11, 14),
+        make_seg(30, 40, Direction.Down, 14, 11),
+        make_seg(40, 50, Direction.Up, 11, 12),
+        make_seg(50, 60, Direction.Down, 12, 8.5),
+        make_seg(60, 70, Direction.Up, 8.5, 10),
+        make_seg(70, 80, Direction.Down, 10, 8),
+        make_seg(80, 90, Direction.Up, 8, 11),
+        make_seg(90, 100, Direction.Down, 11, 9),
+        make_seg(100, 110, Direction.Up, 9, 12),
+    ]
+    ma34, ma170 = make_empty_ma(130)
+    ma34[35], ma34[36], ma34[37] = 10, 9, 10
+    ma34[45], ma34[46], ma34[47] = 11, 12, 11
+
+    decision = daily_commit.find_delayed_commit_decision(segs, [], ma34, ma170)
+
+    assert decision is not None
+    assert decision.segments == segs[:3]
+    assert len(decision.extra_segments) == 1
+    extra_segments, extra_independence = decision.extra_segments[0]
+    assert list(extra_segments) == segs[3:8]
+    assert extra_independence.ok
+    assert extra_independence.center_kind == "trend_class"
+    assert decision.next_tail_offset == 8
 
 
 def test_shadow_b_300311_maturity_trace_and_owner_filter():
@@ -1544,13 +1601,9 @@ def test_regression_603908_reverse_confirmed_chain_independence(monkeypatch):
     ]
 
     first, first_confirm, third, third_confirm, turning_confirm, mature_confirm = engine.daily_segments[:6]
-    assert first.cache["independence_kind"] == "same_trend_chain"
-    assert first.cache["chain_confirm_kind"] == "no_daily_center"
-    assert first.cache["chain_confirmed_by"][0] == first_confirm.end_seg.end_k.k_index
+    assert first.cache["independence_kind"] == "trend_class_center"
 
-    assert third.cache["independence_kind"] == "same_trend_chain"
-    assert third.cache["chain_confirm_kind"] == "no_daily_center"
-    assert third.cache["chain_confirmed_by"][0] == third_confirm.end_seg.end_k.k_index
+    assert third.cache["independence_kind"] == "trend_class_center"
     assert third_confirm.cache["from_macro_swallow"] is True
     assert third_confirm.cache.get("extended_from_unfrozen_end") is None
     assert turning_confirm.cache["independence_kind"] == "turning_third_buy_sell"
