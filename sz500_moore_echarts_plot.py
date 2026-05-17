@@ -1,0 +1,1477 @@
+# -*- coding: utf-8 -*-
+"""
+author: moore_czsc
+describe: 用 pyecharts (Apache ECharts) 实现摩尔缠论 K 线结构图。
+          功能与 sz500_moore_plot.py (Plotly版) 完全对齐。
+
+交互特性：
+  - 🖱️ 滚轮放大 → K 线变宽，可见区间自动收窄（time-range zoom，同花顺风格）
+  - 🖱️ 拖拽平移
+  - 🖱️ Hover 悬停显示 OHLC
+  - 🔘 图例点击可独立显示/隐藏各类元素
+  - 📤 输出独立 .html，浏览器直接打开
+"""
+import os
+import ssl
+import urllib.request
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+
+import pandas as pd
+from loguru import logger
+
+from pyecharts import options as opts
+from pyecharts.charts import Kline, Line, Bar, Grid, Scatter
+from pyecharts.commons.utils import JsCode
+from pyecharts.globals import CurrentConfig
+
+# 输出 HTML 使用本地相对资源，避免 file:// 打开时 CDN 加载失败导致 echarts 未定义。
+CurrentConfig.ONLINE_HOST = "./assets/"
+ECHARTS_ASSET_URLS = (
+    "https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js",
+    "https://unpkg.com/echarts@5.4.3/dist/echarts.min.js",
+)
+
+from czsc.connectors import research
+from czsc.moore.analyze import MooreCZSC
+from czsc.moore.daily_segment.centers.maturity_event import build_shadow_b_daily_plan
+import czsc.moore.daily_segment.helpers.commit as daily_commit
+from czsc.py.enum import Direction, Mark
+
+NON_SAME_LINE_COLOR = "#D35400"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 工具函数
+# ─────────────────────────────────────────────────────────────────────
+def _ensure_echarts_asset(output_file: str):
+    output_dir = Path(os.path.abspath(output_file)).parent
+    asset_dir = output_dir / "assets"
+    asset_path = asset_dir / "echarts.min.js"
+    if asset_path.exists() and asset_path.stat().st_size > 100_000:
+        return
+
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    last_error = None
+    for url in ECHARTS_ASSET_URLS:
+        for context in (None, ssl._create_unverified_context()):
+            try:
+                with urllib.request.urlopen(url, timeout=20, context=context) as resp:
+                    data = resp.read()
+                if len(data) <= 100_000:
+                    raise RuntimeError(f"asset too small from {url}")
+                asset_path.write_bytes(data)
+                return
+            except Exception as exc:
+                last_error = exc
+    raise RuntimeError(f"无法下载 ECharts 本地资源: {last_error}")
+
+
+def _dt_str(dt) -> str:
+    return pd.Timestamp(dt).strftime("%Y-%m-%d")
+
+
+def _build_dt_resolver(bars: list):
+    """Resolve Moore k_index to chart dt.
+
+    Daily-center A/B/C/D points store absolute `k_index` values derived from
+    the analyzer's `bars_raw` sequence, which is zero-based within the loaded
+    chart window. `RawBar.id` is a separate external sequence and may start from
+    a non-zero offset, so point plotting must prefer positional lookup.
+    """
+    dt_by_pos = {i: b.dt for i, b in enumerate(bars)}
+    dt_by_id = {getattr(b, "id", i): b.dt for i, b in enumerate(bars)}
+
+    def _resolve(point_idx: int):
+        if point_idx in dt_by_pos:
+            return dt_by_pos[point_idx]
+        return dt_by_id.get(point_idx)
+
+    return _resolve
+
+
+def _build_visible_tk_index_resolver(display_tks: list):
+    key4_map = {}
+    key3_map = {}
+    index_map = {}
+    for i, tk in enumerate(display_tks):
+        key4 = (tk.k_index, pd.Timestamp(tk.dt), tk.price, tk.mark.value)
+        key3 = (tk.k_index, pd.Timestamp(tk.dt), tk.price)
+        key4_map[key4] = i
+        key3_map[key3] = i
+        index_map.setdefault(tk.k_index, []).append(i)
+
+    def _resolve(owner_endpoint):
+        if not owner_endpoint:
+            return None
+        if owner_endpoint in key4_map:
+            return key4_map[owner_endpoint]
+        if isinstance(owner_endpoint, tuple) and len(owner_endpoint) >= 3:
+            key3 = (owner_endpoint[0], pd.Timestamp(owner_endpoint[1]), owner_endpoint[2])
+            if key3 in key3_map:
+                return key3_map[key3]
+        matches = index_map.get(owner_endpoint[0], []) if isinstance(owner_endpoint, tuple) and owner_endpoint else []
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    return _resolve
+
+
+def _ma(series: pd.Series, n: int) -> list:
+    return [round(v, 3) if not pd.isna(v) else None
+            for v in series.rolling(n).mean()]
+
+
+@contextmanager
+def _initial_daily_ma_relax(enabled: bool):
+    """Plot-only helper: allow the earliest daily candidate to start without MA gate."""
+    if not enabled:
+        yield
+        return
+
+    original_check = daily_commit.check_ma_cross_correlation
+    first_start_key = None
+
+    def patched_check(window, ma34, ma170, lag_segment=None):
+        nonlocal first_start_key
+        if window:
+            start_k = window[0].start_k
+            start_key = (start_k.k_index, start_k.dt, start_k.price, start_k.mark.value)
+            if first_start_key is None:
+                first_start_key = start_key
+            if start_key == first_start_key:
+                return True
+        return original_check(window, ma34, ma170, lag_segment=lag_segment)
+
+    daily_commit.check_ma_cross_correlation = patched_check
+    try:
+        yield
+    finally:
+        daily_commit.check_ma_cross_correlation = original_check
+
+
+def _dummy_line(dates: list, name: str, icon_color: str) -> Line:
+    """创建一个不可见的 Line 系列，用来承载 markLine / markArea 并在图例中有独立条目。"""
+    return (
+        Line()
+        .add_xaxis([dates[0], dates[-1]])
+        .add_yaxis(
+            name, [None, None],
+            symbol="none",
+            linestyle_opts=opts.LineStyleOpts(opacity=0),
+            label_opts=opts.LabelOpts(is_show=False),
+            itemstyle_opts=opts.ItemStyleOpts(color=icon_color),
+        )
+    )
+
+
+def _markpoint_series(dates: list, name: str, icon_color: str, data: list) -> Line:
+    """创建仅承载 markPoint 的独立图例系列。"""
+    if not data:
+        return None
+    return (
+        _dummy_line(dates, name, icon_color)
+        .set_series_opts(
+            markpoint_opts=opts.MarkPointOpts(
+                data=data,
+                label_opts=opts.LabelOpts(is_show=False),
+            )
+        )
+    )
+
+
+def _legend_group_series(dates: list, name: str, icon_color: str) -> Line:
+    """创建仅用于图例分组控制的占位系列。"""
+    return (
+        Line()
+        .add_xaxis([dates[0], dates[-1]])
+        .add_yaxis(
+            name, [None, None],
+            symbol="roundRect",
+            symbol_size=14,
+            linestyle_opts=opts.LineStyleOpts(width=0, opacity=0),
+            label_opts=opts.LabelOpts(is_show=False),
+            itemstyle_opts=opts.ItemStyleOpts(color=icon_color),
+        )
+        .set_series_opts(
+            linestyle_opts=opts.LineStyleOpts(width=0, opacity=0),
+        )
+    )
+
+
+def _seg_markline_data(segs: list, color: str, width: float, alpha: float = 0.85) -> list:
+    """把线段列表转为 markLine data（支持 per-item lineStyle，用虚实区分 is_perfect）。"""
+    data = []
+    for seg in segs:
+        tp = "solid" if seg.is_perfect else "dashed"
+        data.append([
+            {"coord": [_dt_str(seg.start_k.dt), seg.start_k.price],
+             "symbol": "none",
+             "lineStyle": {"color": color, "width": width, "type": tp, "opacity": alpha}},
+            {"coord": [_dt_str(seg.end_k.dt), seg.end_k.price],
+             "symbol": "none"},
+        ])
+    return data
+
+
+def _daily_seg_markline_data(daily_segs: list, color: str, width: float, alpha: float = 0.9, line_type: str = "solid") -> list:
+    """把日线级别线段列表转为 markLine data。"""
+    data = []
+    for seg in daily_segs:
+        if seg.cache.get("open_ended"):
+            continue
+        seg_color = NON_SAME_LINE_COLOR if seg.cache.get("candidate_kind") == "non_same" else color
+        data.append([
+            {"coord": [_dt_str(seg.start_seg.start_k.dt), seg.start_seg.start_k.price],
+             "symbol": "none",
+             "lineStyle": {"color": seg_color, "width": width, "type": line_type, "opacity": alpha}},
+            {"coord": [_dt_str(seg.end_seg.end_k.dt), seg.end_seg.end_k.price],
+             "symbol": "none"},
+        ])
+    return data
+
+
+def _daily_open_ended_markline_data(daily_segs: list, bars: list, color: str, width: float, alpha: float = 0.9) -> list:
+    """把 open-ended pending 日线段画成不指向具体端点的红色虚线延伸箭头。"""
+    if not bars:
+        return []
+    data = []
+    right_dt = _dt_str(bars[-1].dt)
+    highs = [bar.high for bar in bars if getattr(bar, "high", None) is not None]
+    lows = [bar.low for bar in bars if getattr(bar, "low", None) is not None]
+    chart_high = max(highs) if highs else None
+    chart_low = min(lows) if lows else None
+
+    for seg in daily_segs:
+        if not seg.cache.get("open_ended"):
+            continue
+        start_price = seg.start_seg.start_k.price
+        evidence_price = seg.end_seg.end_k.price
+        if seg.direction == Direction.Up:
+            target_price = max(evidence_price, start_price)
+            if chart_high is not None:
+                target_price = max(target_price, chart_high * 0.92)
+        elif seg.direction == Direction.Down:
+            target_price = min(evidence_price, start_price)
+            if chart_low is not None:
+                target_price = min(target_price, chart_low * 1.08)
+        else:
+            target_price = evidence_price
+
+        data.append([
+            {"coord": [_dt_str(seg.start_seg.start_k.dt), start_price],
+             "symbol": "none",
+             "lineStyle": {"color": color, "width": width, "type": "dashed", "opacity": alpha}},
+            {"coord": [right_dt, round(target_price, 3)],
+             "symbol": "arrow",
+             "symbolSize": [18, 26]},
+        ])
+    return data
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 核心绘图函数
+# ─────────────────────────────────────────────────────────────────────
+def plot_moore_structure_echarts(
+    bars: list,
+    engine: MooreCZSC,
+    output_file: str = "moore_czsc_echarts.html",
+    title: str = "摩尔缠论结构图 (ECharts)",
+    desc_text: str = "",
+    show_daily_shadow_b: bool = True,
+):
+    # ── 1. 基础数据 ───────────────────────────────────────────────────
+    dates, ohlcv = [], []
+    for b in bars:
+        dates.append(_dt_str(b.dt))
+        ohlcv.append([round(b.open, 3), round(b.close, 3),
+                      round(b.low, 3), round(b.high, 3)])
+
+    close_s = pd.Series([b.close for b in bars])
+    ma5_list  = _ma(close_s, 5)
+    ma34_list = _ma(close_s, 34)
+    ma170_list = _ma(close_s, 170)
+    vol_list  = [b.vol for b in bars]
+    resolve_point_dt = _build_dt_resolver(bars)
+
+    # ── 2. 引擎数据提取 ───────────────────────────────────────────────
+    macro_segments = getattr(engine, "segments", [])
+    swallowed_micro_ids: set = set()
+    for mseg in macro_segments:
+        swallowed_micro_ids.update(mseg.cache.get("swallow_internal_micro_ids", []))
+
+    micro_segments = getattr(engine, "micro_segments", engine.segments)
+    
+    micro_centers = getattr(engine, "micro_centers", [])
+    macro_centers = getattr(engine, "macro_centers", getattr(engine, "all_centers", []))
+    ghost_centers = getattr(engine, "ghost_centers", [])
+
+    daily_segments = getattr(engine, "daily_segments", getattr(engine, "higher_segments", []))
+    daily_pending_segments = getattr(engine, "daily_pending_segments", [])
+    daily_non_same_segments = getattr(engine, "daily_non_same_segments", [])
+    daily_centers = getattr(engine, "daily_centers", [])
+    daily_pending_centers = getattr(engine, "daily_pending_centers", [])
+    daily_active_center = getattr(engine, "daily_active_center", getattr(engine, "higher_active_center", None))
+    daily_archived_centers = getattr(engine, "daily_archived_centers", getattr(engine, "higher_archived_centers", []))
+    daily_refined_segments = getattr(engine, "daily_refined_segments", None)
+    if daily_refined_segments is None:
+        daily_refined_segments = getattr(getattr(engine, "daily_segment_analyzer", None), "refined_segments", [])
+    shadow_b_plan = None
+    if show_daily_shadow_b:
+        daily_analyzer = getattr(engine, "daily_segment_analyzer", None)
+        daily_state = getattr(daily_analyzer, "state", None)
+        shadow_b_plan = build_shadow_b_daily_plan(
+            getattr(engine, "segments", []),
+            getattr(daily_state, "ma34", []),
+            getattr(daily_state, "ma170", []),
+            completed_segments=(),
+        )
+
+    # --- 【增压逻辑】：中枢层级过滤 ---
+    # 1. 微观过滤：排除已被宏观审计拆解（进入幽灵仓）的微观中枢
+    ghost_ids = {getattr(c, 'center_id', None) for c in ghost_centers if getattr(c, 'center_id', None) is not None}
+    micro_centers = [c for c in micro_centers if getattr(c, 'center_id', None) not in ghost_ids]
+
+    # 2. 宏观过滤：只有当宏观中枢的 ID 未出现在微观事实仓中时，才认为它是“纯宏观重播”产物
+    micro_ids = {getattr(c, 'center_id', None) for c in micro_centers if getattr(c, 'center_id', None) is not None}
+    macro_centers = [c for c in macro_centers if getattr(c, 'center_id', None) not in micro_ids]
+
+    # 按三仓独立展示：微观仓、宏观仓、幽灵仓
+    display_tks = getattr(engine, "micro_turning_ks", engine.turning_ks)
+    ghost_forks = getattr(engine, "ghost_forks", [])
+    refreshed_segments = getattr(engine, "refreshed_segments", [])
+    resolve_visible_tk_index = _build_visible_tk_index_resolver(display_tks)
+    
+    display_tks = getattr(engine, "micro_turning_ks", engine.turning_ks)
+    ghost_forks = getattr(engine, "ghost_forks", [])
+    refreshed_segments = getattr(engine, "refreshed_segments", [])
+
+    # ── 3. K0 + 确认K markPoint（分层提取）────
+    # 不再预提取，直接在循环中根据 center 属性判断
+    tk_points_macro = []
+    for ct in macro_centers:
+        if ct.confirm_k:
+            is_up = ct.direction == Direction.Up
+            tk_points_macro.append({
+                "name": "Macro CK",
+                "coord": [_dt_str(ct.confirm_k.dt), ct.confirm_k.close],
+                # 使用与转折K一致的瘦长箭头路径
+                "symbol": "path://M46 0 L46 75 L20 49 L12 57 L50 95 L88 57 L80 49 L54 75 L54 0 Z",
+                "symbolSize": [14, 40], # 线条更细，整体更长
+                "symbolRotate": 180 if is_up else 0,
+                "symbolOffset": [0, "100%"] if is_up else [0, "-100%"], # 偏移更多一点
+                "itemStyle": {"color": "#FFD600"}
+            })
+        if ct.anchor_k0:
+            k0 = ct.anchor_k0
+            tk_points_macro.append({
+                "name": "Macro K0",
+                "coord": [_dt_str(k0.dt), k0.low if k0.close > k0.open else k0.high],
+                "symbol": "rect",
+                "symbolSize": 5,
+                "itemStyle": {"color": "#FFD600"}
+            })
+            
+    tk_points_micro = []
+    for ct in micro_centers:
+        if ct.confirm_k:
+            is_up = ct.direction == Direction.Up
+            tk_points_micro.append({
+                "name": "Micro CK",
+                "coord": [_dt_str(ct.confirm_k.dt), ct.confirm_k.close],
+                "symbol": "path://M46 0 L46 75 L20 49 L12 57 L50 95 L88 57 L80 49 L54 75 L54 0 Z",
+                "symbolSize": [14, 35],
+                "symbolRotate": 180 if is_up else 0,
+                "symbolOffset": [0, "85%"] if is_up else [0, "-85%"],
+                "itemStyle": {"color": "#CE93D8"}
+            })
+        if ct.anchor_k0:
+            k0 = ct.anchor_k0
+            tk_points_micro.append({
+                "name": "Micro K0",
+                "coord": [_dt_str(k0.dt), k0.low if k0.close > k0.open else k0.high],
+                "symbol": "rect",
+                "symbolSize": 6,
+                "itemStyle": {"color": "#BA68C8"}
+            })
+
+    # 顶底极值 → 两个 Scatter 系列，分别控制 label 位置
+
+    # 顶底极值 → 两个 Scatter 系列，分别控制 label 位置
+    top_tks = [(i, tk) for i, tk in enumerate(display_tks) if tk.mark == Mark.G]
+    bot_tks = [(i, tk) for i, tk in enumerate(display_tks) if tk.mark == Mark.D]
+
+    def _tk_scatter(name, tk_list, label_pos):
+        if not tk_list:
+            return None
+            
+        val_map = { _dt_str(tk.dt): {"price": tk.price, "idx": i, "mark": tk.mark} for i, tk in tk_list }
+        ys = []
+        labels_js_arr = []
+        for d in dates:
+            if d in val_map:
+                v = val_map[d]
+                ys.append(v["price"])
+                labels_js_arr.append(f"mV{v['idx']}{'T' if v['mark'] == Mark.G else 'B'}")
+            else:
+                ys.append(None)
+                labels_js_arr.append("")
+
+        labels_js = str(labels_js_arr)
+        formatter = JsCode("function(p){ var L=" + labels_js + "; return L[p.dataIndex] || ''; }")
+        
+        return (
+            Scatter()
+            .add_xaxis(dates)
+            .add_yaxis(
+                name, ys,
+                symbol="circle", symbol_size=7,
+                label_opts=opts.LabelOpts(
+                    is_show=True, position=label_pos, color="#000000",
+                    font_size=14, font_weight="bold", formatter=formatter,
+                ),
+                itemstyle_opts=opts.ItemStyleOpts(
+                    color="#FFFFFF", border_color="#000000", border_width=2
+                ),
+            )
+            .set_global_opts(
+                xaxis_opts=opts.AxisOpts(type_="category"),
+                legend_opts=opts.LegendOpts(is_show=False),
+            )
+        )
+
+    def _arrow_series(name, tk_list, is_up):
+        if not tk_list:
+            return None
+            
+        mp_data = []
+        has_data = False
+        for _, tk in tk_list:
+            if tk.turning_k:
+                dt_str = _dt_str(tk.turning_k.dt)
+                y_val = tk.turning_k.low if is_up else tk.turning_k.high
+                mp_data.append({
+                    "coord": [dt_str, y_val],
+                    "symbol": "path://M46 0 L46 75 L15 48 L10 56 L50 95 L90 56 L85 48 L54 75 L54 0 Z",
+                    "symbolSize": [14, 35],
+                    "symbolRotate": 180 if is_up else 0,
+                    "symbolOffset": [0, "85%"] if is_up else [0, "-85%"],
+                    "itemStyle": {"color": "#000000"} # 统一黑色
+                })
+                has_data = True
+                
+        if not has_data:
+            return None
+
+        return (
+            _dummy_line(dates, name, "#000000")
+            .set_series_opts(markpoint_opts=opts.MarkPointOpts(
+                data=mp_data,
+                label_opts=opts.LabelOpts(is_show=False),
+            ))
+        )
+
+    # ── 4. 线段数据分类 ───────────────────────────────────────────────
+    def _is_sw(seg):
+        mid_s = seg.start_k.cache.get("micro_id")
+        mid_e = seg.end_k.cache.get("micro_id")
+        return (mid_s in swallowed_micro_ids) or (mid_e in swallowed_micro_ids)
+
+    micro_all    = [s for s in micro_segments]         # 微观全部，不区分被吞与否
+    micro_swallowed = [s for s in micro_segments if _is_sw(s)]  # 被宏观吞噬映射覆盖到的微观段
+    micro_unswallowed = [s for s in micro_segments if not _is_sw(s)]
+    macro_all    = [s for s in macro_segments]         # 宏观全部，不区分吸噬与否
+    macro_swallow = [s for s in macro_segments if s.cache.get("is_macro_swallow", False)]  # 仅用于宽度计算
+
+    def _tk_key(tk):
+        return (tk.k_index, tk.dt, tk.price)
+
+    refined_ranges = []
+    refined_endpoint_keys = set()
+    for seg in daily_refined_segments:
+        left = min(seg.start_k.k_index, seg.end_k.k_index)
+        right = max(seg.start_k.k_index, seg.end_k.k_index)
+        refined_ranges.append((left, right))
+        refined_endpoint_keys.add((_tk_key(seg.start_k), _tk_key(seg.end_k)))
+
+    def _is_replaced_by_refined(seg):
+        if not refined_ranges:
+            return False
+        seg_key = (_tk_key(seg.start_k), _tk_key(seg.end_k))
+        if seg_key in refined_endpoint_keys:
+            return False
+        left = min(seg.start_k.k_index, seg.end_k.k_index)
+        right = max(seg.start_k.k_index, seg.end_k.k_index)
+        return any(ref_left <= left and right <= ref_right for ref_left, ref_right in refined_ranges)
+
+    macro_display = [seg for seg in macro_all if not _is_replaced_by_refined(seg)]
+    macro_display.extend(daily_refined_segments)
+
+    # 只要存在幽灵数据就展示对应叠层，不再因为存在吞噬映射而隐藏证据。
+    show_ghost_overlay = True
+
+    # 演变刷新路径：统一灰色虚线
+    refresh_data = []
+    for seg in refreshed_segments:
+        refresh_data.append([
+            {"coord": [_dt_str(seg.start_k.dt), seg.start_k.price], "symbol": "none",
+             "lineStyle": {"color": "#666666", "width": 1.5, "type": "dashed", "opacity": 0.7}},
+            {"coord": [_dt_str(seg.end_k.dt), seg.end_k.price], "symbol": "none"},
+        ])
+
+    # 被同向刷新替换掉的历史端点（用于显示“曾成立、后被同向替换”的微观点）
+    refreshed_old_top = {}
+    refreshed_old_bot = {}
+    for seg in refreshed_segments:
+        tk = seg.start_k
+        d = _dt_str(tk.dt)
+        if tk.mark == Mark.G:
+            refreshed_old_top[d] = tk.price
+        else:
+            refreshed_old_bot[d] = tk.price
+
+    def _history_tk_scatter(name, val_map, color):
+        if not val_map:
+            return None
+        ys = [val_map.get(d, None) for d in dates]
+        return (
+            Scatter()
+            .add_xaxis(dates)
+            .add_yaxis(
+                name, ys,
+                symbol="diamond", symbol_size=6,
+                label_opts=opts.LabelOpts(is_show=False),
+                itemstyle_opts=opts.ItemStyleOpts(
+                    color=color, border_color="#111111", border_width=0.8
+                ),
+            )
+            .set_global_opts(
+                xaxis_opts=opts.AxisOpts(type_="category"),
+                legend_opts=opts.LegendOpts(is_show=False),
+            )
+        )
+
+    # ── 5. 中枢 markArea 数据分类 ─────────────────────────────────────
+    def _prepare_area_data(clist, layer_name):
+        data = []
+        for ct in clist:
+            if not ct.start_dt or not ct.end_dt: continue
+            y_lo, y_hi = ct.lower_rail, ct.upper_rail
+            cid = getattr(ct, "center_id", "?")
+            
+            if layer_name == "macro":
+                fill, border = "rgba(41,128,185,0.15)", "#2980B9" # 蓝色：宏观
+            elif layer_name == "micro":
+                fill, border = "rgba(142,68,173,0.12)", "#8E44AD" # 紫色：微观
+            else:
+                fill, border = "rgba(149,165,166,0.15)", "#7F8C8D" # 灰色：幽灵
+
+            label_txt = f"ID:{cid} {layer_name}-{getattr(ct, 'method', '?')}\n上:{y_hi:.3f} 下:{y_lo:.3f}"
+            data.append([
+                {
+                    "xAxis": _dt_str(ct.start_dt), "yAxis": y_lo,
+                    "label": {"show": True, "position": "top", "formatter": label_txt, "fontSize": 9, "color": border, "opacity": 0.8},
+                    "itemStyle": {"color": fill, "borderWidth": 1.5, "borderColor": border, "opacity": 0.6,
+                                  "borderType": "dashed" if layer_name == "ghost" else "solid"}
+                },
+                {"xAxis": _dt_str(ct.end_dt), "yAxis": y_hi}
+            ])
+        return data
+
+    macro_area_data = _prepare_area_data(macro_centers, "macro")
+    micro_area_data = _prepare_area_data(micro_centers, "micro")
+    ghost_area_data = _prepare_area_data(ghost_centers, "ghost")
+
+    def _display_daily_center_end_dt(ct):
+        repair = getattr(ct, "cache", {}).get("repair") or {}
+        refined_segments = repair.get("refined_segments") or []
+        if not refined_segments:
+            return ct.end_dt
+        end_dt = refined_segments[-1].end_k.dt
+        right_indexes = []
+        if "D" in getattr(ct, "points", {}):
+            right_indexes.append(ct.points["D"][0])
+        third_entry_index = getattr(ct, "cache", {}).get("third_entry_index")
+        if third_entry_index is not None:
+            right_indexes.append(third_entry_index)
+        if right_indexes:
+            right_index = min(max(right_indexes) + 1, len(bars) - 1)
+            end_dt = max(pd.Timestamp(end_dt), pd.Timestamp(resolve_point_dt(right_index) or end_dt))
+        return end_dt
+
+    def _iter_daily_center_display_entries(clist, layer_name):
+        display_idx = 0
+        for ct in clist:
+            if not ct.segments:
+                continue
+            if ct.overlap_type not in (1, 3):
+                continue
+
+            if layer_name == "daily":
+                fill, border = "rgba(231, 76, 60, 0.12)", "#C0392B"
+                border_type = "solid"
+            elif layer_name == "daily_active":
+                fill, border = "rgba(46, 204, 113, 0.14)", "#27AE60"
+                border_type = "solid"
+            elif layer_name == "daily_pending":
+                fill, border = "rgba(230, 126, 34, 0.10)", "#E67E22"
+                border_type = "dashed"
+            else:
+                fill, border = "rgba(243, 156, 18, 0.10)", "#F39C12"
+                border_type = "dashed"
+
+            prefix = "PD" if layer_name == "daily_pending" else "D"
+            yield {
+                "ct": ct,
+                "display_idx": display_idx,
+                "prefix": prefix,
+                "fill": fill,
+                "border": border,
+                "border_type": border_type,
+                "start_dt": ct.start_dt,
+                "end_dt": _display_daily_center_end_dt(ct),
+                "y_lo": ct.low,
+                "y_hi": ct.high,
+            }
+            display_idx += 1
+
+    def _prepare_daily_center_area_data(clist, layer_name):
+        data = []
+        for entry in _iter_daily_center_display_entries(clist, layer_name):
+            ct = entry["ct"]
+            prefix = entry["prefix"]
+            display_idx = entry["display_idx"]
+            label_txt = f"{prefix}{display_idx} T{ct.overlap_type} {ct.status}\n上:{entry['y_hi']:.3f} 下:{entry['y_lo']:.3f}"
+            data.append([
+                {
+                    "xAxis": _dt_str(entry["start_dt"]), "yAxis": entry["y_lo"],
+                    "label": {"show": True, "position": "top", "formatter": label_txt, "fontSize": 9, "color": entry["border"], "opacity": 0.85},
+                    "itemStyle": {
+                        "color": entry["fill"],
+                        "borderWidth": 1.6,
+                        "borderColor": entry["border"],
+                        "opacity": 0.65,
+                        "borderType": entry["border_type"],
+                    }
+                },
+                {"xAxis": _dt_str(entry["end_dt"]), "yAxis": entry["y_hi"]}
+            ])
+        return data
+
+    def _prepare_daily_center_point_markers(clist, layer_name):
+        data = []
+        for entry in _iter_daily_center_display_entries(clist, layer_name):
+            ct = entry["ct"]
+            prefix = entry["prefix"]
+            display_idx = entry["display_idx"]
+            point_color = entry["border"]
+            direction_value = (getattr(ct, "cache", {}) or {}).get("daily_segment_direction", "")
+            is_up = direction_value in {"向上", "Up", "up"}
+            for point_name in ("A", "B", "C", "D"):
+                point = getattr(ct, "points", {}).get(point_name)
+                if not point:
+                    continue
+                point_idx, point_val = point
+                point_dt = resolve_point_dt(point_idx)
+                if point_dt is None:
+                    continue
+                point_owner = ((getattr(ct, "cache", {}) or {}).get("point_owners") or {}).get(point_name) or {}
+                owner_endpoint = point_owner.get("owner_endpoint")
+                owner_v_index = resolve_visible_tk_index(owner_endpoint)
+                label_text = f"{prefix}{display_idx}.{point_name}"
+                if owner_v_index is not None:
+                    label_text = f"{label_text}({owner_v_index})"
+                if is_up:
+                    label_pos = "top" if point_name in {"A", "C"} else "bottom"
+                else:
+                    label_pos = "bottom" if point_name in {"A", "C"} else "top"
+                data.append({
+                    "name": label_text,
+                    "coord": [_dt_str(point_dt), round(point_val, 6)],
+                    "symbol": "circle",
+                    "symbolSize": 5,
+                    "label": {
+                        "show": True,
+                        "position": label_pos,
+                        "formatter": label_text,
+                        "fontSize": 10,
+                        "fontWeight": "bold",
+                        "color": point_color,
+                    },
+                    "itemStyle": {
+                        "color": point_color,
+                        "borderColor": point_color,
+                        "borderWidth": 1,
+                    },
+                })
+        return data
+
+    if not daily_centers:
+        final_daily_center = daily_active_center or (daily_archived_centers[-1] if daily_archived_centers else None)
+        daily_centers = [final_daily_center] if final_daily_center else []
+    daily_center_area_data = _prepare_daily_center_area_data(daily_centers, "daily_active")
+    daily_pending_center_area_data = _prepare_daily_center_area_data(daily_pending_centers, "daily_pending")
+    daily_center_point_markers = _prepare_daily_center_point_markers(daily_centers, "daily_active")
+    daily_pending_center_point_markers = _prepare_daily_center_point_markers(daily_pending_centers, "daily_pending")
+    shadow_daily_segments = list(shadow_b_plan.daily_segments) if shadow_b_plan else []
+    shadow_daily_center_events = list(getattr(shadow_b_plan, "center_events", ())) if shadow_b_plan else []
+    # ── 6. 构建各图例系列 ─────────────────────────────────────────────
+    def _seg_series(name, seg_list, color, width, alpha=0.85):
+        data = _seg_markline_data(seg_list, color, width, alpha)
+        if not data:
+            return None
+        return (
+            _dummy_line(dates, name, color)
+            .set_series_opts(markline_opts=opts.MarkLineOpts(
+                is_silent=True, data=data,
+                label_opts=opts.LabelOpts(is_show=False),
+            ))
+        )
+
+    def _raw_seg_series(name, raw_data, color):
+        if not raw_data:
+            return None
+        return (
+            _dummy_line(dates, name, color)
+            .set_series_opts(markline_opts=opts.MarkLineOpts(
+                is_silent=True, data=raw_data,
+                label_opts=opts.LabelOpts(is_show=False),
+            ))
+        )
+
+    def _center_series(name, area_data, color):
+        if not area_data:
+            return None
+        return (
+            _dummy_line(dates, name, color)
+            .set_series_opts(markarea_opts=opts.MarkAreaOpts(
+                is_silent=False, data=area_data,
+                label_opts=opts.LabelOpts(is_show=True),
+            ))
+        )
+
+    def _shadow_b_center_area_data(events: list, *, invalid_only: bool | None = None):
+        if not events:
+            return []
+        data = []
+        for idx, event in enumerate(events):
+            if not event.center:
+                continue
+            if event.overlap_type not in (1, 3):
+                continue
+            owner_invalid = bool(getattr(event.owner_evidence, "invalid_reasons", ()))
+            if invalid_only is not None and invalid_only != owner_invalid:
+                continue
+            center_segments = event.center.get("segments") or event.candidate.segments
+            if not center_segments:
+                continue
+            start_dt = center_segments[0].start_k.dt
+            end_dt = center_segments[-1].end_k.dt
+            y_lo = event.low if event.low is not None else event.center.get("low")
+            y_hi = event.high if event.high is not None else event.center.get("high")
+            if y_lo is None or y_hi is None:
+                continue
+            y_lo, y_hi = sorted((float(y_lo), float(y_hi)))
+            if owner_invalid:
+                fill, border = "rgba(231, 76, 60, 0.10)", "#E74C3C"
+                prefix = "BX"
+                reason = ",".join(getattr(event.owner_evidence, "invalid_reasons", ())[:2])
+            else:
+                fill, border = "rgba(149, 165, 166, 0.12)", "#95A5A6"
+                prefix = "B"
+                reason = event.independence_kind or "center"
+            owner_ok = 0 if owner_invalid else 1
+            new_ok = event.new_extreme_ok
+            new_text = "NA" if new_ok is None else int(bool(new_ok))
+            label_txt = (
+                f"{prefix}{idx} T{event.overlap_type} {event.center_kind}\n"
+                f"{reason} owner:{owner_ok} new:{new_text}\n"
+                f"上:{y_hi:.3f} 下:{y_lo:.3f}"
+            )
+            data.append([
+                {
+                    "xAxis": _dt_str(start_dt),
+                    "yAxis": y_lo,
+                    "label": {
+                        "show": True,
+                        "position": "top",
+                        "formatter": label_txt,
+                        "fontSize": 9,
+                        "color": border,
+                        "opacity": 0.88,
+                    },
+                    "itemStyle": {
+                        "color": fill,
+                        "borderWidth": 1.6,
+                        "borderColor": border,
+                        "opacity": 0.68,
+                        "borderType": "dashed",
+                    },
+                },
+                {"xAxis": _dt_str(end_dt), "yAxis": y_hi},
+            ])
+        return data
+
+    overlay_series = []
+
+    # MA 线（直接用 add_yaxis 叠加，不需要 dummy）
+    line_ma = (
+        Line()
+        .add_xaxis(dates)
+        .add_yaxis("MA5",  ma5_list,  symbol="none", is_smooth=True,
+                   linestyle_opts=opts.LineStyleOpts(width=1.2, color="#F39C12"),
+                   label_opts=opts.LabelOpts(is_show=False),
+                   itemstyle_opts=opts.ItemStyleOpts(color="#F39C12"))
+        .add_yaxis("MA34", ma34_list, symbol="none", is_smooth=True,
+                   linestyle_opts=opts.LineStyleOpts(width=1.2, color="#FF4081"),
+                   label_opts=opts.LabelOpts(is_show=False),
+                   itemstyle_opts=opts.ItemStyleOpts(color="#FF4081"))
+        .add_yaxis("MA170", ma170_list, symbol="none", is_smooth=True,
+                   linestyle_opts=opts.LineStyleOpts(width=1.4, color="#2980B9"),
+                   label_opts=opts.LabelOpts(is_show=False),
+                   itemstyle_opts=opts.ItemStyleOpts(color="#2980B9"))
+        .set_global_opts(xaxis_opts=opts.AxisOpts(type_="category", is_scale=True))
+    )
+    overlay_series.append(line_ma)
+
+    # 微观线段（全部，统一灰色）
+    s = _seg_series("微观线段", micro_all, "#555555", 2.5, alpha=0.75)
+    minute_series = []
+    daily_series = []
+    if s:
+        minute_series.append(s)
+
+    # 宏观线段（全部合并，黑色，吞噬段线宽略大）
+    def _macro_all_data():
+        data = []
+        for seg in macro_display:
+            is_sw = seg.cache.get("is_macro_swallow", False)
+            is_refined = seg.cache.get("source") == "daily_segment_owner_chain_repair"
+            tp = "solid" if is_refined or seg.is_perfect else "dashed"
+            color = NON_SAME_LINE_COLOR if is_refined else "#000000"
+            w = 4 if is_sw or is_refined else 2.5
+            opacity = 0.96 if is_refined else 0.92
+            data.append([
+                {"coord": [_dt_str(seg.start_k.dt), seg.start_k.price],
+                 "symbol": "none",
+                 "lineStyle": {"color": color, "width": w, "type": tp, "opacity": opacity}},
+                {"coord": [_dt_str(seg.end_k.dt), seg.end_k.price], "symbol": "none"},
+            ])
+        return data
+    s = _raw_seg_series("宏观线段", _macro_all_data(), "#000000")
+    if s:
+        minute_series.append(s)
+
+    # 日线级别线段（已完成）
+    s = _raw_seg_series("日线级别线段", _daily_seg_markline_data(daily_segments, "#C0392B", 4.5, alpha=0.95), "#C0392B")
+    if s:
+        daily_series.append(s)
+
+    s = _raw_seg_series(
+        "日线级别线段(Pending)",
+        _daily_seg_markline_data(daily_pending_segments, "#C0392B", 3.8, alpha=0.9, line_type="dashed"),
+        "#C0392B",
+    )
+    if s:
+        daily_series.append(s)
+
+    s = _raw_seg_series(
+        "日线级别线段(Pending Open)",
+        _daily_open_ended_markline_data(daily_pending_segments, bars, "#C0392B", 3.8, alpha=0.9),
+        "#C0392B",
+    )
+    if s:
+        daily_series.append(s)
+
+    s = _raw_seg_series(
+        "日线非同处理",
+        _daily_seg_markline_data(daily_non_same_segments, NON_SAME_LINE_COLOR, 4.0, alpha=0.95, line_type="solid"),
+        NON_SAME_LINE_COLOR,
+    )
+    if s:
+        daily_series.append(s)
+
+    if show_daily_shadow_b and shadow_daily_segments:
+        s = _raw_seg_series(
+            "Daily Shadow B",
+            _daily_seg_markline_data(shadow_daily_segments, "#95A5A6", 2.8, alpha=0.72, line_type="dashed"),
+            "#95A5A6",
+        )
+        if s:
+            daily_series.append(s)
+
+    s = _raw_seg_series("演变路径", refresh_data, "#BBBBBB")
+    if s:
+        minute_series.append(s)
+
+    s = _history_tk_scatter("历史刷新端点(顶)", refreshed_old_top, "#E67E22")
+    if s:
+        minute_series.append(s)
+    s = _history_tk_scatter("历史刷新端点(底)", refreshed_old_bot, "#16A085")
+    if s:
+        minute_series.append(s)
+
+    # 中枢绘制
+    for name, data, color in [
+        ("宏观中枢", macro_area_data, "#2980B9"),
+        ("微观中枢", micro_area_data, "#8E44AD"),
+        ("幽灵中枢", ghost_area_data, "#7F8C8D"),
+        ("日线级别中枢", daily_center_area_data, "#27AE60"),
+        ("日线级别中枢(Pending)", daily_pending_center_area_data, "#E67E22"),
+    ]:
+        s = _center_series(name, data, color)
+        if not s:
+            continue
+        if name.startswith("日线"):
+            daily_series.append(s)
+        else:
+            minute_series.append(s)
+
+    if show_daily_shadow_b:
+        s = _center_series("B Shadow Centers", _shadow_b_center_area_data(shadow_daily_center_events), "#95A5A6")
+        if s:
+            daily_series.append(s)
+
+    # 顶底极值 Scatter（顶标签在上，底标签在下）
+    sc_top = _tk_scatter("微观顶极值", top_tks, "top")
+    sc_bot = _tk_scatter("微观底极值", bot_tks, "bottom")
+    if sc_top:
+        overlay_series.append(sc_top)
+    if sc_bot:
+        overlay_series.append(sc_bot)
+
+    # 30分钟中枢确认k（紫色 CK / K0）单独成层，纳入 30 分钟图例分组
+    s = _markpoint_series(dates, "30分钟中枢确认k", "#BA68C8", tk_points_micro)
+    if s:
+        minute_series.append(s)
+
+    s = _markpoint_series(dates, "日线中枢 BADC 点", "#27AE60", daily_center_point_markers)
+    if s:
+        daily_series.append(s)
+    s = _markpoint_series(dates, "日线中枢 BADC 点(Pending)", "#E67E22", daily_pending_center_point_markers)
+    if s:
+        daily_series.append(s)
+    # 转折K箭头（指向触发K线的高低点）
+    arr_up = _arrow_series("向上转折确立", bot_tks, is_up=True)
+    arr_dn = _arrow_series("向下转折确立", top_tks, is_up=False)
+    if arr_up:
+        minute_series.append(arr_up)
+    if arr_dn:
+        minute_series.append(arr_dn)
+
+    # 图例分组：作为明显的批量开关按钮，并放在各自图层前面
+    overlay_series.append(_legend_group_series(dates, "━━ 日线 ━━", "#C0392B"))
+    overlay_series.extend(daily_series)
+    overlay_series.append(_legend_group_series(dates, "━━ 30分钟 ━━", "#7F8C8D"))
+    overlay_series.extend(minute_series)
+
+    # ── 7. 主 K 线 ────────────────────────────────────────────────────
+    kline = (
+        Kline()
+        .add_xaxis(dates)
+        .add_yaxis(
+            "K线", ohlcv,
+            itemstyle_opts=opts.ItemStyleOpts(
+                color="#D32F2F", color0="#2E7D32",
+                border_color="#D32F2F", border_color0="#2E7D32",
+            ),
+            markpoint_opts=opts.MarkPointOpts(
+                data=tk_points_macro,
+                label_opts=opts.LabelOpts(is_show=False)
+            )
+        )
+        .set_global_opts(
+            title_opts=opts.TitleOpts(
+                title=title + "\n" + desc_text,
+                title_textstyle_opts=opts.TextStyleOpts(font_size=14, color="#222"),
+            ),
+            tooltip_opts=opts.TooltipOpts(
+                trigger="axis",
+                axis_pointer_type="cross",
+                formatter=JsCode("""function(params){
+                    if(!params || params.length === 0) return '';
+                    var k, m5, m34, m170;
+                    for(var i=0; i<params.length; i++){
+                        var p = params[i];
+                        if(p.seriesName === 'K线'){ k = p; }
+                        else if(p.seriesName === 'MA5'){ m5 = Array.isArray(p.value) ? p.value[1] : p.value; }
+                        else if(p.seriesName === 'MA34'){ m34 = Array.isArray(p.value) ? p.value[1] : p.value; }
+                        else if(p.seriesName === 'MA170'){ m170 = Array.isArray(p.value) ? p.value[1] : p.value; }
+                    }
+                    if(!k || !k.value) return '';
+                    var d = k.value;
+                    var res = '<b>' + k.axisValue + '</b><br/>' +
+                              '开: ' + d[1] + '  收: <b>' + d[2] + '</b><br/>' +
+                              '高: ' + d[4] + '  低: ' + d[3];
+                    var m5_val = m5 != null ? parseFloat(m5) : null;
+                    var m34_val = m34 != null ? parseFloat(m34) : null;
+                    var m170_val = m170 != null ? parseFloat(m170) : null;
+                    
+                    if(m5_val !== null && !isNaN(m5_val)){
+                        res += '<br/><span style=\"color:#F39C12\">● MA5: ' + m5_val.toFixed(3) + '</span>';
+                    }
+                    if(m34_val !== null && !isNaN(m34_val)){
+                        res += '  <span style=\"color:#FF4081\">● MA34: ' + m34_val.toFixed(3) + '</span>';
+                    }
+                    if(m170_val !== null && !isNaN(m170_val)){
+                        res += '  <span style=\"color:#2980B9\">● MA170: ' + m170_val.toFixed(3) + '</span>';
+                    }
+                    
+                    var rels = [];
+                    if(m5_val !== null && !isNaN(m5_val) && m34_val !== null && !isNaN(m34_val)){
+                        var sign1 = m5_val > m34_val ? '>' : (m5_val < m34_val ? '<' : '=');
+                        rels.push('MA5 ' + sign1 + ' MA34');
+                    }
+                    if(m34_val !== null && !isNaN(m34_val) && m170_val !== null && !isNaN(m170_val)){
+                        var sign2 = m34_val > m170_val ? '>' : (m34_val < m170_val ? '<' : '=');
+                        rels.push('MA34 ' + sign2 + ' MA170');
+                    }
+                    if(rels.length > 0){
+                        res += '<br/><span style=\"color:#888; font-size:11px;\">关系: ' + rels.join('  |  ') + '</span>';
+                    }
+                    return res;
+                }"""),
+            ),
+            toolbox_opts=opts.ToolboxOpts(
+                pos_left="center",
+                pos_top="1%",
+                feature={
+                    "myZoomIn": {
+                        "show": True,
+                        "title": "放大",
+                        "icon": "path://M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z",
+                        "onclick": JsCode("""
+                            function (model, api) {
+                                var opt = api.getOption();
+                                var dz = opt.dataZoom[0];
+                                var start = dz.start;
+                                var end = dz.end;
+                                var center = (start + end) / 2;
+                                var span = (end - start) * 0.8;
+                                if (span < 0.1) span = 0.1;
+                                var newStart = Math.max(0, center - span / 2);
+                                var newEnd = Math.min(100, center + span / 2);
+                                api.dispatchAction({
+                                    type: 'dataZoom',
+                                    start: newStart,
+                                    end: newEnd
+                                });
+                            }
+                        """)
+                    },
+                    "myZoomOut": {
+                        "show": True,
+                        "title": "缩小",
+                        "icon": "path://M19 13H5v-2h14v2z",
+                        "onclick": JsCode("""
+                            function (model, api) {
+                                var opt = api.getOption();
+                                var dz = opt.dataZoom[0];
+                                var start = dz.start;
+                                var end = dz.end;
+                                var center = (start + end) / 2;
+                                var span = (end - start) / 0.8;
+                                if (span > 100) span = 100;
+                                var newStart = Math.max(0, center - span / 2);
+                                var newEnd = Math.min(100, center + span / 2);
+                                api.dispatchAction({
+                                    type: 'dataZoom',
+                                    start: newStart,
+                                    end: newEnd
+                                });
+                            }
+                        """)
+                    },
+                    "restore": {"show": True, "title": "重置"},
+                    "saveAsImage": {"show": True, "title": "导出图片"},
+                }
+            ),
+            datazoom_opts=[
+                opts.DataZoomOpts(
+                    is_show=False, type_="inside",
+                    xaxis_index=[0, 1],
+                    range_start=0, range_end=100,
+                ),
+                opts.DataZoomOpts(
+                    is_show=True, type_="slider",
+                    xaxis_index=[0, 1],
+                    range_start=0, range_end=100,
+                    pos_bottom="55px",
+                ),
+            ],
+            legend_opts=opts.LegendOpts(
+                is_show=True,
+                pos_top="5%", pos_right="2%",
+                orient="vertical",
+                textstyle_opts=opts.TextStyleOpts(font_size=11),
+                selected_map={
+                    "━━ 30分钟 ━━": False,
+                    "━━ 日线 ━━": True,
+                    "微观线段": False,
+                    "宏观线段": False,
+                    "演变路径": False,
+                    "历史刷新端点(顶)": False,
+                    "历史刷新端点(底)": False,
+                    "微观中枢": False,
+                    "宏观中枢": False,
+                    "幽灵中枢": True,
+                    "30分钟中枢确认k": False,
+                    "向上转折确立": False,
+                    "向下转折确立": False,
+                    "日线级别中枢": True,
+                    **({
+                        "Daily Shadow B": True,
+                        "B Shadow Centers": True,
+                    } if show_daily_shadow_b else {}),
+                }
+            ),
+            yaxis_opts=opts.AxisOpts(
+                is_scale=True,
+                splitarea_opts=opts.SplitAreaOpts(is_show=True),
+                axislabel_opts=opts.LabelOpts(formatter="{value}"),
+                splitline_opts=opts.SplitLineOpts(
+                    is_show=True,
+                    linestyle_opts=opts.LineStyleOpts(type_="dashed", opacity=0.4),
+                ),
+            ),
+            xaxis_opts=opts.AxisOpts(
+                type_="category", is_scale=True,
+                boundary_gap=True,
+                axisline_opts=opts.AxisLineOpts(is_on_zero=False),
+                splitline_opts=opts.SplitLineOpts(is_show=False),
+            ),
+        )
+    )
+
+    # ── 8. 叠加所有系列 ───────────────────────────────────────────────
+    for s in overlay_series:
+        kline.overlap(s)
+
+    # ── 9. 成交量 Bar ─────────────────────────────────────────────────
+    vol_colors = [
+        "#FFCDD2" if ohlcv[i][1] >= ohlcv[i][0] else "#C8E6C9"
+        for i in range(len(ohlcv))
+    ]
+    bar = (
+        Bar()
+        .add_xaxis(dates)
+        .add_yaxis(
+            "成交量", vol_list,
+            label_opts=opts.LabelOpts(is_show=False),
+            itemstyle_opts=opts.ItemStyleOpts(
+                color=JsCode("function(p){var c=" + str(vol_colors) + "; return c[p.dataIndex] || '#BBBBBB';}")
+            ),
+        )
+        .set_global_opts(
+            xaxis_opts=opts.AxisOpts(
+                type_="category", is_scale=True,
+                axislabel_opts=opts.LabelOpts(is_show=False),
+                splitline_opts=opts.SplitLineOpts(is_show=False),
+            ),
+            yaxis_opts=opts.AxisOpts(
+                is_scale=True,
+                axislabel_opts=opts.LabelOpts(
+                    formatter=JsCode(
+                        "function(v){if(v>=1e8)return (v/1e8).toFixed(1)+'亿';"
+                        "if(v>=1e4)return (v/1e4).toFixed(0)+'万';return v;}"
+                    )
+                ),
+            ),
+            legend_opts=opts.LegendOpts(is_show=False),
+        )
+    )
+
+    # ── 10. Grid 布局 ─────────────────────────────────────────────────
+    chart_symbol = getattr(bars[0], "symbol", "moore") if bars else "moore"
+    chart_id = f"grid_{chart_symbol}"
+    grid = (
+        Grid(init_opts=opts.InitOpts(
+            width="100%",
+            height="860px",
+            page_title=title,
+            bg_color="#FAFAFA",
+            chart_id=chart_id,
+        ))
+        .add(
+            kline,
+            grid_opts=opts.GridOpts(
+                pos_left="4%", pos_right="16%",
+                pos_top="8%", pos_bottom="26%",
+            ),
+        )
+        .add(
+            bar,
+            grid_opts=opts.GridOpts(
+                pos_left="4%", pos_right="16%",
+                pos_top="76%", pos_bottom="8%",
+            ),
+        )
+    )
+
+    # ── 11. 持久化 Zoom 状态 ──────────────────────────────────────────
+    # 使用 localStorage 存储最近一次的缩放范围，刷新页面后自动恢复
+    # ------------------------------------------------------------------
+    shadow_daily_legend_js = (
+        ', "Daily Shadow B", "B Shadow Centers"'
+        if show_daily_shadow_b
+        else ""
+    )
+    zoom_persistence_js = f"""
+    (function() {{
+        var storageKey = "echarts_zoom_{chart_symbol}";
+        setTimeout(function() {{
+            // 尝试通过类名获取，更鲁棒
+            var container = document.querySelector(".chart-container");
+            if (!container) return;
+            
+            var chart = echarts.getInstanceByDom(container);
+            if (!chart) return;
+
+            // 1. 恢复状态
+            var saved = localStorage.getItem(storageKey);
+            if (saved) {{
+                var zoom = JSON.parse(saved);
+                chart.dispatchAction({{
+                    type: 'dataZoom',
+                    start: zoom.start,
+                    end: zoom.end
+                }});
+            }}
+
+            // 2. 监听并保存状态 (防抖处理)
+            var timer = null;
+            chart.on('datazoom', function() {{
+                if (timer) clearTimeout(timer);
+                timer = setTimeout(function() {{
+                    var opt = chart.getOption();
+                    if (opt.dataZoom && opt.dataZoom.length > 0) {{
+                        var dz = opt.dataZoom[0];
+                        localStorage.setItem(storageKey, JSON.stringify({{
+                            start: dz.start,
+                            end: dz.end
+                        }}));
+                    }}
+                }}, 500);
+            }});
+
+            // 图例分组联动：30分钟 / 日线
+            var legendGroup30m = [
+                "微观线段", "宏观线段", "演变路径",
+                "历史刷新端点(顶)", "历史刷新端点(底)",
+                "微观中枢", "宏观中枢", "幽灵中枢",
+                "30分钟中枢确认k",
+                "向上转折确立", "向下转折确立"
+            ];
+            var legendGroupDaily = [
+                "日线级别线段",
+                "日线级别线段(Pending)",
+                "日线级别线段(Pending Open)",
+                "日线非同处理",
+                "日线级别中枢",
+                "日线级别中枢(Pending)",
+                "日线中枢 BADC 点",
+                "日线中枢 BADC 点(Pending)"{shadow_daily_legend_js}
+            ];
+            var legendGuard = false;
+
+            chart.on('legendselectchanged', function(params) {{
+                if (legendGuard) return;
+                if (params.name !== "━━ 30分钟 ━━" && params.name !== "━━ 日线 ━━") return;
+
+                legendGuard = true;
+                var names = params.name === "━━ 30分钟 ━━" ? legendGroup30m : legendGroupDaily;
+                var actionType = params.selected[params.name] ? 'legendSelect' : 'legendUnSelect';
+                names.forEach(function(name) {{
+                    chart.dispatchAction({{
+                        type: actionType,
+                        name: name
+                    }});
+                }});
+                legendGuard = false;
+            }});
+
+            // 页面初始化时，让分组按钮的选中状态真正同步到子图层
+            setTimeout(function() {{
+                var opt = chart.getOption();
+                var selected = (((opt || {{}}).legend || [{{}}])[0] || {{}}).selected || {{}};
+
+                legendGuard = true;
+                var dailyOn = selected["━━ 日线 ━━"] !== false;
+                legendGroupDaily.forEach(function(name) {{
+                    chart.dispatchAction({{
+                        type: dailyOn ? 'legendSelect' : 'legendUnSelect',
+                        name: name
+                    }});
+                }});
+
+                var minuteOn = selected["━━ 30分钟 ━━"] === true;
+                legendGroup30m.forEach(function(name) {{
+                    chart.dispatchAction({{
+                        type: minuteOn ? 'legendSelect' : 'legendUnSelect',
+                        name: name
+                    }});
+                }});
+                legendGuard = false;
+            }}, 50);
+
+            // 获取数据最大索引
+            var currentDataIndex = -1;
+            var maxDataIndex = 0;
+            var opt = chart.getOption();
+            if (opt.xAxis && opt.xAxis[0] && opt.xAxis[0].data) {{
+                maxDataIndex = opt.xAxis[0].data.length - 1;
+            }}
+
+            // 监听鼠标在图表上的移动，更新当前的 K 线索引
+            chart.getZr().on('mousemove', function(params) {{
+                var pointInPixel = [params.offsetX, params.offsetY];
+                if (chart.containPixel('grid', pointInPixel)) {{
+                    var pointInGrid = chart.convertFromPixel({{xAxisIndex: 0, yAxisIndex: 0}}, pointInPixel);
+                    if (pointInGrid) {{
+                        currentDataIndex = Math.round(pointInGrid[0]);
+                    }}
+                }}
+            }});
+
+            // 监听键盘左右方向键，逐根 K 线移动十字光标（Tooltip）
+            document.addEventListener('keydown', function(e) {{
+                if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {{
+                    if (currentDataIndex === -1) {{
+                        currentDataIndex = maxDataIndex;
+                    }}
+                    
+                    if (e.key === 'ArrowLeft') {{
+                        currentDataIndex = Math.max(0, currentDataIndex - 1);
+                    }} else if (e.key === 'ArrowRight') {{
+                        currentDataIndex = Math.min(maxDataIndex, currentDataIndex + 1);
+                    }}
+                    
+                    chart.dispatchAction({{
+                        type: 'showTip',
+                        seriesIndex: 0,
+                        dataIndex: currentDataIndex
+                    }});
+                    
+                    // 防止按键导致浏览器页面滚动
+                    e.preventDefault();
+                }}
+            }});
+        }}, 500);
+    }})();
+    """
+    grid.add_js_funcs(zoom_persistence_js)
+
+    abs_output = os.path.abspath(output_file)
+    _ensure_echarts_asset(abs_output)
+    grid.render(abs_output)
+    logger.success(f"成功！ECharts 交互图已保存至: {abs_output}")
+    return grid
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 主入口
+# ─────────────────────────────────────────────────────────────────────
+@dataclass
+class AnalyzeTask:
+    symbol: str
+    sdt: str
+    edt: str
+    desc: str = ""
+    allow_initial_daily_ma_relax: bool = False
+
+
+if __name__ == "__main__":
+    tasks = [
+        AnalyzeTask("603126", sdt="20181220",edt="20201030", desc="中材节能"),
+
+        AnalyzeTask("300371", sdt="20161220",edt="20201030", desc="汇中股份"),
+        AnalyzeTask("002346", sdt="20161201", edt="20211001", desc="柘中股份"),
+        AnalyzeTask("sz002286", sdt="20210101",edt="20210701", desc="保利发展"),
+        AnalyzeTask("300137", sdt="20190415", edt="20201130", desc="先河环保"),
+        AnalyzeTask("000993", sdt="20190515",edt="20200920", desc="闽东电力"),
+        AnalyzeTask("002286", sdt="20200328", edt="20200810", desc="保龄宝"),
+        AnalyzeTask("300428", sdt="20200108", edt="20200520", desc="四通新材"),
+        AnalyzeTask("000411", sdt="20160401", edt="20210701", desc="英特集团"),
+        AnalyzeTask("000553", sdt="20181015", edt="20210701", desc="安道麦A"),
+        AnalyzeTask("002613", sdt="20160801", edt="20210820", desc="北玻股份"),
+        AnalyzeTask("600707", sdt="20140601", edt="20210820", desc="彩虹股份"),
+        AnalyzeTask("300490", sdt="20160115", edt="20210701", desc="华自科技"),
+        AnalyzeTask("603178", sdt="20171015", edt="20211101", desc="圣龙股份"),
+        AnalyzeTask("300339", sdt="20150415",edt="20210701", desc="润和软件"),
+        AnalyzeTask("300311", sdt="20170115", edt="20210801", desc="任子行"),
+        AnalyzeTask("603020", sdt="20151215", edt="20210801", desc="爱普股份"),
+        AnalyzeTask("002772", sdt="20160114", edt="20210701", desc="众兴菌业"),
+        AnalyzeTask("603908", sdt="20170301", edt="20221001", desc="牧高笛", allow_initial_daily_ma_relax=True),
+        AnalyzeTask("002612", sdt="20180414", edt="20210701", desc="朗姿股份"),
+
+        # AnalyzeTask("002222", sdt="20220415", edt="20250201", desc="福晶科技"),
+    ]
+
+    # 🎯 切换这里
+    # task = tasks[-5]
+    task = tasks[-1]
+    try:
+        symbol = task.symbol
+        logger.info(f"正在拉取标的 {symbol} ({task.desc}) | 时间: {task.sdt} ~ {task.edt}")
+        bars = research.get_raw_bars_origin(symbol, sdt=task.sdt, edt=task.edt)
+
+        replay_centers_after_macro_swallow = False
+        enable_pre_round = True
+        with _initial_daily_ma_relax(task.allow_initial_daily_ma_relax):
+            engine = MooreCZSC(
+                bars,
+                ma34_cross_as_valid_gate=True,
+                ma34_cross_expand_one_k=False,
+                audit_link_rounds=3,
+                enable_pre_round=enable_pre_round,
+                replay_centers_after_macro_swallow=replay_centers_after_macro_swallow,
+            )
+        # logger.info(
+        #     f"[配置] macro_audit=True | audit_link_rounds=3 | "
+        #     f"ma34_cross_as_valid_gate=False | "
+        #     f"replay_centers_after_macro_swallow={replay_centers_after_macro_swallow}"
+        # )
+
+        display_tks = getattr(engine, "micro_turning_ks", engine.turning_ks)
+        print("TurningKs:")
+        for i, tk in enumerate(display_tks):
+            suffix = "T" if tk.mark == Mark.G else "B"
+            print(f"{_dt_str(tk.dt)} V{i}{suffix}")
+
+        daily_active_center = getattr(engine, "daily_active_center", getattr(engine, "higher_active_center", None))
+        daily_archived_centers = getattr(engine, "daily_archived_centers", getattr(engine, "higher_archived_centers", []))
+        daily_centers = getattr(engine, "daily_centers", [])
+        fallback_daily_center = daily_active_center or (daily_archived_centers[-1] if daily_archived_centers else None)
+        debug_daily_centers = daily_centers or ([fallback_daily_center] if fallback_daily_center else [])
+        debug_daily_centers = [c for c in debug_daily_centers if c and c.overlap_type in (1, 3)]
+        if debug_daily_centers:
+            center_source = "daily_center_source_30f" if daily_centers else ("active" if daily_active_center else "archived_last")
+            print(
+                f"DailyCenters: {center_source} count={len(debug_daily_centers)}"
+            )
+            for final_daily_center in debug_daily_centers:
+                print(
+                    f"DailyCenter: {_dt_str(final_daily_center.start_dt)} -> {_dt_str(final_daily_center.end_dt)} "
+                    f"[{final_daily_center.low:.3f}, {final_daily_center.high:.3f}] "
+                    f"T{final_daily_center.overlap_type} {final_daily_center.status}"
+                )
+        else:
+            print("DailyCenter: None")
+
+        output_dir = "moore_plots"
+        os.makedirs(output_dir, exist_ok=True)
+        output_file = os.path.join(output_dir, f"{symbol}_moore_echarts.html")
+
+        plot_moore_structure_echarts(
+            bars, engine,
+            output_file=output_file,
+            title=f"摩尔缠论 {symbol} ({task.desc})",
+            desc_text="金色: 宏观 | 紫色: 微观 | 箭头: 中枢线确认K (CK) | 圆圈: 起始锚点 (K0)"
+        )
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        logger.error(f"测绘失败: {e}")

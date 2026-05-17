@@ -587,7 +587,8 @@ def tas_macd_second_bs_V221201(c: CZSC, **kwargs):
         if (s2_con1a or s2_con1b) and s2_con2 and s2_con3:
             v1 = "二卖"
 
-        v2 = cross[-1]["类型"]
+        if cross:
+            v2 = cross[-1]["类型"]
 
     return create_single_signal(k1=k1, k2=k2, k3=k3, v1=v1, v2=v2)
 

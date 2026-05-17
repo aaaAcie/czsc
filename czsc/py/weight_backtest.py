@@ -8,14 +8,16 @@ describe: 按持仓权重回测
 import numpy as np
 import pandas as pd
 from loguru import logger
-from typing import Union, AnyStr, Callable
-from czsc.traders.base import CzscTrader
+from typing import Union, AnyStr, Callable, TYPE_CHECKING
 from rs_czsc import WeightBacktest
 
 __all__ = ["get_ensemble_weight", "stoploss_by_direction", "WeightBacktest"]
 
+if TYPE_CHECKING:
+    from czsc.traders.base import CzscTrader
 
-def get_ensemble_weight(trader: CzscTrader, method: Union[AnyStr, Callable] = "mean"):
+
+def get_ensemble_weight(trader: "CzscTrader", method: Union[AnyStr, Callable] = "mean"):
     """获取 CzscTrader 中所有 positions 按照 method 方法集成之后的权重
 
     函数计算逻辑：
