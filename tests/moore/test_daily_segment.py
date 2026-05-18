@@ -470,8 +470,9 @@ def test_swallow_segment_direct_commit_and_moore_aliases():
 
     engine = MooreCZSC([])
     engine.daily_segment_analyzer.update([swallow])
-    assert engine.daily_segments == engine.higher_segments
-    assert engine.daily_active_center == engine.higher_active_center
+    assert engine.daily_segments == engine.daily_segment_analyzer.daily_segments
+    removed_prefix = "hi" + "gher"
+    assert all(not name.startswith(removed_prefix) for name in dir(engine))
 
 
 def test_trend_relationship_requires_unique_start_extreme_and_allows_equal_end_extreme():

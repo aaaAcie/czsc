@@ -271,6 +271,20 @@ def _daily_open_ended_markline_data(daily_segs: list, bars: list, color: str, wi
     return data
 
 
+def _weekly_seg_markline_data(weekly_segs: list, color: str, width: float, alpha: float = 0.9, line_type: str = "solid") -> list:
+    """把周线级别线段列表转为 markLine data。"""
+    data = []
+    for seg in weekly_segs:
+        data.append([
+            {"coord": [_dt_str(seg.start_seg.start_seg.start_k.dt), seg.start_seg.start_seg.start_k.price],
+             "symbol": "none",
+             "lineStyle": {"color": color, "width": width, "type": line_type, "opacity": alpha}},
+            {"coord": [_dt_str(seg.end_seg.end_seg.end_k.dt), seg.end_seg.end_seg.end_k.price],
+             "symbol": "none"},
+        ])
+    return data
+
+
 # ─────────────────────────────────────────────────────────────────────
 # 核心绘图函数
 # ─────────────────────────────────────────────────────────────────────
@@ -308,13 +322,18 @@ def plot_moore_structure_echarts(
     macro_centers = getattr(engine, "macro_centers", getattr(engine, "all_centers", []))
     ghost_centers = getattr(engine, "ghost_centers", [])
 
-    daily_segments = getattr(engine, "daily_segments", getattr(engine, "higher_segments", []))
+    daily_segments = getattr(engine, "daily_segments", [])
     daily_pending_segments = getattr(engine, "daily_pending_segments", [])
     daily_non_same_segments = getattr(engine, "daily_non_same_segments", [])
     daily_centers = getattr(engine, "daily_centers", [])
     daily_pending_centers = getattr(engine, "daily_pending_centers", [])
-    daily_active_center = getattr(engine, "daily_active_center", getattr(engine, "higher_active_center", None))
-    daily_archived_centers = getattr(engine, "daily_archived_centers", getattr(engine, "higher_archived_centers", []))
+    weekly_segments = getattr(engine, "weekly_segments", [])
+    weekly_pending_segments = getattr(engine, "weekly_pending_segments", [])
+    weekly_non_same_segments = getattr(engine, "weekly_non_same_segments", [])
+    weekly_centers = getattr(engine, "weekly_centers", [])
+    weekly_pending_centers = getattr(engine, "weekly_pending_centers", [])
+    daily_active_center = getattr(engine, "daily_active_center", None)
+    daily_archived_centers = getattr(engine, "daily_archived_centers", [])
     daily_refined_segments = getattr(engine, "daily_refined_segments", None)
     if daily_refined_segments is None:
         daily_refined_segments = getattr(getattr(engine, "daily_segment_analyzer", None), "refined_segments", [])
@@ -715,6 +734,35 @@ def plot_moore_structure_echarts(
     daily_pending_center_area_data = _prepare_daily_center_area_data(daily_pending_centers, "daily_pending")
     daily_center_point_markers = _prepare_daily_center_point_markers(daily_centers, "daily_active")
     daily_pending_center_point_markers = _prepare_daily_center_point_markers(daily_pending_centers, "daily_pending")
+
+    def _prepare_weekly_center_area_data(clist, *, pending: bool = False):
+        data = []
+        for idx, ct in enumerate(clist):
+            if not ct.segments:
+                continue
+            border = "#1565C0"
+            fill = "rgba(21, 101, 192, 0.14)"
+            border_type = "dashed" if pending else "solid"
+            prefix = "PW" if pending else "W"
+            label_txt = f"{prefix}{idx} T{ct.overlap_type} {ct.status}\n上:{ct.high:.3f} 下:{ct.low:.3f}"
+            data.append([
+                {
+                    "xAxis": _dt_str(ct.start_dt), "yAxis": ct.low,
+                    "label": {"show": True, "position": "top", "formatter": label_txt, "fontSize": 10, "color": border, "opacity": 0.9},
+                    "itemStyle": {
+                        "color": fill,
+                        "borderWidth": 2.0,
+                        "borderColor": border,
+                        "opacity": 0.7,
+                        "borderType": border_type,
+                    }
+                },
+                {"xAxis": _dt_str(ct.end_dt), "yAxis": ct.high}
+            ])
+        return data
+
+    weekly_center_area_data = _prepare_weekly_center_area_data(weekly_centers)
+    weekly_pending_center_area_data = _prepare_weekly_center_area_data(weekly_pending_centers, pending=True)
     shadow_daily_segments = list(shadow_b_plan.daily_segments) if shadow_b_plan else []
     shadow_daily_center_events = list(getattr(shadow_b_plan, "center_events", ())) if shadow_b_plan else []
     # ── 6. 构建各图例系列 ─────────────────────────────────────────────
@@ -840,6 +888,7 @@ def plot_moore_structure_echarts(
     s = _seg_series("微观线段", micro_all, "#555555", 2.5, alpha=0.75)
     minute_series = []
     daily_series = []
+    weekly_series = []
     if s:
         minute_series.append(s)
 
@@ -902,6 +951,26 @@ def plot_moore_structure_echarts(
         if s:
             daily_series.append(s)
 
+    s = _raw_seg_series("周线级别线段", _weekly_seg_markline_data(weekly_segments, "#1565C0", 5.4, alpha=0.96), "#1565C0")
+    if s:
+        weekly_series.append(s)
+
+    s = _raw_seg_series(
+        "周线级别线段(Pending)",
+        _weekly_seg_markline_data(weekly_pending_segments, "#1565C0", 4.2, alpha=0.78, line_type="dashed"),
+        "#1565C0",
+    )
+    if s:
+        weekly_series.append(s)
+
+    s = _raw_seg_series(
+        "周线非同处理",
+        _weekly_seg_markline_data(weekly_non_same_segments, "#1565C0", 5.6, alpha=0.98),
+        "#1565C0",
+    )
+    if s:
+        weekly_series.append(s)
+
     s = _raw_seg_series("演变路径", refresh_data, "#BBBBBB")
     if s:
         minute_series.append(s)
@@ -920,11 +989,15 @@ def plot_moore_structure_echarts(
         ("幽灵中枢", ghost_area_data, "#7F8C8D"),
         ("日线级别中枢", daily_center_area_data, "#27AE60"),
         ("日线级别中枢(Pending)", daily_pending_center_area_data, "#E67E22"),
+        ("周线级别中枢", weekly_center_area_data, "#1565C0"),
+        ("周线级别中枢(Pending)", weekly_pending_center_area_data, "#1565C0"),
     ]:
         s = _center_series(name, data, color)
         if not s:
             continue
-        if name.startswith("日线"):
+        if name.startswith("周线"):
+            weekly_series.append(s)
+        elif name.startswith("日线"):
             daily_series.append(s)
         else:
             minute_series.append(s)
@@ -964,6 +1037,8 @@ def plot_moore_structure_echarts(
     # 图例分组：作为明显的批量开关按钮，并放在各自图层前面
     overlay_series.append(_legend_group_series(dates, "━━ 日线 ━━", "#C0392B"))
     overlay_series.extend(daily_series)
+    overlay_series.append(_legend_group_series(dates, "━━ 周线 ━━", "#1565C0"))
+    overlay_series.extend(weekly_series)
     overlay_series.append(_legend_group_series(dates, "━━ 30分钟 ━━", "#7F8C8D"))
     overlay_series.extend(minute_series)
 
@@ -1093,12 +1168,16 @@ def plot_moore_structure_echarts(
                     is_show=False, type_="inside",
                     xaxis_index=[0, 1],
                     range_start=0, range_end=100,
+                    is_zoom_on_mouse_wheel=False,
+                    is_move_on_mouse_wheel=False,
                 ),
                 opts.DataZoomOpts(
                     is_show=True, type_="slider",
                     xaxis_index=[0, 1],
                     range_start=0, range_end=100,
                     pos_bottom="55px",
+                    is_zoom_on_mouse_wheel=False,
+                    is_move_on_mouse_wheel=False,
                 ),
             ],
             legend_opts=opts.LegendOpts(
@@ -1109,6 +1188,7 @@ def plot_moore_structure_echarts(
                 selected_map={
                     "━━ 30分钟 ━━": False,
                     "━━ 日线 ━━": True,
+                    "━━ 周线 ━━": True,
                     "微观线段": False,
                     "宏观线段": False,
                     "演变路径": False,
@@ -1121,6 +1201,9 @@ def plot_moore_structure_echarts(
                     "向上转折确立": False,
                     "向下转折确立": False,
                     "日线级别中枢": True,
+                    "周线级别线段": True,
+                    "周线非同处理": True,
+                    "周线级别中枢": True,
                     **({
                         "Daily Shadow B": True,
                         "B Shadow Centers": True,
@@ -1256,7 +1339,7 @@ def plot_moore_structure_echarts(
                 }}, 500);
             }});
 
-            // 图例分组联动：30分钟 / 日线
+            // 图例分组联动：30分钟 / 日线 / 周线
             var legendGroup30m = [
                 "微观线段", "宏观线段", "演变路径",
                 "历史刷新端点(顶)", "历史刷新端点(底)",
@@ -1274,14 +1357,21 @@ def plot_moore_structure_echarts(
                 "日线中枢 BADC 点",
                 "日线中枢 BADC 点(Pending)"{shadow_daily_legend_js}
             ];
+            var legendGroupWeekly = [
+                "周线级别线段",
+                "周线级别线段(Pending)",
+                "周线非同处理",
+                "周线级别中枢",
+                "周线级别中枢(Pending)"
+            ];
             var legendGuard = false;
 
             chart.on('legendselectchanged', function(params) {{
                 if (legendGuard) return;
-                if (params.name !== "━━ 30分钟 ━━" && params.name !== "━━ 日线 ━━") return;
+                if (params.name !== "━━ 30分钟 ━━" && params.name !== "━━ 日线 ━━" && params.name !== "━━ 周线 ━━") return;
 
                 legendGuard = true;
-                var names = params.name === "━━ 30分钟 ━━" ? legendGroup30m : legendGroupDaily;
+                var names = params.name === "━━ 30分钟 ━━" ? legendGroup30m : (params.name === "━━ 日线 ━━" ? legendGroupDaily : legendGroupWeekly);
                 var actionType = params.selected[params.name] ? 'legendSelect' : 'legendUnSelect';
                 names.forEach(function(name) {{
                     chart.dispatchAction({{
@@ -1299,9 +1389,16 @@ def plot_moore_structure_echarts(
 
                 legendGuard = true;
                 var dailyOn = selected["━━ 日线 ━━"] !== false;
+                var weeklyOn = selected["━━ 周线 ━━"] !== false;
                 legendGroupDaily.forEach(function(name) {{
                     chart.dispatchAction({{
                         type: dailyOn ? 'legendSelect' : 'legendUnSelect',
+                        name: name
+                    }});
+                }});
+                legendGroupWeekly.forEach(function(name) {{
+                    chart.dispatchAction({{
+                        type: weeklyOn ? 'legendSelect' : 'legendUnSelect',
                         name: name
                     }});
                 }});
@@ -1400,17 +1497,20 @@ if __name__ == "__main__":
         AnalyzeTask("300490", sdt="20160115", edt="20210701", desc="华自科技"),
         AnalyzeTask("603178", sdt="20171015", edt="20211101", desc="圣龙股份"),
         AnalyzeTask("300339", sdt="20150415",edt="20210701", desc="润和软件"),
-        AnalyzeTask("300311", sdt="20170115", edt="20210801", desc="任子行"),
+        AnalyzeTask("300311", sdt="20170115",edt="20210801", desc="任子行"),
         AnalyzeTask("603020", sdt="20151215", edt="20210801", desc="爱普股份"),
         AnalyzeTask("002772", sdt="20160114", edt="20210701", desc="众兴菌业"),
         AnalyzeTask("603908", sdt="20170301", edt="20221001", desc="牧高笛", allow_initial_daily_ma_relax=True),
-        AnalyzeTask("002612", sdt="20180414", edt="20210701", desc="朗姿股份"),
+        # AnalyzeTask("002612", sdt="20100101", edt="20210701", desc="朗姿股份"),
+        AnalyzeTask("002612", sdt="20180410", edt="20210701", desc="朗姿股份"),
+        AnalyzeTask("002140", sdt="20180901", edt="20210901", desc="东华科技", allow_initial_daily_ma_relax=True),
+
 
         # AnalyzeTask("002222", sdt="20220415", edt="20250201", desc="福晶科技"),
     ]
 
     # 🎯 切换这里
-    # task = tasks[-5]
+    # task = tasks[-2]
     task = tasks[-1]
     try:
         symbol = task.symbol
@@ -1440,8 +1540,8 @@ if __name__ == "__main__":
             suffix = "T" if tk.mark == Mark.G else "B"
             print(f"{_dt_str(tk.dt)} V{i}{suffix}")
 
-        daily_active_center = getattr(engine, "daily_active_center", getattr(engine, "higher_active_center", None))
-        daily_archived_centers = getattr(engine, "daily_archived_centers", getattr(engine, "higher_archived_centers", []))
+        daily_active_center = getattr(engine, "daily_active_center", None)
+        daily_archived_centers = getattr(engine, "daily_archived_centers", [])
         daily_centers = getattr(engine, "daily_centers", [])
         fallback_daily_center = daily_active_center or (daily_archived_centers[-1] if daily_archived_centers else None)
         debug_daily_centers = daily_centers or ([fallback_daily_center] if fallback_daily_center else [])
