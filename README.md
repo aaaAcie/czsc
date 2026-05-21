@@ -67,6 +67,13 @@ uv sync
 pip install -r requirements.txt
 ```
 
+如果你现在服务器上的 `uv sync --frozen` 还在拉 `matplotlib`，说明它还在用旧的 `uv.lock`。这种情况下先用下面这个最稳：
+```
+uv pip install -r requirements.txt
+```
+
+等 `uv.lock` 重新刷新后，再用 `uv sync --frozen`。
+
 如果你要完整的研究、回测、服务和开发环境，再装完整依赖：
 ```
 uv sync --extra full
