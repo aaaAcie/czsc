@@ -1275,6 +1275,30 @@ def test_regression_603020_long_primary_splits_on_internal_center_chain():
     assert pending_pairs[:1] == [("mV28T", "mV35B")]
 
 
+def test_regression_002612_cold_start_prefers_zero_origin_path_over_local_segment():
+    bars = research.get_raw_bars_origin("002612", sdt="20180501", edt="20201001")
+    if not bars:
+        pytest.skip("no bars for 002612")
+
+    engine = MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+        rebuild_daily_centers_after_segment_change=True,
+    )
+    label, _ = make_visible_labelers(engine)
+
+    daily_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_segments]
+    pending_pairs = [(label(ds.start_seg.start_k), label(ds.end_seg.end_k)) for ds in engine.daily_pending_segments]
+
+    assert daily_pairs[:1] == [("mV0T", "mV13B")]
+    assert pending_pairs[:1] == [("mV13B", "mV18T")]
+    assert ("mV1B", "mV6T") not in daily_pairs
+
+
 def test_regression_300311_rejects_type3_with_invalid_owner_chain():
     engine = make_300311_engine()
     label, _ = make_visible_labelers(engine)

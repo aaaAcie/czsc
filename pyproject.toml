@@ -35,46 +35,13 @@ classifiers = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-    # 核心数据处理
+    # 图表 / 研究通用的最小运行集
     "pandas>=1.0.0",
     "numpy",
     "pyarrow",
-    "openpyxl",
-    # 网络请求
-    "requests>=2.24.0",
-    "requests_toolbelt",
-    # 数据库连接
-    "redis",
-    "clickhouse_connect",
-    # 云存储
-    "oss2",
-    # 数学计算和统计
-    "scipy",
-    "statsmodels",
-    "scikit-learn",
-    # 技术分析
-    "TA-Lib>=0.6",
-    "rs-czsc>=0.1.17.post251110",
-    # 图表和可视化
-    "matplotlib",
-    "seaborn",
-    "plotly",
     "pyecharts>=1.9.1",
-    "lightweight-charts",
-    "streamlit",
-    # PDF 报告
-    "reportlab>=4.0",
-    "kaleido",
-    # 工具库
-    "tqdm>=4.66.4",
     "loguru",
-    "dill",
-    "tenacity",
     "parse",
-    "Deprecated",
-    "cryptography",
-    "pytz",
-    "fonttools>=4.61.0",
 ]
 
 [[tool.uv.index]]
@@ -82,30 +49,81 @@ url = "https://pypi.python.org/simple"
 default = true
 
 [project.optional-dependencies]
-# 测试依赖
-test = [
-    "pytest>=7.0.0",
-    "pytest-cov>=4.0.0",
+research = [
+    "rs-czsc>=0.1.17.post251110",
+    "TA-Lib>=0.6",
+    "scipy",
+    "statsmodels",
+    "scikit-learn",
+    "plotly",
+    "matplotlib",
+    "seaborn",
+    "lightweight-charts",
+    "kaleido",
+    "reportlab>=4.0",
 ]
 
-# 开发工具
-dev = [
-    "ipython",
+service = [
+    "streamlit",
     "jupyter",
+    "ipython",
+    "streamlit-ace",
+]
+
+integration = [
+    "requests>=2.24.0",
+    "requests_toolbelt",
+    "redis",
+    "clickhouse_connect",
+    "oss2",
+]
+
+dev = [
+    "pytest>=8.4.1",
+    "pytest-cov>=4.0.0",
     "black",
     "isort",
     "flake8",
-]
-
-# 版本管理工具
-release = [
     "twine",
     "build",
 ]
 
-# 完整开发环境（包含测试和开发工具）
-all = [
-    "czsc[test,dev,release]",
+full = [
+    "requests>=2.24.0",
+    "requests_toolbelt",
+    "redis",
+    "clickhouse_connect",
+    "oss2",
+    "rs-czsc>=0.1.17.post251110",
+    "TA-Lib>=0.6",
+    "scipy",
+    "statsmodels",
+    "scikit-learn",
+    "plotly",
+    "matplotlib",
+    "seaborn",
+    "lightweight-charts",
+    "kaleido",
+    "reportlab>=4.0",
+    "streamlit-ace",
+    "streamlit",
+    "jupyter",
+    "ipython",
+    "pytest>=8.4.1",
+    "pytest-cov>=4.0.0",
+    "black",
+    "isort",
+    "flake8",
+    "twine",
+    "build",
+    "openpyxl",
+    "tqdm>=4.66.4",
+    "dill",
+    "tenacity",
+    "Deprecated",
+    "cryptography",
+    "pytz",
+    "fonttools>=4.61.0",
 ]
 
 [project.urls]

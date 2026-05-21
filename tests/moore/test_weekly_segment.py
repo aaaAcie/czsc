@@ -92,6 +92,49 @@ def test_weekly_non_same_uses_one_or_two_daily_segments_with_three_internal_cent
     assert weekly.centers[0].cache["source_rails"] == "first_daily_trend_center"
 
 
+def test_weekly_non_same_requires_later_center_to_return_to_first_center_range():
+    source_segments = [
+        make_seg(0, 10, Direction.Up, 10, 14),
+        make_seg(10, 20, Direction.Down, 14, 12),
+        make_seg(20, 30, Direction.Up, 12, 16),
+    ]
+    daily_segments = [
+        make_daily_segment_from_segments(source_segments[:2]),
+        make_daily_segment_from_segments(source_segments[2:]),
+    ]
+    centers = [
+        DailySegmentCenter(
+            segments=[source_segments[0]],
+            high=12,
+            low=10,
+            overlap_type=1,
+            points={"A": (1, 10), "B": (2, 12)},
+            cache={"center_kind": "trend_class", "identity_key": ("c", 0)},
+        ),
+        DailySegmentCenter(
+            segments=[source_segments[1]],
+            high=15,
+            low=12,
+            overlap_type=1,
+            points={"A": (11, 12), "B": (12, 15)},
+            cache={"center_kind": "trend_class", "identity_key": ("c", 1)},
+        ),
+        DailySegmentCenter(
+            segments=[source_segments[2]],
+            high=17,
+            low=15,
+            overlap_type=1,
+            points={"A": (21, 15), "B": (22, 17)},
+            cache={"center_kind": "trend_class", "identity_key": ("c", 2)},
+        ),
+    ]
+
+    analyzer = WeeklySegmentAnalyzer(daily_segments, daily_centers=centers, ma170=make_ma170({}))
+
+    assert analyzer.weekly_non_same_segments == []
+    assert analyzer.weekly_segments == []
+
+
 def test_weekly_non_same_ignores_source_segments_trend_relationship():
     source_segments = [
         make_seg(0, 10, Direction.Up, 10, 14),

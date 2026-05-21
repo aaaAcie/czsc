@@ -282,9 +282,19 @@ class WeeklySegmentAnalyzer:
                 continue
             centers = self._trend_centers_inside_daily_window(window)
             selected = self._dedupe_centers(centers)
-            if len(selected) >= 3:
-                return selected[:3]
+            if self._non_same_centers_complete_upgrade(selected):
+                return selected
         return []
+
+    @staticmethod
+    def _center_strictly_returns_to_source(source: DailySegmentCenter, later: DailySegmentCenter) -> bool:
+        return max(source.low, later.low) < min(source.high, later.high)
+
+    def _non_same_centers_complete_upgrade(self, centers: Sequence[DailySegmentCenter]) -> bool:
+        if len(centers) < 3:
+            return False
+        source = centers[0]
+        return any(self._center_strictly_returns_to_source(source, center) for center in centers[1:])
 
     def _trend_centers_inside_daily_window(self, window: Sequence[DailySegment]) -> List[DailySegmentCenter]:
         left = window[0].start_seg.start_k.k_index

@@ -57,6 +57,26 @@
 
 **注意:** python 版本必须大于等于 3.8
 
+如果你只是要在服务器上跑日线图表、生成 HTML，用最小运行集就够了：
+```
+uv sync
+```
+
+或者直接装最小依赖：
+```
+pip install -r requirements.txt
+```
+
+如果你要完整的研究、回测、服务和开发环境，再装完整依赖：
+```
+uv sync --extra full
+```
+
+或者：
+```
+pip install -r requirements-full.txt
+```
+
 直接从github安装：
 ```
 pip install git@github.com:waditu/czsc.git -U
