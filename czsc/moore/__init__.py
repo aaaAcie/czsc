@@ -2,10 +2,7 @@
 from .objects import TurningK, MooreCenter, MooreSegment
 from .analyze import MooreCZSC
 from .daily_segment import DailySegmentAnalyzer, DailySegmentCenter, DailySegment
-
-HigherAnalyzer = DailySegmentAnalyzer
-HigherCenter = DailySegmentCenter
-HigherSegment = DailySegment
+from .weekly_segment import WeeklySegmentAnalyzer, WeeklySegmentCenter, WeeklySegment
 
 __all__ = [
     'TurningK',
@@ -15,7 +12,7 @@ __all__ = [
     'DailySegmentAnalyzer',
     'DailySegmentCenter',
     'DailySegment',
-    'HigherAnalyzer',
-    'HigherCenter',
-    'HigherSegment',
+    'WeeklySegmentAnalyzer',
+    'WeeklySegmentCenter',
+    'WeeklySegment',
 ]

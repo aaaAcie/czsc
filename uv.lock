@@ -950,24 +950,46 @@ wheels = [
 name = "czsc"
 source = { editable = "." }
 dependencies = [
+    { name = "loguru" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.python.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.3.3", source = { registry = "https://pypi.python.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "pandas" },
+    { name = "parse" },
+    { name = "pyarrow" },
+    { name = "pyecharts" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "black" },
+    { name = "build" },
+    { name = "flake8" },
+    { name = "isort" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "twine" },
+]
+full = [
+    { name = "black" },
+    { name = "build" },
     { name = "clickhouse-connect" },
     { name = "cryptography" },
     { name = "deprecated" },
     { name = "dill" },
+    { name = "flake8" },
     { name = "fonttools" },
+    { name = "ipython", version = "8.37.0", source = { registry = "https://pypi.python.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "ipython", version = "9.5.0", source = { registry = "https://pypi.python.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "isort" },
+    { name = "jupyter" },
     { name = "kaleido" },
     { name = "lightweight-charts" },
-    { name = "loguru" },
     { name = "matplotlib" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.python.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.3.3", source = { registry = "https://pypi.python.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "openpyxl" },
     { name = "oss2" },
-    { name = "pandas" },
-    { name = "parse" },
     { name = "plotly" },
-    { name = "pyarrow" },
-    { name = "pyecharts" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
     { name = "pytz" },
     { name = "redis" },
     { name = "reportlab" },
@@ -980,39 +1002,39 @@ dependencies = [
     { name = "seaborn" },
     { name = "statsmodels" },
     { name = "streamlit" },
+    { name = "streamlit-ace" },
     { name = "ta-lib" },
     { name = "tenacity" },
     { name = "tqdm" },
-]
-
-[package.optional-dependencies]
-all = [
-    { name = "black" },
-    { name = "build" },
-    { name = "flake8" },
-    { name = "ipython", version = "8.37.0", source = { registry = "https://pypi.python.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "ipython", version = "9.5.0", source = { registry = "https://pypi.python.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "isort" },
-    { name = "jupyter" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
     { name = "twine" },
 ]
-dev = [
-    { name = "black" },
-    { name = "flake8" },
+integration = [
+    { name = "clickhouse-connect" },
+    { name = "oss2" },
+    { name = "redis" },
+    { name = "requests" },
+    { name = "requests-toolbelt" },
+]
+research = [
+    { name = "kaleido" },
+    { name = "lightweight-charts" },
+    { name = "matplotlib" },
+    { name = "plotly" },
+    { name = "reportlab" },
+    { name = "rs-czsc" },
+    { name = "scikit-learn" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.python.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.16.2", source = { registry = "https://pypi.python.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "seaborn" },
+    { name = "statsmodels" },
+    { name = "ta-lib" },
+]
+service = [
     { name = "ipython", version = "8.37.0", source = { registry = "https://pypi.python.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "ipython", version = "9.5.0", source = { registry = "https://pypi.python.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "isort" },
     { name = "jupyter" },
-]
-release = [
-    { name = "build" },
-    { name = "twine" },
-]
-test = [
-    { name = "pytest" },
-    { name = "pytest-cov" },
+    { name = "streamlit" },
+    { name = "streamlit-ace" },
 ]
 
 [package.dev-dependencies]
@@ -1027,57 +1049,76 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "black", marker = "extra == 'all'" },
     { name = "black", marker = "extra == 'dev'" },
-    { name = "build", marker = "extra == 'all'" },
-    { name = "build", marker = "extra == 'release'" },
-    { name = "clickhouse-connect" },
-    { name = "cryptography" },
-    { name = "deprecated" },
-    { name = "dill" },
-    { name = "flake8", marker = "extra == 'all'" },
+    { name = "black", marker = "extra == 'full'" },
+    { name = "build", marker = "extra == 'dev'" },
+    { name = "build", marker = "extra == 'full'" },
+    { name = "clickhouse-connect", marker = "extra == 'full'" },
+    { name = "clickhouse-connect", marker = "extra == 'integration'" },
+    { name = "cryptography", marker = "extra == 'full'" },
+    { name = "deprecated", marker = "extra == 'full'" },
+    { name = "dill", marker = "extra == 'full'" },
     { name = "flake8", marker = "extra == 'dev'" },
-    { name = "fonttools", specifier = ">=4.61.0" },
-    { name = "ipython", marker = "extra == 'all'" },
-    { name = "ipython", marker = "extra == 'dev'" },
-    { name = "isort", marker = "extra == 'all'" },
+    { name = "flake8", marker = "extra == 'full'" },
+    { name = "fonttools", marker = "extra == 'full'", specifier = ">=4.61.0" },
+    { name = "ipython", marker = "extra == 'full'" },
+    { name = "ipython", marker = "extra == 'service'" },
     { name = "isort", marker = "extra == 'dev'" },
-    { name = "jupyter", marker = "extra == 'all'" },
-    { name = "jupyter", marker = "extra == 'dev'" },
-    { name = "kaleido" },
-    { name = "lightweight-charts" },
+    { name = "isort", marker = "extra == 'full'" },
+    { name = "jupyter", marker = "extra == 'full'" },
+    { name = "jupyter", marker = "extra == 'service'" },
+    { name = "kaleido", marker = "extra == 'full'" },
+    { name = "kaleido", marker = "extra == 'research'" },
+    { name = "lightweight-charts", marker = "extra == 'full'" },
+    { name = "lightweight-charts", marker = "extra == 'research'" },
     { name = "loguru" },
-    { name = "matplotlib" },
+    { name = "matplotlib", marker = "extra == 'full'" },
+    { name = "matplotlib", marker = "extra == 'research'" },
     { name = "numpy" },
-    { name = "openpyxl" },
-    { name = "oss2" },
+    { name = "openpyxl", marker = "extra == 'full'" },
+    { name = "oss2", marker = "extra == 'full'" },
+    { name = "oss2", marker = "extra == 'integration'" },
     { name = "pandas", specifier = ">=1.0.0" },
     { name = "parse" },
-    { name = "plotly" },
+    { name = "plotly", marker = "extra == 'full'" },
+    { name = "plotly", marker = "extra == 'research'" },
     { name = "pyarrow" },
     { name = "pyecharts", specifier = ">=1.9.1" },
-    { name = "pytest", marker = "extra == 'all'", specifier = ">=7.0.0" },
-    { name = "pytest", marker = "extra == 'test'", specifier = ">=7.0.0" },
-    { name = "pytest-cov", marker = "extra == 'all'", specifier = ">=4.0.0" },
-    { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4.0.0" },
-    { name = "pytz" },
-    { name = "redis" },
-    { name = "reportlab", specifier = ">=4.0" },
-    { name = "requests", specifier = ">=2.24.0" },
-    { name = "requests-toolbelt" },
-    { name = "rs-czsc", specifier = ">=0.1.17.post251110" },
-    { name = "scikit-learn" },
-    { name = "scipy" },
-    { name = "seaborn" },
-    { name = "statsmodels" },
-    { name = "streamlit" },
-    { name = "ta-lib", specifier = ">=0.6" },
-    { name = "tenacity" },
-    { name = "tqdm", specifier = ">=4.66.4" },
-    { name = "twine", marker = "extra == 'all'" },
-    { name = "twine", marker = "extra == 'release'" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.1" },
+    { name = "pytest", marker = "extra == 'full'", specifier = ">=8.4.1" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
+    { name = "pytest-cov", marker = "extra == 'full'", specifier = ">=4.0.0" },
+    { name = "pytz", marker = "extra == 'full'" },
+    { name = "redis", marker = "extra == 'full'" },
+    { name = "redis", marker = "extra == 'integration'" },
+    { name = "reportlab", marker = "extra == 'full'", specifier = ">=4.0" },
+    { name = "reportlab", marker = "extra == 'research'", specifier = ">=4.0" },
+    { name = "requests", marker = "extra == 'full'", specifier = ">=2.24.0" },
+    { name = "requests", marker = "extra == 'integration'", specifier = ">=2.24.0" },
+    { name = "requests-toolbelt", marker = "extra == 'full'" },
+    { name = "requests-toolbelt", marker = "extra == 'integration'" },
+    { name = "rs-czsc", marker = "extra == 'full'", specifier = ">=0.1.17.post251110" },
+    { name = "rs-czsc", marker = "extra == 'research'", specifier = ">=0.1.17.post251110" },
+    { name = "scikit-learn", marker = "extra == 'full'" },
+    { name = "scikit-learn", marker = "extra == 'research'" },
+    { name = "scipy", marker = "extra == 'full'" },
+    { name = "scipy", marker = "extra == 'research'" },
+    { name = "seaborn", marker = "extra == 'full'" },
+    { name = "seaborn", marker = "extra == 'research'" },
+    { name = "statsmodels", marker = "extra == 'full'" },
+    { name = "statsmodels", marker = "extra == 'research'" },
+    { name = "streamlit", marker = "extra == 'full'" },
+    { name = "streamlit", marker = "extra == 'service'" },
+    { name = "streamlit-ace", marker = "extra == 'full'" },
+    { name = "streamlit-ace", marker = "extra == 'service'" },
+    { name = "ta-lib", marker = "extra == 'full'", specifier = ">=0.6" },
+    { name = "ta-lib", marker = "extra == 'research'", specifier = ">=0.6" },
+    { name = "tenacity", marker = "extra == 'full'" },
+    { name = "tqdm", marker = "extra == 'full'", specifier = ">=4.66.4" },
+    { name = "twine", marker = "extra == 'dev'" },
+    { name = "twine", marker = "extra == 'full'" },
 ]
-provides-extras = ["all", "dev", "release", "test"]
+provides-extras = ["dev", "full", "integration", "research", "service"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -4380,6 +4421,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/24/17/c8024e4ef311dc7833987c603a7d0ebe82f8aa352aaca53b27be3f6b7f01/streamlit-1.49.1.tar.gz", hash = "sha256:6f213f1e43f035143a56f58ad50068d8a09482f0a2dad1050d7e7e99a9689818", size = 9640116, upload-time = "2025-08-29T18:35:45.055Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/85/9e/146cdef515ad07e56c3aa942d087562498592d441aa3bae845ef0cd8fca3/streamlit-1.49.1-py3-none-any.whl", hash = "sha256:ad7b6d0dc35db168587acf96f80378249467fc057ed739a41c511f6bf5aa173b", size = 10044388, upload-time = "2025-08-29T18:35:42.239Z" },
+]
+
+[[package]]
+name = "streamlit-ace"
+version = "0.1.1"
+source = { registry = "https://pypi.python.org/simple" }
+dependencies = [
+    { name = "streamlit" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2e/34/a508123af170e41852d247b17d38d9cddc2b4be3884f2f29a84aeb322992/streamlit_ace-0.1.1.tar.gz", hash = "sha256:1852fa19707685fd4241be9256c1ab1a89da4a3b8c28ab286e3bff122d3a1686", size = 2389652, upload-time = "2021-12-07T19:01:15.66Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8d/c9/e862cefc5735e11c101b2bc45f37a2b767666ffe673d262004202b506f3b/streamlit_ace-0.1.1-py3-none-any.whl", hash = "sha256:cdf908a90058fa831fb720d29e2aef35a0f5799eac33e2b2e58ba9f3631b1aa5", size = 3642928, upload-time = "2021-12-07T19:01:11.288Z" },
 ]
 
 [[package]]

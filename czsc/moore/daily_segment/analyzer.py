@@ -155,11 +155,6 @@ class DailySegmentAnalyzer:
     def candidates(self) -> List[DailySegmentCenter]:
         return self.state.candidates
 
-    # 兼容旧命名
-    @property
-    def higher_segments(self) -> List[DailySegment]:
-        return self.daily_segments
-
     def _rebuild(self):
         s = self.state
         bars_by_index = {i: bar for i, bar in enumerate(s.bars_raw)} if s.bars_raw else collect_bars_by_index(s.base_segments)
@@ -1699,10 +1694,3 @@ class DailySegmentAnalyzer:
     @staticmethod
     def _ma_relation_state_from_values(fast, slow) -> int:
         return ma_relation_state_from_values(fast, slow)
-
-
-# 兼容旧命名
-HigherAnalyzer = DailySegmentAnalyzer
-HigherCenter = DailySegmentCenter
-HigherSegment = DailySegment
-HigherState = DailySegmentState

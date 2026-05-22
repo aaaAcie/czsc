@@ -20,7 +20,6 @@ from .io import dill_dump, dill_load, read_json, save_json
 from .trade import update_nxb, update_bbars, update_tbars, risk_free_returns, resample_to_daily
 from .cross import cross_sectional_ranker
 from .index_composition import index_composition
-from .oss import AliyunOSS
 
 from .analysis import (
     nmi_matrix, single_linear, cross_sectional_ic,
@@ -297,6 +296,8 @@ _LAZY_ATTRS = {
     'plot_weight_time_series': ('czsc.utils.plotting.weight', 'plot_weight_time_series'),
     # sig
     'get_sub_elements': ('czsc.utils.sig', 'get_sub_elements'),
+    # OSS
+    'AliyunOSS': ('czsc.utils.oss', 'AliyunOSS'),
     # loguru logger
     'logger': ('loguru', 'logger'),
 }
