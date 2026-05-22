@@ -1205,8 +1205,8 @@ def plot_moore_structure_echarts(
                     "周线非同处理": True,
                     "周线级别中枢": True,
                     **({
-                        "Daily Shadow B": True,
-                        "B Shadow Centers": True,
+                        "Daily Shadow B": False,
+                        "B Shadow Centers": False,
                     } if show_daily_shadow_b else {}),
                 }
             ),
@@ -1391,8 +1391,9 @@ def plot_moore_structure_echarts(
                 var dailyOn = selected["━━ 日线 ━━"] !== false;
                 var weeklyOn = selected["━━ 周线 ━━"] !== false;
                 legendGroupDaily.forEach(function(name) {{
+                    var defaultOff = name === "Daily Shadow B" || name === "B Shadow Centers";
                     chart.dispatchAction({{
-                        type: dailyOn ? 'legendSelect' : 'legendUnSelect',
+                        type: (dailyOn && !defaultOff) ? 'legendSelect' : 'legendUnSelect',
                         name: name
                     }});
                 }});
