@@ -1301,6 +1301,11 @@ def plot_moore_structure_echarts(
         if show_daily_shadow_b
         else ""
     )
+    shadow_daily_default_off_js = (
+        'var defaultOff = name === "Daily Shadow B" || name === "B Shadow Centers";'
+        if show_daily_shadow_b
+        else "var defaultOff = false;"
+    )
     zoom_persistence_js = f"""
     (function() {{
         var storageKey = "echarts_zoom_{chart_symbol}";
@@ -1391,7 +1396,7 @@ def plot_moore_structure_echarts(
                 var dailyOn = selected["━━ 日线 ━━"] !== false;
                 var weeklyOn = selected["━━ 周线 ━━"] !== false;
                 legendGroupDaily.forEach(function(name) {{
-                    var defaultOff = name === "Daily Shadow B" || name === "B Shadow Centers";
+                    {shadow_daily_default_off_js}
                     chart.dispatchAction({{
                         type: (dailyOn && !defaultOff) ? 'legendSelect' : 'legendUnSelect',
                         name: name
@@ -1508,7 +1513,7 @@ if __name__ == "__main__":
 
         AnalyzeTask("603933", sdt="20170801", edt="20221001", desc="睿能科技", allow_initial_daily_ma_relax=True),
         AnalyzeTask("600331", sdt="20170801", edt="20221001", desc="宏达股份", allow_initial_daily_ma_relax=True),
-        AnalyzeTask("300339", sdt="20150415",edt="20210701", desc="润和软件"),
+        AnalyzeTask("300339", sdt="20151115",edt="20250701", desc="润和软件"),
 
 
         # AnalyzeTask("002222", sdt="20220415", edt="20250201", desc="福晶科技"),

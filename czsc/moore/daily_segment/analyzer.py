@@ -166,14 +166,14 @@ class DailySegmentAnalyzer:
         )
         if s.anchor_k_index is None or should_fallback or danger is None:
             self._full_rebuild_from_scratch()
-            self._extend_final_unfrozen_tail_if_needed()
+            self._settle_tail_extension()
             self._rebuild_daily_centers()
             return
 
         self._restore_from_anchor_snapshot()
         for seg in danger:
             self._process_new_segment(seg)
-        self._extend_final_unfrozen_tail_if_needed()
+        self._settle_tail_extension()
         self._rebuild_daily_centers()
 
     def _full_rebuild_from_scratch(self):
@@ -1412,6 +1412,11 @@ class DailySegmentAnalyzer:
             s.pending_anchor_snapshot = True
         return True
 
+    def _settle_tail_extension(self):
+        if not self._extend_final_unfrozen_tail_if_needed():
+            return
+        self._commit_ready_daily_segments()
+
     def _finalize_terminal_swallow_pending(self):
         s = self.state
         segments = list(s.current_segments)
@@ -1465,6 +1470,8 @@ class DailySegmentAnalyzer:
             return None
         completed = self.state.completed_segments[-1]
         if not is_opposite_direction(decision.segments[0].direction, completed.direction):
+            return None
+        if decision.pending_segments:
             return None
         if decision.independence.kind == "no_daily_center":
             return decision
@@ -1551,7 +1558,9 @@ class DailySegmentAnalyzer:
         if self.state.continuity_broken:
             return None
         if self.state.pending_after_tail_extension:
-            return self._tail_extension_independence_decision(segments)
+            tail_decision = self._tail_extension_independence_decision(segments)
+            if tail_decision:
+                return tail_decision
         if not self.state.completed_segments and len(segments) >= 3:
             return find_cold_start_decision(
                 segments,
