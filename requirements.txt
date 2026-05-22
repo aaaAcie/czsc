@@ -1,6 +1,5 @@
 pandas>=1.0.0
 numpy
-pyarrow
 pyecharts>=1.9.1
 loguru
 parse

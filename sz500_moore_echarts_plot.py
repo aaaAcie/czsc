@@ -1190,7 +1190,7 @@ def plot_moore_structure_echarts(
                     "━━ 日线 ━━": True,
                     "━━ 周线 ━━": True,
                     "微观线段": False,
-                    "宏观线段": False,
+                    "宏观线段": True,
                     "演变路径": False,
                     "历史刷新端点(顶)": False,
                     "历史刷新端点(底)": False,
@@ -1405,8 +1405,9 @@ def plot_moore_structure_echarts(
 
                 var minuteOn = selected["━━ 30分钟 ━━"] === true;
                 legendGroup30m.forEach(function(name) {{
+                    var defaultOn = name === "宏观线段";
                     chart.dispatchAction({{
-                        type: minuteOn ? 'legendSelect' : 'legendUnSelect',
+                        type: (minuteOn || defaultOn) ? 'legendSelect' : 'legendUnSelect',
                         name: name
                     }});
                 }});
@@ -1496,7 +1497,6 @@ if __name__ == "__main__":
         AnalyzeTask("600707", sdt="20140601", edt="20210820", desc="彩虹股份"),
         AnalyzeTask("300490", sdt="20160115", edt="20210701", desc="华自科技"),
         AnalyzeTask("603178", sdt="20171015", edt="20211101", desc="圣龙股份"),
-        AnalyzeTask("300339", sdt="20150415",edt="20210701", desc="润和软件"),
         AnalyzeTask("300311", sdt="20170115",edt="20210801", desc="任子行"),
         AnalyzeTask("603020", sdt="20151215", edt="20210801", desc="爱普股份"),
         AnalyzeTask("002772", sdt="20160114", edt="20210701", desc="众兴菌业"),
@@ -1506,6 +1506,9 @@ if __name__ == "__main__":
         AnalyzeTask("002140", sdt="20180901", edt="20211001", desc="东华科技", allow_initial_daily_ma_relax=True),
 
         AnalyzeTask("603933", sdt="20170801", edt="20221001", desc="睿能科技", allow_initial_daily_ma_relax=True),
+        AnalyzeTask("600331", sdt="20170801", edt="20221001", desc="宏达股份", allow_initial_daily_ma_relax=True),
+        AnalyzeTask("300339", sdt="20150415",edt="20210701", desc="润和软件"),
+
 
         # AnalyzeTask("002222", sdt="20220415", edt="20250201", desc="福晶科技"),
     ]

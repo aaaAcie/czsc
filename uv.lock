@@ -955,7 +955,6 @@ dependencies = [
     { name = "numpy", version = "2.3.3", source = { registry = "https://pypi.python.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pandas" },
     { name = "parse" },
-    { name = "pyarrow" },
     { name = "pyecharts" },
 ]
 
@@ -1082,7 +1081,6 @@ requires-dist = [
     { name = "parse" },
     { name = "plotly", marker = "extra == 'full'" },
     { name = "plotly", marker = "extra == 'research'" },
-    { name = "pyarrow" },
     { name = "pyecharts", specifier = ">=1.9.1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.1" },
     { name = "pytest", marker = "extra == 'full'", specifier = ">=8.4.1" },

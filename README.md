@@ -74,6 +74,11 @@ uv pip install -r requirements.txt
 
 等 `uv.lock` 重新刷新后，再用 `uv sync --frozen`。
 
+如果你需要读取 parquet 或做更完整的研究分析，再装完整依赖：
+```
+pip install -r requirements-full.txt
+```
+
 如果你要完整的研究、回测、服务和开发环境，再装完整依赖：
 ```
 uv sync --extra full

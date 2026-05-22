@@ -1367,10 +1367,6 @@ class DailySegmentAnalyzer:
         )
         if reverse_decision and reverse_decision.segments and reverse_decision.independence:
             return False
-        if reverse_decision and reverse_decision.pending_segments:
-            pending = reverse_decision.pending_segments
-            if pending and is_opposite_direction(pending[0].direction, completed.direction):
-                return False
 
         extension_offset = self._tail_extension_offset(completed, s.current_segments)
         if extension_offset is None:
