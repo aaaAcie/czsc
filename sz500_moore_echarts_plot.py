@@ -12,6 +12,7 @@ describe: 用 pyecharts (Apache ECharts) 实现摩尔缠论 K 线结构图。
   - 📤 输出独立 .html，浏览器直接打开
 """
 import os
+import re
 import ssl
 import urllib.request
 from contextlib import contextmanager
@@ -1185,7 +1186,7 @@ def plot_moore_structure_echarts(
 
     # ── 10. Grid 布局 ─────────────────────────────────────────────────
     chart_symbol = getattr(bars[0], "symbol", "moore") if bars else "moore"
-    chart_id = f"grid_{chart_symbol}"
+    chart_id = f"grid_{re.sub(r'[^0-9A-Za-z_]+', '_', str(chart_symbol))}"
     grid = (
         Grid(init_opts=opts.InitOpts(
             width="100%",

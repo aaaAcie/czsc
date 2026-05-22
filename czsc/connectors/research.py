@@ -24,14 +24,17 @@ if not os.path.exists(cache_path):
     )
 
 
+def _get_30m_dir():
+    """获取 30 分钟数据的标准目录。"""
+    return os.path.join(cache_path, "allData", "30min")
+
+
 def get_groups():
     """获取投研共享数据的分组信息
 
     :return: 分组信息
     """
-    # return ["A股主要指数", "A股场内基金", "中证500成分股", "期货主力"]
-    return ["中证500成分股", "originData", "test", "30分钟"]
-
+    return ["中证500成分股", "originData", "test", "30min"]
 
 
 def get_symbols(name, **kwargs):
@@ -46,10 +49,11 @@ def get_symbols(name, **kwargs):
         c_files = glob.glob(os.path.join(cache_path, "**", "*.csv"), recursive=True)
         files = p_files + c_files
     else:
-        p_files = glob.glob(os.path.join(cache_path, name, "*.parquet"))
-        c_files = glob.glob(os.path.join(cache_path, name, "*.csv"))
+        group_dir = _get_30m_dir() if name == "30min" else os.path.join(cache_path, name)
+        p_files = glob.glob(os.path.join(group_dir, "*.parquet"))
+        c_files = glob.glob(os.path.join(group_dir, "*.csv"))
         files = p_files + c_files
-    
+
     symbols = []
     for x in files:
         # 处理类似 000001.SH.csv 或 000001.csv 的情况
@@ -58,11 +62,11 @@ def get_symbols(name, **kwargs):
             symbols.append(base.replace('.parquet', ''))
         elif base.endswith('.csv'):
             symbols.append(base.replace('.csv', ''))
-            
+
     return sorted(list(set(symbols)))
 
 
-def format_30min_csv(file_path, symbol, fq="前复权"):
+def format_30min_csv(file_path, symbol, fq=None):
     """将跨周期的 30 分钟不复权 CSV 转换为 CZSC 标准 RawBar 列表，并根据参数进行前复权处理"""
     try:
         df = pd.read_csv(file_path, encoding='gbk')
@@ -71,17 +75,17 @@ def format_30min_csv(file_path, symbol, fq="前复权"):
 
     # 定义列名映射
     col_map = {
-        '日期': 'date',
-        '时间': 'time',
-        '开盘': 'open',
-        '最高': 'high',
-        '最低': 'low',
-        '收盘': 'close',
-        '成交量': 'vol',
-        '成交额': 'amount',
+        '\u65e5\u671f': 'date',
+        '\u65f6\u95f4': 'time',
+        '\u5f00\u76d8': 'open',
+        '\u6700\u9ad8': 'high',
+        '\u6700\u4f4e': 'low',
+        '\u6536\u76d8': 'close',
+        '\u6210\u4ea4\u91cf': 'vol',
+        '\u6210\u4ea4\u989d': 'amount',
     }
     # 检查必需列是否存在
-    if '日期' not in df.columns or '时间' not in df.columns:
+    if '\u65e5\u671f' not in df.columns or '\u65f6\u95f4' not in df.columns:
         return []
 
     df = df.rename(columns=col_map)
@@ -89,8 +93,8 @@ def format_30min_csv(file_path, symbol, fq="前复权"):
     df['symbol'] = symbol
 
     # 仅在明确要求“前复权”时才执行计算
-    if fq == "前复权":
-        factor_path = os.path.join(cache_path, "全部复权因子", f"{os.path.basename(file_path)}")
+    if fq == "\u524d\u590d\u6743":
+        factor_path = os.path.join(cache_path, "\u5168\u90e8\u590d\u6743\u56e0\u5b50", f"{os.path.basename(file_path)}")
         if os.path.exists(factor_path):
             # 因子文件：code,date,adj_factor，编码 utf-8-sig 处理 BOM
             df_f = pd.read_csv(factor_path, encoding='utf-8-sig')
@@ -112,7 +116,49 @@ def format_30min_csv(file_path, symbol, fq="前复权"):
     return bars
 
 
-def format_origin_csv(file_path, symbol, fq="前复权"):
+def format_30min_daily_csv(file_path, symbol):
+    """将 30 分钟 CSV 拼接为日线 RawBar 列表。"""
+    try:
+        df = pd.read_csv(file_path, encoding='gbk')
+    except:
+        df = pd.read_csv(file_path, encoding='utf-8')
+
+    # 定义列名映射
+    col_map = {
+        '\u65e5\u671f': 'date',
+        '\u65f6\u95f4': 'time',
+        '\u5f00\u76d8': 'open',
+        '\u6700\u9ad8': 'high',
+        '\u6700\u4f4e': 'low',
+        '\u6536\u76d8': 'close',
+        '\u6210\u4ea4\u91cf': 'vol',
+        '\u6210\u4ea4\u989d': 'amount',
+    }
+    # 检查必需列是否存在
+    if '\u65e5\u671f' not in df.columns or '\u65f6\u95f4' not in df.columns:
+        return []
+
+    df = df.rename(columns=col_map)
+    df['dt'] = pd.to_datetime(df['date'] + ' ' + df['time'])
+    df['symbol'] = symbol
+    df = df.dropna(subset=['dt', 'open', 'high', 'low', 'close'])
+    df['day'] = pd.to_datetime(df['dt'].dt.date)
+    dfg = df.groupby('day').agg(
+        {
+            'symbol': 'first',
+            'open': 'first',
+            'close': 'last',
+            'high': 'max',
+            'low': 'min',
+            'vol': 'sum',
+            'amount': 'sum',
+        }
+    ).reset_index().rename(columns={'day': 'dt'})
+    dfg = dfg.sort_values('dt', ascending=True).reset_index(drop=True)
+    return czsc.format_standard_kline(dfg, freq=czsc.Freq.D)
+
+
+def format_origin_csv(file_path, symbol, fq=None):
     """将 originData 文件夹下的日线 CSV 转换为 CZSC 标准 RawBar 列表，并进行前复权处理"""
     try:
         # originData CSV 带有 BOM，使用 utf-8-sig
@@ -125,18 +171,18 @@ def format_origin_csv(file_path, symbol, fq="前复权"):
 
     # 定义列名映射
     col_map = {
-        '股票代码': 'symbol',
-        '交易日': 'date',
-        '开盘价': 'open',
-        '最高价': 'high',
-        '最低价': 'low',
-        '收盘价': 'close',
-        '成交量（手）': 'vol',
-        '成交额（千元）': 'amount',
-        '复权因子': 'adj_factor'
+        '\u80a1\u7968\u4ee3\u7801': 'symbol',
+        '\u4ea4\u6613\u65e5': 'date',
+        '\u5f00\u76d8\u4ef7': 'open',
+        '\u6700\u9ad8\u4ef7': 'high',
+        '\u6700\u4f4e\u4ef7': 'low',
+        '\u6536\u76d8\u4ef7': 'close',
+        '\u6210\u4ea4\u91cf\uff08\u624b\uff09': 'vol',
+        '\u6210\u4ea4\u989d\uff08\u5343\u5143\uff09': 'amount',
+        '\u590d\u6743\u56e0\u5b50': 'adj_factor',
     }
     # 检查必需列是否存在
-    if '交易日' not in df.columns:
+    if '\u4ea4\u6613\u65e5' not in df.columns:
         return []
 
     df = df.rename(columns=col_map)
@@ -149,7 +195,7 @@ def format_origin_csv(file_path, symbol, fq="前复权"):
     df = df.dropna(subset=['open', 'close'])
 
     # 仅在明确要求“前复权”时才执行计算
-    if fq == "前复权" and 'adj_factor' in df.columns:
+    if fq == "\u524d\u590d\u6743" and 'adj_factor' in df.columns:
         # 获取最新一个有效因子
         factors = df['adj_factor'].dropna()
         if not factors.empty:
@@ -160,20 +206,17 @@ def format_origin_csv(file_path, symbol, fq="前复权"):
             # 前复权 = 当天价格 * 当天因子 / 最新因子
             for col in ['open', 'high', 'low', 'close']:
                 df[col] = (df[col] * df['adj_factor'] / latest_factor).round(3)
-                # df[col] = (df[col] * 1).round(3)
-
-
 
     # 转换成交量和成交额单位
     df['vol'] = df['vol'] * 100
     df['amount'] = df['amount'] * 1000
-
+    
     # 转换为 RawBar 列表
     bars = czsc.format_standard_kline(df, freq=czsc.Freq.D)
     return bars
 
 
-def get_raw_bars(symbol, freq, sdt, edt, fq="前复权", **kwargs):
+def get_raw_bars(symbol, freq, sdt, edt, fq="\u524d\u590d\u6743", **kwargs):
     """获取 CZSC 库定义的标准 RawBar 对象列表
 
     :param symbol: 标的代码
@@ -230,7 +273,7 @@ def get_raw_bars(symbol, freq, sdt, edt, fq="前复权", **kwargs):
     return []
 
 
-def get_raw_bars_30m(symbol, sdt, edt, fq="前复权", **kwargs):
+def get_raw_bars_30m(symbol, sdt, edt, fq=None, **kwargs):
     """获取 30分钟 文件夹下的数据，并自动进行前复权处理
 
     :param symbol: 标的代码或文件名（如 'sz000001' 或 'sz000001.csv'）
@@ -240,23 +283,24 @@ def get_raw_bars_30m(symbol, sdt, edt, fq="前复权", **kwargs):
     :return: RawBar 对象列表
     """
     file_path = None
+    data_dir = _get_30m_dir()
     # 1. 如果 symbol 直接是 .csv 结尾
     if symbol.endswith(".csv"):
-        file_path = os.path.join(cache_path, "30分钟", symbol)
+        file_path = os.path.join(data_dir, symbol)
     else:
         # 处理 symbol -> filename 的转换
         _symbol = symbol
         if '.' in symbol:
             code, market = symbol.split('.')
             _symbol = f"{market.lower()}{code}"
-        
+
         # 2. 尝试精确文件名匹配
-        _path = os.path.join(cache_path, "30分钟", f"{_symbol}.csv")
+        _path = os.path.join(data_dir, f"{_symbol}.csv")
         if os.path.exists(_path):
             file_path = _path
         else:
             # 3. 模糊匹配
-            file_paths = glob.glob(os.path.join(cache_path, "30分钟", f"*{_symbol}.csv"))
+            file_paths = glob.glob(os.path.join(data_dir, f"*{_symbol}.csv"))
             if file_paths:
                 file_path = file_paths[0]
 
@@ -264,55 +308,70 @@ def get_raw_bars_30m(symbol, sdt, edt, fq="前复权", **kwargs):
         return []
 
     bars = format_30min_csv(file_path, symbol, fq=fq)
-    # 过滤时间范围
     sdt_dt = pd.to_datetime(sdt)
     edt_dt = pd.to_datetime(edt)
+    # 过滤时间范围
     bars = [x for x in bars if sdt_dt <= x.dt <= edt_dt]
     return bars
 
 
-def get_raw_bars_origin(symbol, sdt, edt, fq="前复权", **kwargs):
-    """获取 originData 文件夹下的日线数据，并自动进行前复权处理
-
-    :param symbol: 标的代码或文件名（如 'sh600000' 或 'sh600000.csv'）
-    :param sdt: 开始日期
-    :param edt: 结束日期
-    :param fq: 复权方式，默认 '前复权'
-    :return: RawBar 对象列表
-    """
+def get_raw_bars_origin(symbol, sdt, edt, fq=None, **kwargs):
+    """获取 originData 文件夹下的日线数据，或在需要时由 30 分钟数据合成日线"""
+    daily_source = os.environ.get("CZSC_DAILY_SOURCE", "auto").lower()
     file_path = None
-    if symbol.endswith(".csv"):
-        file_path = os.path.join(cache_path, "originData", symbol)
-    else:
-        # 处理 symbol -> filename 的转换 (000001.SZ -> 000001.SZ.csv)
-        _symbol = symbol
-        if '.' not in symbol and (symbol.startswith('sz') or symbol.startswith('sh')):
-            # sz000001 -> 000001.SZ
-            market = symbol[:2].upper()
-            code = symbol[2:]
-            _symbol = f"{code}.{market}"
-        
-        _path = os.path.join(cache_path, "originData", f"{_symbol}.csv")
-        if os.path.exists(_path):
-            file_path = _path
+    if daily_source in {"auto", "origin", "origindata"}:
+        if symbol.endswith(".csv"):
+            file_path = os.path.join(cache_path, "originData", symbol)
         else:
-            # 尝试各种可能的后缀
-            for ext in ['.SZ', '.SH', '.BJ']:
-                _path = os.path.join(cache_path, "originData", f"{_symbol.upper()}{ext}.csv")
+            _symbol = symbol
+            if '.' not in symbol and (symbol.startswith('sz') or symbol.startswith('sh')):
+                market = symbol[:2].upper()
+                code = symbol[2:]
+                _symbol = f"{code}.{market}"
+
+            _path = os.path.join(cache_path, "originData", f"{_symbol}.csv")
+            if os.path.exists(_path):
+                file_path = _path
+            else:
+                for ext in ['.SZ', '.SH', '.BJ']:
+                    _path = os.path.join(cache_path, "originData", f"{_symbol.upper()}{ext}.csv")
+                    if os.path.exists(_path):
+                        file_path = _path
+                        break
+
+                if not file_path:
+                    file_paths = glob.glob(os.path.join(cache_path, "originData", f"*{_symbol}*.csv"))
+                    if file_paths:
+                        file_path = file_paths[0]
+
+    if file_path and os.path.exists(file_path):
+        bars = format_origin_csv(file_path, symbol, fq=fq)
+    else:
+        bars = []
+        if daily_source in {"auto", "30m", "30min"}:
+            file_path = None
+            data_dir = _get_30m_dir()
+            if symbol.endswith(".csv"):
+                file_path = os.path.join(data_dir, symbol)
+            else:
+                _symbol = symbol
+                if '.' in symbol:
+                    code, market = symbol.split('.')
+                    _symbol = f"{market.lower()}{code}"
+
+                _path = os.path.join(data_dir, f"{_symbol}.csv")
                 if os.path.exists(_path):
                     file_path = _path
-                    break
-            
-            if not file_path:
-                file_paths = glob.glob(os.path.join(cache_path, "originData", f"*{_symbol}*.csv"))
-                if file_paths:
-                    file_path = file_paths[0]
+                else:
+                    file_paths = glob.glob(os.path.join(data_dir, f"*{_symbol}.csv"))
+                    if file_paths:
+                        file_path = file_paths[0]
 
-    if not file_path or not os.path.exists(file_path):
-        return []
+            if file_path and os.path.exists(file_path):
+                bars = format_30min_daily_csv(file_path, symbol)
 
-    bars = format_origin_csv(file_path, symbol, fq=fq)
     sdt_dt, edt_dt = pd.to_datetime(sdt), pd.to_datetime(edt)
+    # 过滤时间范围
     bars = [x for x in bars if sdt_dt <= x.dt <= edt_dt]
     return bars
 
