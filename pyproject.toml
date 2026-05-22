@@ -63,10 +63,17 @@ research = [
 ]
 
 service = [
+    "fastapi",
+    "uvicorn[standard]",
     "streamlit",
     "jupyter",
     "ipython",
     "streamlit-ace",
+]
+
+web = [
+    "fastapi",
+    "uvicorn[standard]",
 ]
 
 integration = [
