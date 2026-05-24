@@ -38,7 +38,7 @@ import collections
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Optional, Set
+from typing import List, Optional
 
 from czsc.py.objects import RawBar
 from czsc.py.enum import Mark, Direction
@@ -48,15 +48,17 @@ from .micro_engine import MicroStructureEngine
 from .center import CenterEngine
 from .trend import TrendEngine
 from .macro_engine import MacroAuditEngine
-
-
-@dataclass
-class CenterReplayContext:
-    """Micro replay bookkeeping for centers invalidated by the replay window."""
-
-    start_idx: int
-    end_idx: int
-    removed_ids: Set[int] = field(default_factory=set)
+from .helpers.analyzer import (
+    CenterReplayContext,
+    build_macro_segments,
+    build_micro_center_replay_plan,
+    build_valid_owner_keys,
+    clone_micro_tk_to_macro,
+    collect_pending_owner_ids,
+    compute_stable_cutoff,
+    find_owner_key_for_center,
+    get_center_confirm_dt,
+)
 
 
 @dataclass
@@ -348,10 +350,7 @@ class SegmentAnalyzer:
 
     def _clone_micro_tk_to_macro(self, tk: TurningK) -> TurningK:
         """将微观点克隆到宏观世界，并写入来源映射。"""
-        ctk = deepcopy(tk)
-        ctk.cache = dict(getattr(tk, "cache", {}))
-        ctk.cache["source_micro_id"] = tk.cache.get("micro_id")
-        return ctk
+        return clone_micro_tk_to_macro(tk)
 
     def _get_committed_micro_turning_ks(self) -> tuple:
         """获取可用于宏观同步的“稳定区快照”微观点。"""
@@ -370,56 +369,11 @@ class SegmentAnalyzer:
         """
         s = self.state
         micro = s.turning_ks
-        if len(micro) <= 1:
-            s.stable_cutoff_k_index = -1
-            s.stable_cutoff_micro_id = None
-            s.pending_leftmost_turning_idx = -1
-            return -1
-
-        # 同向刷新保护：最后一个端点视为可刷新，不进入稳定区
-        base_cutoff = len(micro) - 2
-
-        id_to_idx = {}
-        for i, tk in enumerate(micro):
-            mid = tk.cache.get("micro_id")
-            if mid is not None:
-                id_to_idx[mid] = i
-
-        pending_left = None
-        unresolved = {"wait_anchor_start", "wait_anchor_real", "ready_resolve"}
-        for node_id in list(s.pending_judgements):
-            node = s.judgement_nodes.get(node_id)
-            if not node or node.stage not in unresolved:
-                continue
-            idxs = []
-            for mid in (node.base_id, node.candidate_id):
-                if mid in id_to_idx:
-                    idxs.append(id_to_idx[mid])
-            # 未解析到候选点时，认为链路仍不稳定，冻结宏观推进
-            if node.candidate_id not in id_to_idx:
-                s.pending_leftmost_turning_idx = -1
-                s.stable_cutoff_k_index = -1
-                s.stable_cutoff_micro_id = None
-                return -1
-            if idxs:
-                cur = min(idxs)
-                pending_left = cur if pending_left is None else min(pending_left, cur)
-
-        if pending_left is not None:
-            cutoff = min(base_cutoff, pending_left - 1)
-            s.pending_leftmost_turning_idx = pending_left
-        else:
-            cutoff = base_cutoff
-            s.pending_leftmost_turning_idx = -1
-
-        if cutoff < 0:
-            s.stable_cutoff_k_index = -1
-            s.stable_cutoff_micro_id = None
-            return -1
-
-        s.stable_cutoff_k_index = cutoff
-        s.stable_cutoff_micro_id = micro[cutoff].cache.get("micro_id")
-        return cutoff
+        result = compute_stable_cutoff(micro, s.pending_judgements, s.judgement_nodes)
+        s.stable_cutoff_k_index = result.cutoff
+        s.stable_cutoff_micro_id = result.stable_cutoff_micro_id
+        s.pending_leftmost_turning_idx = result.pending_leftmost_turning_idx
+        return result.cutoff
 
     def _sync_macro_world_from_micro(self, committed: List[TurningK]) -> bool:
         """把“已提交微观快照”增量同步到宏观世界（仅追加，不回退不替换）。"""
@@ -513,31 +467,17 @@ class SegmentAnalyzer:
     def _build_micro_center_replay_context(self, start_idx: int, end_idx: int) -> CenterReplayContext:
         """Remove stale micro centers born inside the replay window."""
         s = self.state
-        ctx = CenterReplayContext(start_idx=start_idx, end_idx=end_idx)
-        keep_micro = []
-
-        for center in s.micro_centers:
-            if start_idx <= center.start_k_index <= end_idx:
-                ctx.removed_ids.add(center.center_id)
-                continue
-            keep_micro.append(center)
-
-        if not ctx.removed_ids:
-            return ctx
-
-        s.micro_centers = keep_micro
-        s.potential_centers = [
-            c for c in s.potential_centers
-            if getattr(c, "center_id", None) not in ctx.removed_ids
-        ]
-        s.macro_centers = [
-            c for c in s.macro_centers
-            if not (
-                getattr(c, "center_id", None) in ctx.removed_ids
-                and getattr(c, "source_layer", "") != "macro"
-            )
-        ]
-        return ctx
+        plan = build_micro_center_replay_plan(
+            micro_centers=s.micro_centers,
+            potential_centers=s.potential_centers,
+            macro_centers=s.macro_centers,
+            start_idx=start_idx,
+            end_idx=end_idx,
+        )
+        s.micro_centers = plan.micro_centers
+        s.potential_centers = plan.potential_centers
+        s.macro_centers = plan.macro_centers
+        return plan.context
 
     def _assign_missing_center_owner_keys(self):
         """为缺少 owner 的微观中枢补齐当前线段端点主键。"""
@@ -548,7 +488,7 @@ class SegmentAnalyzer:
                 continue
 
             # 判定中枢归属哪段微观线段
-            c_confirm_dt = c.confirm_k.dt if c.confirm_k else c.start_dt
+            c_confirm_dt = get_center_confirm_dt(c)
             for seg in s.segments:
                 if seg.start_k.dt <= c_confirm_dt <= seg.end_k.dt:
                     ms_id = seg.start_k.cache.get("micro_id")
@@ -559,19 +499,11 @@ class SegmentAnalyzer:
 
     def _reassign_center_owner_key(self, center: MooreCenter, valid_owner_keys: set[tuple]) -> bool:
         """Rebind a center to the current segment if its confirm K still belongs to one."""
-        c_confirm_dt = center.confirm_k.dt if center.confirm_k else center.start_dt
-        if not c_confirm_dt:
+        owner_key = find_owner_key_for_center(center, self.state.segments, valid_owner_keys)
+        if owner_key is None:
             return False
-
-        for seg in self.state.segments:
-            if not (seg.start_k.dt <= c_confirm_dt <= seg.end_k.dt):
-                continue
-            owner_key = (seg.start_k.cache.get("micro_id"), seg.end_k.cache.get("micro_id"))
-            if owner_key in valid_owner_keys:
-                center.owner_seg_key = owner_key
-                return True
-            return False
-        return False
+        center.owner_seg_key = owner_key
+        return True
 
     def _settle_centers_by_endpoints(self):
         """按当前有效端点结算微观/宏观复用中枢，清理已被回滚分支留下的残留。"""
@@ -580,20 +512,8 @@ class SegmentAnalyzer:
         replay_ctx = s.cache.get("micro_center_replay_context")
         replay_removed_ids = replay_ctx.removed_ids if replay_ctx else set()
 
-        valid_owner_keys = {
-            (seg.start_k.cache.get("micro_id"), seg.end_k.cache.get("micro_id"))
-            for seg in s.segments
-            if seg.start_k.cache.get("micro_id") is not None and seg.end_k.cache.get("micro_id") is not None
-        }
-        unresolved = {"wait_anchor_start", "wait_anchor_real", "ready_resolve"}
-        pending_owner_ids = set()
-        for node_id in list(s.pending_judgements):
-            node = s.judgement_nodes.get(node_id)
-            if not node or node.stage not in unresolved:
-                continue
-            for mid in (node.base_id, node.candidate_id, getattr(node, "c_candidate_id", None)):
-                if mid is not None:
-                    pending_owner_ids.add(mid)
+        valid_owner_keys = build_valid_owner_keys(s.segments)
+        pending_owner_ids = collect_pending_owner_ids(s.pending_judgements, s.judgement_nodes)
 
         invalid_center_ids = set()
         for c in s.micro_centers:
@@ -631,47 +551,13 @@ class SegmentAnalyzer:
     def _update_macro_segments(self):
         """根据宏观顶底重建宏观线段，并挂载现有中枢快照。"""
         s = self.state
-        tks = s.macro_turning_ks
-        s.macro_segments = []
-        if len(tks) < 2:
-            return
-
-        micro_id_seq = [tk.cache.get("micro_id") for tk in s.turning_ks if tk.cache.get("micro_id") is not None]
-        micro_id_to_pos = {mid: i for i, mid in enumerate(micro_id_seq)}
-
-        all_avail_centers = s.macro_centers
-        for i in range(len(tks) - 1):
-            tk1 = tks[i]
-            tk2 = tks[i + 1]
-            direction = Direction.Up if tk2.mark == Mark.G else Direction.Down
-            seg = MooreSegment(symbol=tk1.symbol, start_k=tk1, end_k=tk2, direction=direction)
-            seg.centers = []
-            for c in all_avail_centers:
-                c_confirm_dt = c.confirm_k.dt if c.confirm_k else c.start_dt
-                if not c_confirm_dt:
-                    continue
-                if tk1.dt <= c_confirm_dt <= tk2.dt:
-                    seg.centers.append(c)
-            # 结构状态重算（每次重建都覆写，避免旧状态残留）
-            tk2.is_perfect = bool(seg.centers)
-            tk2.maybe_is_fake = not tk2.is_perfect
-            start_src = tk1.cache.get("source_micro_id")
-            end_src = tk2.cache.get("source_micro_id")
-            swallow_ids = []
-            if (
-                start_src is not None and end_src is not None
-                and start_src in micro_id_to_pos and end_src in micro_id_to_pos
-            ):
-                a = micro_id_to_pos[start_src]
-                b = micro_id_to_pos[end_src]
-                lo, hi = sorted((a, b))
-                between_ids = micro_id_seq[lo + 1 : hi]
-                swallow_ids = [mid for mid in between_ids if mid in s.macro_excluded_micro_ids]
-                if not swallow_ids:
-                    swallow_ids = s.macro_swallow_map.get((start_src, end_src), [])
-            seg.cache["is_macro_swallow"] = bool(swallow_ids)
-            seg.cache["swallow_internal_micro_ids"] = swallow_ids
-            s.macro_segments.append(seg)
+        s.macro_segments = build_macro_segments(
+            macro_turning_ks=s.macro_turning_ks,
+            micro_turning_ks=s.turning_ks,
+            macro_centers=s.macro_centers,
+            macro_excluded_micro_ids=s.macro_excluded_micro_ids,
+            macro_swallow_map=s.macro_swallow_map,
+        )
 
     # 为兼容旧的外部调试脚本，保留同名代理方法
     def _macro_audit_and_replay(self, current_k_idx: int) -> bool:
