@@ -38,7 +38,7 @@ import collections
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Set
 
 from czsc.py.objects import RawBar
 from czsc.py.enum import Mark, Direction
@@ -48,6 +48,15 @@ from .micro_engine import MicroStructureEngine
 from .center import CenterEngine
 from .trend import TrendEngine
 from .macro_engine import MacroAuditEngine
+
+
+@dataclass
+class CenterReplayContext:
+    """Micro replay bookkeeping for centers invalidated by the replay window."""
+
+    start_idx: int
+    end_idx: int
+    removed_ids: Set[int] = field(default_factory=set)
 
 
 @dataclass
@@ -487,6 +496,7 @@ class SegmentAnalyzer:
     def _sync_potential_to_micro_warehouse(self):
         """维护微观事实仓：将运行态 potential_centers 同步到 micro_centers，并打上所有权标。"""
         s = self.state
+        replay_ctx = s.cache.get("micro_center_replay_context")
 
         # 1. 增量导入
         for c in s.potential_centers:
@@ -496,6 +506,38 @@ class SegmentAnalyzer:
 
         # 2. 补齐所有权标 (owner_seg_key)
         self._assign_missing_center_owner_keys()
+
+        if replay_ctx:
+            s.cache.pop("micro_center_replay_context", None)
+
+    def _build_micro_center_replay_context(self, start_idx: int, end_idx: int) -> CenterReplayContext:
+        """Remove stale micro centers born inside the replay window."""
+        s = self.state
+        ctx = CenterReplayContext(start_idx=start_idx, end_idx=end_idx)
+        keep_micro = []
+
+        for center in s.micro_centers:
+            if start_idx <= center.start_k_index <= end_idx:
+                ctx.removed_ids.add(center.center_id)
+                continue
+            keep_micro.append(center)
+
+        if not ctx.removed_ids:
+            return ctx
+
+        s.micro_centers = keep_micro
+        s.potential_centers = [
+            c for c in s.potential_centers
+            if getattr(c, "center_id", None) not in ctx.removed_ids
+        ]
+        s.macro_centers = [
+            c for c in s.macro_centers
+            if not (
+                getattr(c, "center_id", None) in ctx.removed_ids
+                and getattr(c, "source_layer", "") != "macro"
+            )
+        ]
+        return ctx
 
     def _assign_missing_center_owner_keys(self):
         """为缺少 owner 的微观中枢补齐当前线段端点主键。"""
@@ -535,6 +577,8 @@ class SegmentAnalyzer:
         """按当前有效端点结算微观/宏观复用中枢，清理已被回滚分支留下的残留。"""
         s = self.state
         self._assign_missing_center_owner_keys()
+        replay_ctx = s.cache.get("micro_center_replay_context")
+        replay_removed_ids = replay_ctx.removed_ids if replay_ctx else set()
 
         valid_owner_keys = {
             (seg.start_k.cache.get("micro_id"), seg.end_k.cache.get("micro_id"))
@@ -553,6 +597,9 @@ class SegmentAnalyzer:
 
         invalid_center_ids = set()
         for c in s.micro_centers:
+            if c.center_id in replay_removed_ids:
+                invalid_center_ids.add(c.center_id)
+                continue
             if c.owner_seg_key is None or c.owner_seg_key in valid_owner_keys:
                 continue
             if any(mid in pending_owner_ids for mid in c.owner_seg_key):
@@ -646,6 +693,9 @@ class SegmentAnalyzer:
         """发生线段结构变化时，回滚并重播正确的方向，找回被遗漏的中枢，冻结逆势幽灵中枢"""
         s = self.state
 
+        replay_ctx = self._build_micro_center_replay_context(start_ext_idx, current_end_idx)
+        s.cache["micro_center_replay_context"] = replay_ctx
+
         # Step 1: 精准清理（拔根与留种）
         # 属于前一个线段且恰好结束于 start_ext_idx 的中枢必须保留（由 start_k_index < start_ext_idx 保证）
         # 凡是起点落在重播区间 [start_ext_idx, current_end_idx] 之后的中枢，若方向不对则转为幽灵，
@@ -660,7 +710,7 @@ class SegmentAnalyzer:
                 new_potential.append(center)
         s.potential_centers = new_potential
 
-        # Stage 1 重播不直接修改 all_centers/macro_centers，保持解耦
+        # Stage 1 不重建宏观仓；只剔除窗口内已失效的微观复用对象，保持宏观审计解耦。
 
         # Step 2: 状态机洗盘重置
         self._center_engine.rollback()

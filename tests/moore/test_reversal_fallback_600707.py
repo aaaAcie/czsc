@@ -102,6 +102,35 @@ def test_600707_center_230_visible_uses_ma5_peak_rail():
     assert center.upper_rail == pytest.approx(4.193)
 
 
+def test_600707_micro_replay_does_not_leave_duplicate_centers():
+    bars = _safe_get_bars("600707", "20140601", "20210820")
+    engine = MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+    )
+
+    seen = {}
+    duplicates = []
+    for c in engine.micro_centers:
+        signature = (
+            c.confirm_k.dt if c.confirm_k else c.start_dt,
+            c.direction.name if c.direction else None,
+            c.method,
+            round(c.upper_rail, 6),
+            round(c.lower_rail, 6),
+        )
+        if signature in seen:
+            duplicates.append((seen[signature], c.center_id, signature))
+        else:
+            seen[signature] = c.center_id
+
+    assert duplicates == []
+
+
 def test_603126_refresh_trigger_prefers_special_rule_before_left_search():
     bars = _safe_get_bars("603126", "20181220", "20191010")
     captured = {}
