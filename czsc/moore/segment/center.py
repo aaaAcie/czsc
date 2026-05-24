@@ -29,6 +29,26 @@ class CenterEngine:
         # state: SegmentState
         self.s = state
 
+    @staticmethod
+    def _is_up_progress(curr_k: RawBar, base_k: RawBar) -> bool:
+        """Strict upward K-line progression; equal prices do not count."""
+        return curr_k.high > base_k.high and curr_k.low > base_k.low
+
+    @staticmethod
+    def _is_down_progress(curr_k: RawBar, base_k: RawBar) -> bool:
+        """Strict downward K-line progression; equal prices do not count."""
+        return curr_k.high < base_k.high and curr_k.low < base_k.low
+
+    def _is_direction_progress(self, direction: Direction, curr_k: RawBar, base_k: RawBar) -> bool:
+        if direction == Direction.Up:
+            return self._is_up_progress(curr_k, base_k)
+        return self._is_down_progress(curr_k, base_k)
+
+    def _is_reverse_progress(self, direction: Direction, curr_k: RawBar, base_k: RawBar) -> bool:
+        if direction == Direction.Up:
+            return self._is_down_progress(curr_k, base_k)
+        return self._is_up_progress(curr_k, base_k)
+
     # =========================================================================
     # 公开接口（供 SegmentAnalyzer 调用）
     # =========================================================================
@@ -711,16 +731,9 @@ class CenterEngine:
         
         for i in range(ext_idx + 1, s.center_line_k_index + 1):
             curr_k = s.bars_raw[i]
-            if direction == Direction.Up:
-                if curr_k.high < last_k.high and curr_k.low < last_k.low:
-                    rev_count += 1
-                    last_k, rev_end_idx = curr_k, i
-                elif curr_k.high > last_k.high and curr_k.low > last_k.low: break
-            else:
-                if curr_k.high > last_k.high and curr_k.low > last_k.low:
-                    rev_count += 1
-                    last_k, rev_end_idx = curr_k, i
-                elif curr_k.high < last_k.high and curr_k.low < last_k.low: break
+            if self._is_reverse_progress(direction, curr_k, last_k):
+                rev_count += 1
+                last_k, rev_end_idx = curr_k, i
                 
         # 落地正向一笔起点（基于三笔同源逻辑）
         fwd_start_idx = rev_end_idx if rev_count >= 3 else s.center_line_k_index
@@ -732,22 +745,12 @@ class CenterEngine:
         
         for i in range(fwd_start_idx + 1, s.center_end_k_index + 1):
             curr_k = s.bars_raw[i]
-            if direction == Direction.Up:
-                if curr_k.high > last_k.high and curr_k.low > last_k.low:
-                    fwd_count += 1
-                    last_k = curr_k
-                    if fwd_count == 3:
-                        fwd_formation_idx = i
-                        break # 已达法定视界终点，停止扫描
-                elif curr_k.high < last_k.high and curr_k.low < last_k.low: break
-            else:
-                if curr_k.low < last_k.low and curr_k.high <= last_k.high:
-                    fwd_count += 1
-                    last_k = curr_k
-                    if fwd_count == 3:
-                        fwd_formation_idx = i
-                        break
-                elif curr_k.high > last_k.high and curr_k.low > last_k.low: break
+            if self._is_direction_progress(direction, curr_k, last_k):
+                fwd_count += 1
+                last_k = curr_k
+                if fwd_count == 3:
+                    fwd_formation_idx = i
+                    break # 已达法定视界终点，停止扫描
                 
         # 4. 【严密视界审判】：仅当正向一笔已形成时，才执行最终判决
         if fwd_formation_idx == -1:
@@ -765,8 +768,8 @@ class CenterEngine:
                 if curr_ma5 <= prev_ma5:
                     s.center_is_visible = True
                     if not s.center_price_confirmed:
-                        # 修正另一轨 (Upper Rail)
-                        fwd_max = max(b.high for b in s.bars_raw[obs_start : fwd_formation_idx + 1])
+                        # 修正另一轨 (Upper Rail)：取 MA5 锯齿峰值，而非 K 线 high
+                        fwd_max = max(b.cache.get('ma5', 0) for b in s.bars_raw[obs_start : fwd_formation_idx + 1])
                         s.center_upper_rail = fwd_max
                         s.center_price_confirmed = True
                     return
@@ -774,8 +777,8 @@ class CenterEngine:
                 if curr_ma5 >= prev_ma5:
                     s.center_is_visible = True
                     if not s.center_price_confirmed:
-                        # 修正另一轨 (Lower Rail)
-                        fwd_min = min(b.low for b in s.bars_raw[obs_start : fwd_formation_idx + 1])
+                        # 修正另一轨 (Lower Rail)：取 MA5 锯齿谷值，而非 K 线 low
+                        fwd_min = min(b.cache.get('ma5', 0) for b in s.bars_raw[obs_start : fwd_formation_idx + 1])
                         s.center_lower_rail = fwd_min
                         s.center_price_confirmed = True
                     return
@@ -1070,26 +1073,11 @@ class CenterEngine:
 
         for i in range(ext_idx + 1, len(bars)):
             curr_k = bars[i]
-            if direction == Direction.Up:
-                # 回调：不上才有下 (Lower High & Lower Low)
-                if curr_k.high < last_k.high and curr_k.low < last_k.low:
-                    rev_count += 1
-                    last_k, rev_end_idx = curr_k, i
-                    rev_high = max(rev_high, curr_k.high) # 修正：反向一笔的最高点应取所有K线中的最高
-                    rev_low  = min(rev_low, curr_k.low)   # 修正：反向一笔的最低点应取所有K线中的最低
-                # 反弹终结（Higher High & Higher Low）→ 跳出
-                elif curr_k.high > last_k.high and curr_k.low > last_k.low:
-                    break
-            else:
-                # 反弹：不下才有上 (Higher High & Higher Low)
-                if curr_k.high > last_k.high and curr_k.low > last_k.low:
-                    rev_count += 1
-                    last_k, rev_end_idx = curr_k, i
-                    rev_high = max(rev_high, curr_k.high)
-                    rev_low  = min(rev_low, curr_k.low)
-                # 回调终结 → 跳出
-                elif curr_k.high < last_k.high and curr_k.low < last_k.low:
-                    break
+            if self._is_reverse_progress(direction, curr_k, last_k):
+                rev_count += 1
+                last_k, rev_end_idx = curr_k, i
+                rev_high = max(rev_high, curr_k.high)
+                rev_low  = min(rev_low, curr_k.low)
 
         # 阵眼 1：反向一笔 >= 3 根
         # 阵眼 2：确认K 必须落在反向一笔的时间辐射内
@@ -1104,24 +1092,11 @@ class CenterEngine:
 
         for i in range(rev_end_idx + 1, len(bars)):
             curr_k = bars[i]
-            if direction == Direction.Up:
-                # 趋势重启：不下才有上
-                if curr_k.high > last_k.high and curr_k.low > last_k.low:
-                    fwd_count += 1
-                    last_k = curr_k
-                    fwd_high = max(fwd_high, curr_k.high)
-                    fwd_low  = min(fwd_low, curr_k.low)
-                elif curr_k.high < last_k.high and curr_k.low < last_k.low:
-                    break
-            else:
-                # 趋势重启：不上才有下
-                if curr_k.high < last_k.high and curr_k.low < last_k.low:
-                    fwd_count += 1
-                    last_k = curr_k
-                    fwd_high = max(fwd_high, curr_k.high)
-                    fwd_low  = min(fwd_low, curr_k.low)
-                elif curr_k.high > last_k.high and curr_k.low > last_k.low:
-                    break
+            if self._is_direction_progress(direction, curr_k, last_k):
+                fwd_count += 1
+                last_k = curr_k
+                fwd_high = max(fwd_high, curr_k.high)
+                fwd_low  = min(fwd_low, curr_k.low)
 
         if fwd_count < 3:
             return False, 0, 0

@@ -515,6 +515,22 @@ class SegmentAnalyzer:
                         c.owner_seg_key = (ms_id, me_id)
                     break
 
+    def _reassign_center_owner_key(self, center: MooreCenter, valid_owner_keys: set[tuple]) -> bool:
+        """Rebind a center to the current segment if its confirm K still belongs to one."""
+        c_confirm_dt = center.confirm_k.dt if center.confirm_k else center.start_dt
+        if not c_confirm_dt:
+            return False
+
+        for seg in self.state.segments:
+            if not (seg.start_k.dt <= c_confirm_dt <= seg.end_k.dt):
+                continue
+            owner_key = (seg.start_k.cache.get("micro_id"), seg.end_k.cache.get("micro_id"))
+            if owner_key in valid_owner_keys:
+                center.owner_seg_key = owner_key
+                return True
+            return False
+        return False
+
     def _settle_centers_by_endpoints(self):
         """按当前有效端点结算微观/宏观复用中枢，清理已被回滚分支留下的残留。"""
         s = self.state
@@ -535,15 +551,15 @@ class SegmentAnalyzer:
                 if mid is not None:
                     pending_owner_ids.add(mid)
 
-        invalid_center_ids = {
-            c.center_id
-            for c in s.micro_centers
-            if (
-                c.owner_seg_key is not None
-                and c.owner_seg_key not in valid_owner_keys
-                and not any(mid in pending_owner_ids for mid in c.owner_seg_key)
-            )
-        }
+        invalid_center_ids = set()
+        for c in s.micro_centers:
+            if c.owner_seg_key is None or c.owner_seg_key in valid_owner_keys:
+                continue
+            if any(mid in pending_owner_ids for mid in c.owner_seg_key):
+                continue
+            if self._reassign_center_owner_key(c, valid_owner_keys):
+                continue
+            invalid_center_ids.add(c.center_id)
         if not invalid_center_ids:
             self._fractal_engine._update_segments()
             return

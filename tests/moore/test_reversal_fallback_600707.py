@@ -83,6 +83,25 @@ def test_600707_has_c_20190201_and_d_candidate_20190307():
     assert captured.get("dt") == "2019-03-07"
 
 
+def test_600707_center_230_visible_uses_ma5_peak_rail():
+    bars = _safe_get_bars("600707", "20140601", "20210820")
+    engine = MooreCZSC(
+        bars,
+        ma34_cross_as_valid_gate=True,
+        ma34_cross_expand_one_k=False,
+        audit_link_rounds=3,
+        enable_pre_round=True,
+        replay_centers_after_macro_swallow=False,
+    )
+
+    center = next(c for c in engine.micro_centers if c.center_id == 230)
+    assert center.is_visible is True
+    assert center.start_dt.strftime("%Y-%m-%d") == "2020-10-15"
+    assert center.confirm_k.dt.strftime("%Y-%m-%d") == "2020-10-15"
+    assert center.end_dt.strftime("%Y-%m-%d") == "2020-11-06"
+    assert center.upper_rail == pytest.approx(4.193)
+
+
 def test_603126_refresh_trigger_prefers_special_rule_before_left_search():
     bars = _safe_get_bars("603126", "20181220", "20191010")
     captured = {}
