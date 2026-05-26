@@ -38,7 +38,6 @@ dependencies = [
     # 图表 / 研究通用的最小运行集
     "pandas>=1.0.0",
     "numpy",
-    "pyarrow",
     "pyecharts>=1.9.1",
     "loguru",
     "parse",
@@ -67,10 +66,17 @@ research = [
 ]
 
 service = [
+    "fastapi",
+    "uvicorn[standard]",
     "streamlit",
     "jupyter",
     "ipython",
     "streamlit-ace",
+]
+
+web = [
+    "fastapi",
+    "uvicorn[standard]",
 ]
 
 integration = [

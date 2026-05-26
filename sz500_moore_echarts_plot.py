@@ -11,6 +11,7 @@ describe: 用 pyecharts (Apache ECharts) 实现摩尔缠论 K 线结构图。
   - 🔘 图例点击可独立显示/隐藏各类元素
   - 📤 输出独立 .html，浏览器直接打开
 """
+import json
 import os
 import re
 import ssl
@@ -299,10 +300,22 @@ def plot_moore_structure_echarts(
 ):
     # ── 1. 基础数据 ───────────────────────────────────────────────────
     dates, ohlcv = [], []
+    pct_changes = []
+    intraday_pct_changes = []
+    prev_close = None
     for b in bars:
         dates.append(_dt_str(b.dt))
         ohlcv.append([round(b.open, 3), round(b.close, 3),
                       round(b.low, 3), round(b.high, 3)])
+        if prev_close is None or prev_close == 0:
+            pct_changes.append(None)
+        else:
+            pct_changes.append(round((b.close - prev_close) / prev_close * 100, 4))
+        prev_close = b.close
+        if b.open == 0:
+            intraday_pct_changes.append(None)
+        else:
+            intraday_pct_changes.append(round((b.close - b.open) / b.open * 100, 4))
 
     close_s = pd.Series([b.close for b in bars])
     ma5_list  = _ma(close_s, 5)
@@ -588,7 +601,10 @@ def plot_moore_structure_echarts(
             else:
                 fill, border = "rgba(149,165,166,0.15)", "#7F8C8D" # 灰色：幽灵
 
-            label_txt = f"ID:{cid} {layer_name}-{getattr(ct, 'method', '?')}\n上:{y_hi:.3f} 下:{y_lo:.3f}"
+            layer_label = layer_name
+            if layer_name == "micro":
+                layer_label = "肉" if getattr(ct, "is_visible", False) else "非肉"
+            label_txt = f"ID:{cid} {layer_label}-{getattr(ct, 'method', '?')}\n上:{y_hi:.3f} 下:{y_lo:.3f}"
             data.append([
                 {
                     "xAxis": _dt_str(ct.start_dt), "yAxis": y_lo,
@@ -1067,6 +1083,8 @@ def plot_moore_structure_echarts(
                 trigger="axis",
                 axis_pointer_type="cross",
                 formatter=JsCode("""function(params){
+                    var pctChanges = """ + json.dumps(pct_changes, ensure_ascii=False) + """;
+                    var intradayPctChanges = """ + json.dumps(intraday_pct_changes, ensure_ascii=False) + """;
                     if(!params || params.length === 0) return '';
                     var k, m5, m34, m170;
                     for(var i=0; i<params.length; i++){
@@ -1078,9 +1096,27 @@ def plot_moore_structure_echarts(
                     }
                     if(!k || !k.value) return '';
                     var d = k.value;
+                    var pct = pctChanges[k.dataIndex];
+                    var pctText = '--';
+                    var pctColor = '#666';
+                    if(pct !== null && pct !== undefined && !isNaN(parseFloat(pct))){
+                        pct = parseFloat(pct);
+                        pctText = (pct > 0 ? '+' : '') + pct.toFixed(2) + '%';
+                        pctColor = pct > 0 ? '#D32F2F' : (pct < 0 ? '#2E7D32' : '#666');
+                    }
+                    var intradayPct = intradayPctChanges[k.dataIndex];
+                    var intradayPctText = '--';
+                    var intradayPctColor = '#666';
+                    if(intradayPct !== null && intradayPct !== undefined && !isNaN(parseFloat(intradayPct))){
+                        intradayPct = parseFloat(intradayPct);
+                        intradayPctText = (intradayPct > 0 ? '+' : '') + intradayPct.toFixed(2) + '%';
+                        intradayPctColor = intradayPct > 0 ? '#D32F2F' : (intradayPct < 0 ? '#2E7D32' : '#666');
+                    }
                     var res = '<b>' + k.axisValue + '</b><br/>' +
                               '开: ' + d[1] + '  收: <b>' + d[2] + '</b><br/>' +
-                              '高: ' + d[4] + '  低: ' + d[3];
+                              '高: ' + d[4] + '  低: ' + d[3] + '<br/>' +
+                              '涨幅: <span style=\"color:' + pctColor + ';font-weight:bold;\">' + pctText + '</span>' +
+                              '  日内: <span style=\"color:' + intradayPctColor + ';font-weight:bold;\">' + intradayPctText + '</span>';
                     var m5_val = m5 != null ? parseFloat(m5) : null;
                     var m34_val = m34 != null ? parseFloat(m34) : null;
                     var m170_val = m170 != null ? parseFloat(m170) : null;
@@ -1191,7 +1227,7 @@ def plot_moore_structure_echarts(
                     "━━ 日线 ━━": True,
                     "━━ 周线 ━━": True,
                     "微观线段": False,
-                    "宏观线段": False,
+                    "宏观线段": True,
                     "演变路径": False,
                     "历史刷新端点(顶)": False,
                     "历史刷新端点(底)": False,
@@ -1206,8 +1242,8 @@ def plot_moore_structure_echarts(
                     "周线非同处理": True,
                     "周线级别中枢": True,
                     **({
-                        "Daily Shadow B": True,
-                        "B Shadow Centers": True,
+                        "Daily Shadow B": False,
+                        "B Shadow Centers": False,
                     } if show_daily_shadow_b else {}),
                 }
             ),
@@ -1302,6 +1338,11 @@ def plot_moore_structure_echarts(
         if show_daily_shadow_b
         else ""
     )
+    shadow_daily_default_off_js = (
+        'var defaultOff = name === "Daily Shadow B" || name === "B Shadow Centers";'
+        if show_daily_shadow_b
+        else "var defaultOff = false;"
+    )
     zoom_persistence_js = f"""
     (function() {{
         var storageKey = "echarts_zoom_{chart_symbol}";
@@ -1392,8 +1433,9 @@ def plot_moore_structure_echarts(
                 var dailyOn = selected["━━ 日线 ━━"] !== false;
                 var weeklyOn = selected["━━ 周线 ━━"] !== false;
                 legendGroupDaily.forEach(function(name) {{
+                    {shadow_daily_default_off_js}
                     chart.dispatchAction({{
-                        type: dailyOn ? 'legendSelect' : 'legendUnSelect',
+                        type: (dailyOn && !defaultOff) ? 'legendSelect' : 'legendUnSelect',
                         name: name
                     }});
                 }});
@@ -1406,8 +1448,9 @@ def plot_moore_structure_echarts(
 
                 var minuteOn = selected["━━ 30分钟 ━━"] === true;
                 legendGroup30m.forEach(function(name) {{
+                    var defaultOn = name === "宏观线段";
                     chart.dispatchAction({{
-                        type: minuteOn ? 'legendSelect' : 'legendUnSelect',
+                        type: (minuteOn || defaultOn) ? 'legendSelect' : 'legendUnSelect',
                         name: name
                     }});
                 }});
@@ -1494,10 +1537,7 @@ if __name__ == "__main__":
         AnalyzeTask("000411", sdt="20160401", edt="20210701", desc="英特集团"),
         AnalyzeTask("000553", sdt="20181015", edt="20210701", desc="安道麦A"),
         AnalyzeTask("002613", sdt="20160801", edt="20210820", desc="北玻股份"),
-        AnalyzeTask("600707", sdt="20140601", edt="20210820", desc="彩虹股份"),
-        AnalyzeTask("300490", sdt="20160115", edt="20210701", desc="华自科技"),
         AnalyzeTask("603178", sdt="20171015", edt="20211101", desc="圣龙股份"),
-        AnalyzeTask("300339", sdt="20150415",edt="20210701", desc="润和软件"),
         AnalyzeTask("300311", sdt="20170115",edt="20210801", desc="任子行"),
         AnalyzeTask("603020", sdt="20151215", edt="20210801", desc="爱普股份"),
         AnalyzeTask("002772", sdt="20160114", edt="20210701", desc="众兴菌业"),
@@ -1507,6 +1547,11 @@ if __name__ == "__main__":
         AnalyzeTask("002140", sdt="20180901", edt="20211001", desc="东华科技", allow_initial_daily_ma_relax=True),
 
         AnalyzeTask("603933", sdt="20170801", edt="20221001", desc="睿能科技", allow_initial_daily_ma_relax=True),
+        AnalyzeTask("600331", sdt="20170801", edt="20221001", desc="宏达股份", allow_initial_daily_ma_relax=True),
+        AnalyzeTask("300339", sdt="20151115",edt="20250701", desc="润和软件"),
+        AnalyzeTask("300490", sdt="20160115", edt="20210701", desc="华自科技"),
+        AnalyzeTask("600707", sdt="20140601", edt="20210820", desc="彩虹股份"),
+
 
         # AnalyzeTask("002222", sdt="20220415", edt="20250201", desc="福晶科技"),
     ]

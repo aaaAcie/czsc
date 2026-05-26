@@ -20,6 +20,24 @@ from typing import Optional
 from czsc.py.enum import Direction, Mark
 from czsc.py.objects import RawBar
 from ..objects import MooreCenter
+from .helpers.center import (
+    check_2c_pattern,
+    check_2c_pattern_with_idx,
+    check_3_strokes_pattern,
+    check_3_strokes_pattern_with_price,
+    check_5k_pattern,
+    check_black_k,
+    build_center_candidate,
+    build_initial_rails,
+    decide_finalize_policy,
+    detect_visible_center,
+    is_center_price_overlap,
+    is_direction_progress,
+    is_down_progress,
+    is_price_overlap_with_center,
+    is_reverse_progress,
+    is_up_progress,
+)
 
 
 class CenterEngine:
@@ -28,6 +46,22 @@ class CenterEngine:
     def __init__(self, state):
         # state: SegmentState
         self.s = state
+
+    @staticmethod
+    def _is_up_progress(curr_k: RawBar, base_k: RawBar) -> bool:
+        """Strict upward K-line progression; equal prices do not count."""
+        return is_up_progress(curr_k, base_k)
+
+    @staticmethod
+    def _is_down_progress(curr_k: RawBar, base_k: RawBar) -> bool:
+        """Strict downward K-line progression; equal prices do not count."""
+        return is_down_progress(curr_k, base_k)
+
+    def _is_direction_progress(self, direction: Direction, curr_k: RawBar, base_k: RawBar) -> bool:
+        return is_direction_progress(direction, curr_k, base_k)
+
+    def _is_reverse_progress(self, direction: Direction, curr_k: RawBar, base_k: RawBar) -> bool:
+        return is_reverse_progress(direction, curr_k, base_k)
 
     # =========================================================================
     # 公开接口（供 SegmentAnalyzer 调用）
@@ -315,11 +349,11 @@ class CenterEngine:
 
     def _is_price_overlap_with_center(self, bar: RawBar, c: MooreCenter) -> bool:
         """判定当前 K 线价格区间是否与给定中枢价格区间重叠。"""
-        return not (bar.low > c.upper_rail or bar.high < c.lower_rail)
+        return is_price_overlap_with_center(bar, c)
 
     def _is_center_price_overlap(self, c1: MooreCenter, c2: MooreCenter) -> bool:
         """判定两个中枢的价格区间是否重叠。"""
-        return not (c1.lower_rail > c2.upper_rail or c1.upper_rail < c2.lower_rail)
+        return is_center_price_overlap(c1, c2)
 
     def _extend_center_right_boundary_by_bar(self, c: MooreCenter, bar: RawBar, k_index: int):
         """旧墙延伸：只延右边界，不改价格轨道。"""
@@ -444,79 +478,29 @@ class CenterEngine:
         下跌线段：center_line = upper_rail，另一轨 = lower_rail
         """
         s = self.s
-        ma5_confirm = confirm_k.cache.get('ma5', 0)
-
-        # --- 中枢线取值（双跳空 / 非双跳空）---
-        if direction == Direction.Up:
-            price_gap    = confirm_k.high < k0.low                              # confirm_k 完全在 k0 下方
-            body_gap_ma5 = max(confirm_k.open, confirm_k.close) < ma5_confirm   # 实体完全在 MA5 下方
-        else:
-            price_gap    = confirm_k.low > k0.high                              # confirm_k 完全在 k0 上方
-            body_gap_ma5 = min(confirm_k.open, confirm_k.close) > ma5_confirm   # 实体完全在 MA5 上方
-
-        is_double_gap = price_gap and body_gap_ma5
-
-        if direction == Direction.Up:
-            center_line = (max(confirm_k.open, confirm_k.close) if is_double_gap
-                           else min(confirm_k.open, confirm_k.close))
-        else:
-            center_line = (min(confirm_k.open, confirm_k.close) if is_double_gap
-                           else max(confirm_k.open, confirm_k.close))
-
-        # (唯一性判定移交给了最终 finalize 方法里的终极隔离判断)
-
-        # --- 向左找最左连续 2K 重叠，确定初始另一轨 ---
-        # 【核心修复：物理极值防火墙】
-        # 绝对不允许跨越当前线段的物理发源地（山顶/山谷）去偷 K 线！
-        search_start = max(0, s.center_anchor_idx)
-
-        # 【叹息之墙】：同时也不能穿透上一个同向中枢的破窗点
-        # 但是！如果处于沙盒模式，代表我们要挑战并取代这个旧墙，所以必须获得“穿墙回溯”的特权！
-        if s.last_center_end_idx != -1 and not s.sandbox_active:
-            search_start = max(search_start, s.last_center_end_idx)
-
-        upper_rail = center_line  # 兜底：退化为单线
-        lower_rail = center_line
-
-        # 【新增】：默认兜底发生时间为确认K的时间
-        inception_dt = confirm_k.dt
-        inception_idx = cf_index
-
-        # 修正：range 应包含到 cf_index，以便检查 (cf_index-1, cf_index) 这组重叠
-        for i in range(search_start, cf_index):
-            k1 = s.bars_raw[i]
-            k2 = s.bars_raw[i + 1]
-            overlap_high = min(k1.high, k2.high)
-            overlap_low  = max(k1.low,  k2.low)
-
-            if overlap_low <= overlap_high:   # 存在真实重叠
-                if direction == Direction.Up and overlap_high >= center_line:
-                    upper_rail = overlap_high  # 上涨：另一轨 = 最左2K重叠上沿
-                    lower_rail = center_line
-                    # 【新增】：找到了真实阵地，把起始时间往前推到第一根重叠 K 线
-                    inception_dt = k1.dt
-                    inception_idx = i
-                    break
-                elif direction == Direction.Down and overlap_low <= center_line:
-                    lower_rail = overlap_low   # 下跌：另一轨 = 最左2K重叠下沿
-                    upper_rail = center_line
-                    # 【新增】：找到了真实阵地，把起始时间往前推到第一根重叠 K 线
-                    inception_dt = k1.dt
-                    inception_idx = i
-                    break
+        rails = build_initial_rails(
+            direction=direction,
+            k0=k0,
+            confirm_k=confirm_k,
+            confirm_idx=cf_index,
+            bars=s.bars_raw,
+            center_anchor_idx=s.center_anchor_idx,
+            last_center_end_idx=s.last_center_end_idx,
+            sandbox_active=s.sandbox_active,
+        )
 
         # --- 初始化观测病房状态 ---
         s.center_line_k         = confirm_k
         s.center_line_k_index   = cf_index
         s.center_direction      = direction
-        s.center_upper_rail     = upper_rail
-        s.center_lower_rail     = lower_rail
+        s.center_upper_rail     = rails.upper_rail
+        s.center_lower_rail     = rails.lower_rail
 
         # 【修改】：使用我们刚刚锚定的物理发源时间
-        s.center_start_dt       = inception_dt
-        s.center_start_k_index  = inception_idx
+        s.center_start_dt       = rails.inception_dt
+        s.center_start_k_index  = rails.inception_idx
         s.center_end_dt         = confirm_k.dt
-        s.center_is_double_gap  = is_double_gap  # 保存双跳空标记，供式一使用
+        s.center_is_double_gap  = rails.is_double_gap  # 保存双跳空标记，供式一使用
 
         # 【核心确权】：入场即名分！
         # 在中枢确认诞生的这一刻，立刻回溯校验，看看当前是否已满足起手三式任何一种。
@@ -563,69 +547,36 @@ class CenterEngine:
             final_start_idx = s.center_start_k_index
         final_start_dt = s.bars_raw[final_start_idx].dt if final_start_idx >= 0 else s.center_start_dt
 
-        # ====== 中枢定性（肉眼 vs 非肉眼） ======
-        # 在挂载时，最终确定该中枢的定性属性
-        type_str = "VISIBLE" if s.center_is_visible else "INVISIBLE"
-
-        if s.center_direction == Direction.Up:
-            center_line = s.center_lower_rail
-        else:
-            center_line = s.center_upper_rail
-
         s.center_id_seed += 1
-        center = MooreCenter(
+        center = build_center_candidate(
             center_id=s.center_id_seed,
-            source_layer="micro",
-            confirm_k_index=s.center_line_k_index,
-            type_name=type_str,
-            direction=s.center_direction,
-            anchor_k0=s.current_k0,
-            confirm_k=s.center_line_k,
-            method=s.center_method_found,
-            center_line=center_line,
-            upper_rail=s.center_upper_rail,
-            lower_rail=s.center_lower_rail,
-            start_dt=final_start_dt,
-            end_dt=s.center_end_dt,
-            start_k_index=final_start_idx,
-            end_k_index=s.center_end_k_index,
+            center_direction=s.center_direction,
+            center_is_visible=s.center_is_visible,
+            current_k0=s.current_k0,
+            center_line_k=s.center_line_k,
+            center_line_k_index=s.center_line_k_index,
+            center_method_found=s.center_method_found,
+            center_upper_rail=s.center_upper_rail,
+            center_lower_rail=s.center_lower_rail,
+            final_start_dt=final_start_dt,
+            final_start_idx=final_start_idx,
+            center_end_dt=s.center_end_dt,
+            center_end_k_index=s.center_end_k_index,
         )
 
         # --- 沙盒先决结算 ---
         if not self._settle_sandbox_result(center):
             return
 
-        # =====================================================================
-        # --- 空间审判与三大延伸法则（终极一刀切版） ---
-        # =====================================================================
-        if s.potential_centers:
-            # 只比对当前线段生成的中枢（不得跨越物理极值点合并）
-            last_c = next((c for c in reversed(s.potential_centers) 
-                           if c.direction == s.center_direction 
-                           and not getattr(c, 'is_ghost', False)
-                           and c.end_k_index >= s.center_anchor_idx # 核心约束：上一个中枢必须在本段起点的右侧
-                          ), None)
-            if last_c:
-                
-                # 1. 终极空间分离判定（完美涵盖不重叠与中枢线新高/新低）
-                # 规则：上升线段的新下轨必须高于旧上轨；下降线段的新上轨必须低于旧下轨。
-                if s.center_direction == Direction.Up:
-                    is_separated = center.lower_rail > last_c.upper_rail
-                else:
-                    is_separated = center.upper_rail < last_c.lower_rail
-
-                # 2. 审判执行
-                if not is_separated:
-                    # 默认法则：未完全分离则旧墙延伸，候选失败。
-                    if center.end_k_index >= last_c.end_k_index:
-                        last_c.end_dt = center.end_dt
-                        last_c.end_k_index = center.end_k_index
-                    s.last_center_end_idx = max(s.last_center_end_idx, last_c.end_k_index + 1)
-                    self.rollback()
-                    return
-                else:
-                    # 【完全分离】：绝对独立的主权领地，直接挂载
-                    pass
+        decision = decide_finalize_policy(center, s.potential_centers, s.center_anchor_idx)
+        if decision.action == "extend_existing":
+            last_c = decision.last_center
+            if center.end_k_index >= last_c.end_k_index:
+                last_c.end_dt = center.end_dt
+                last_c.end_k_index = center.end_k_index
+            s.last_center_end_idx = max(s.last_center_end_idx, last_c.end_k_index + 1)
+            self.rollback()
+            return
 
         # 挂载当下正式形成的新中枢
         s.potential_centers.append(center)
@@ -683,142 +634,35 @@ class CenterEngine:
         第三步：在 [确认K, 正向一笔形成K] 这一严密视界内监控 MA5 走势。
         """
         s = self.s
-        if s.center_line_k_index < 0:
+        result = detect_visible_center(
+            direction=s.center_direction,
+            bars=s.bars_raw,
+            center_anchor_idx=s.center_anchor_idx,
+            center_line_k_index=s.center_line_k_index,
+            center_end_k_index=s.center_end_k_index,
+        )
+        if not result.is_visible:
             return
-
-        direction = s.center_direction
-        
-        # 1. 向左找发源极值（同向极值）
-        search_start = s.center_anchor_idx if s.center_anchor_idx >= 0 else 0
-        ext_idx = search_start
-        window_to_cf = s.bars_raw[search_start : s.center_line_k_index + 1]
-        
-        if direction == Direction.Up:
-            ext_val = window_to_cf[0].high
-            for i, b in enumerate(window_to_cf):
-                if b.high > ext_val:
-                    ext_val, ext_idx = b.high, search_start + i
-        else:
-            ext_val = window_to_cf[0].low
-            for i, b in enumerate(window_to_cf):
-                if b.low < ext_val:
-                    ext_val, ext_idx = b.low, search_start + i
-                    
-        # 2. 判定反向一笔 (决定正向起点)
-        rev_count = 1
-        last_k = s.bars_raw[ext_idx]
-        rev_end_idx = ext_idx
-        
-        for i in range(ext_idx + 1, s.center_line_k_index + 1):
-            curr_k = s.bars_raw[i]
-            if direction == Direction.Up:
-                if curr_k.high < last_k.high and curr_k.low < last_k.low:
-                    rev_count += 1
-                    last_k, rev_end_idx = curr_k, i
-                elif curr_k.high > last_k.high and curr_k.low > last_k.low: break
-            else:
-                if curr_k.high > last_k.high and curr_k.low > last_k.low:
-                    rev_count += 1
-                    last_k, rev_end_idx = curr_k, i
-                elif curr_k.high < last_k.high and curr_k.low < last_k.low: break
-                
-        # 落地正向一笔起点（基于三笔同源逻辑）
-        fwd_start_idx = rev_end_idx if rev_count >= 3 else s.center_line_k_index
-        
-        # 3. 向右扫描“正向一笔”，寻踪其成型点（第3根递进K）
-        fwd_count = 1
-        last_k = s.bars_raw[fwd_start_idx]
-        fwd_formation_idx = -1
-        
-        for i in range(fwd_start_idx + 1, s.center_end_k_index + 1):
-            curr_k = s.bars_raw[i]
-            if direction == Direction.Up:
-                if curr_k.high > last_k.high and curr_k.low > last_k.low:
-                    fwd_count += 1
-                    last_k = curr_k
-                    if fwd_count == 3:
-                        fwd_formation_idx = i
-                        break # 已达法定视界终点，停止扫描
-                elif curr_k.high < last_k.high and curr_k.low < last_k.low: break
-            else:
-                if curr_k.low < last_k.low and curr_k.high <= last_k.high:
-                    fwd_count += 1
-                    last_k = curr_k
-                    if fwd_count == 3:
-                        fwd_formation_idx = i
-                        break
-                elif curr_k.high > last_k.high and curr_k.low > last_k.low: break
-                
-        # 4. 【严密视界审判】：仅当正向一笔已形成时，才执行最终判决
-        if fwd_formation_idx == -1:
-            return # 正向一笔尚未凑齐 3 根，定性尚处于叠加态，继续观察
-
-        # 观察范围锁定：从确认K（s.center_line_k_index）开始，到正向一笔成型（fwd_formation_idx）结束
-        obs_start = s.center_line_k_index
-        for i in range(obs_start + 1, fwd_formation_idx + 1):
-            curr_ma5 = s.bars_raw[i].cache.get('ma5', 0)
-            prev_ma5 = s.bars_raw[i-1].cache.get('ma5', 0)
-            
-            # 【定性审判与价格二次确权】：
-            # 一旦认定为肉眼中枢，不仅标志其基因，还必须立即根据该区间的极值修正“另一轨”
-            if direction == Direction.Up:
-                if curr_ma5 <= prev_ma5:
-                    s.center_is_visible = True
-                    if not s.center_price_confirmed:
-                        # 修正另一轨 (Upper Rail)
-                        fwd_max = max(b.high for b in s.bars_raw[obs_start : fwd_formation_idx + 1])
-                        s.center_upper_rail = fwd_max
-                        s.center_price_confirmed = True
-                    return
-            else:
-                if curr_ma5 >= prev_ma5:
-                    s.center_is_visible = True
-                    if not s.center_price_confirmed:
-                        # 修正另一轨 (Lower Rail)
-                        fwd_min = min(b.low for b in s.bars_raw[obs_start : fwd_formation_idx + 1])
-                        s.center_lower_rail = fwd_min
-                        s.center_price_confirmed = True
-                    return
+        s.center_is_visible = True
+        if not s.center_price_confirmed:
+            if result.upper_rail is not None:
+                s.center_upper_rail = result.upper_rail
+            if result.lower_rail is not None:
+                s.center_lower_rail = result.lower_rail
+            s.center_price_confirmed = True
 
     def _check_black_k(self, direction: Direction, confirm_k_idx: int, window_bars: list) -> bool:
         """
         黑K质检器：在确认K之后，寻找至少一根非向正跳空 MA5 的 K 线（且不能是顶底极值）
         """
         s = self.s
-        if len(window_bars) < 2:
-            return False
-            
-        replay_anchor = s.center_anchor_idx if s.center_anchor_idx >= 0 else None
-        
-        for i in range(1, len(window_bars)):
-            bar = window_bars[i]
-            ma5 = bar.cache.get('ma5', 0)
-            
-            # 排除已确立的顶底极值K（顶底不可作为黑K）
-            # 注意时序一致性：在 replay 模式下，仅排除 replay 锚点之前的极值 K
-            is_extreme = False
-            for tk in s.turning_ks:
-                if tk.dt == bar.dt:
-                    if replay_anchor is not None and tk.k_index >= replay_anchor:
-                        continue
-                    is_extreme = True
-                    break
-                    
-            if is_extreme:
-                continue
-
-            if direction == Direction.Up:
-                # 上涨中的黑K：不再悬空，最低价踩到或跌破 MA5
-                if bar.low <= ma5:
-                    return True
-            else:
-                # 下跌中的黑K：不再悬空，最高价摸到或突破 MA5
-                if bar.high >= ma5:
-                    # print(f"  [DEBUG BK] Found black K for Down at {bar.dt} (high {bar.high} >= ma5 {ma5})")
-                    return True
-
-        # print(f"  [DEBUG BK] NO black K found in window {window_bars[0].dt} to {window_bars[-1].dt}")
-        return False
+        return check_black_k(
+            direction=direction,
+            confirm_k_idx=confirm_k_idx,
+            window_bars=window_bars,
+            turning_ks=s.turning_ks,
+            replay_anchor=s.center_anchor_idx if s.center_anchor_idx >= 0 else None,
+        )
 
 
     def _check_hidden_center(self) -> bool:
@@ -861,46 +705,11 @@ class CenterEngine:
     def _check_2c_pattern_with_idx(self, direction: Direction, center_line: float,
                             bars: list) -> tuple:
         """反正两穿核心判断并返回索引"""
-        if len(bars) < 2:
-            return False, -1, -1
-
-        k1_found_idx = -1
-        # 寻找 K1（反穿）
-        for i, b in enumerate(bars):
-            if direction == Direction.Up:
-                if min(b.open, b.close) < center_line:
-                    k1_found_idx = i
-                    break
-            else:
-                if max(b.open, b.close) > center_line:
-                    k1_found_idx = i
-                    break
-
-        if k1_found_idx == -1 or k1_found_idx == len(bars) - 1:
-            return False, -1, -1
-
-        # 寻找 K2（正穿，在 K1 右侧）
-        for i in range(k1_found_idx + 1, len(bars)):
-            curr_k = bars[i]
-            prev_k = bars[i - 1]
-            curr_body_high = max(curr_k.open, curr_k.close)
-            curr_body_low  = min(curr_k.open, curr_k.close)
-            p_bh = max(prev_k.open, prev_k.close)
-            p_bl = min(prev_k.open, prev_k.close)
-
-            if direction == Direction.Up:
-                if (curr_body_high > p_bh and curr_body_high > center_line):
-                    return True, k1_found_idx, i
-            else:
-                if (curr_body_low < p_bl and curr_body_low < center_line):
-                    return True, k1_found_idx, i
-
-        return False, -1, -1
+        return check_2c_pattern_with_idx(direction, center_line, bars)
 
     def _check_2c_pattern(self, direction: Direction, center_line: float,
                            bars: list) -> bool:
-        ok, _, _ = self._check_2c_pattern_with_idx(direction, center_line, bars)
-        return ok
+        return check_2c_pattern(direction, center_line, bars)
 
     def _check_5k_overlap(self) -> bool:
         ok, _, _, _ = self._check_5k_overlap_with_idx()
@@ -935,90 +744,7 @@ class CenterEngine:
         物理逻辑：寻找是否有 5 根 K 线在同一价格带重叠。
         核心逻辑升级：不再死板遵循线段方向，而是通过双向搜索寻找“最强物理摩擦锚点”。
         """
-        if len(bars) < 4:
-            return False, -1, 0, 0
-
-        def _scan_with_anchor(is_high_anchor: bool) -> tuple:
-            # 1. 寻找候选锚点 Ka
-            target_idx = 0
-            if is_high_anchor:
-                # 找最高点锚点
-                max_high = -float('inf')
-                for i in range(confirm_idx + 1):
-                    if bars[i].high >= max_high:
-                        max_high, target_idx = bars[i].high, i
-            else:
-                # 找最低点锚点
-                min_low = float('inf')
-                for i in range(confirm_idx + 1):
-                    if bars[i].low <= min_low:
-                        min_low, target_idx = bars[i].low, i
-            
-            k_a = bars[target_idx]
-
-            # 2. 寻找破坏K (Kb)
-            k_b, kb_idx = None, -1
-            for i in range(target_idx + 1, len(bars)):
-                if is_high_anchor:
-                    if bars[i].high < k_a.high:  # 跌破最高点
-                        k_b, kb_idx = bars[i], i
-                        break
-                else:
-                    if bars[i].low > k_a.low:    # 涨破最低点
-                        k_b, kb_idx = bars[i], i
-                        break
-            if not k_b:
-                return False, -1, 0, 0, 0
-
-            # 3. 计算重叠价格带
-            ov_high = min(k_a.high, k_b.high)
-            ov_low  = max(k_a.low,  k_b.low)
-            if ov_low > ov_high:
-                return False, -1, 0, 0, 0
-
-            # 4. 统计重叠（回归价格触碰标准）
-            # 口径修正：
-            # - “找首K(Ka)” 的搜索左边界保持不变（仍由 _get_5k_search_start 控制）；
-            # - 仅“5K重叠数量统计”的时间左边界改为 Ka 本身，不再把 Ka 左侧命中计入 cnt。
-            ov_indices = [
-                i for i in range(target_idx, len(bars))
-                if bars[i].high >= ov_low and bars[i].low <= ov_high
-            ]
-            cnt = len(ov_indices)
-            
-            # 5. 终极确权（时间口径）：重叠命中集合必须包含确认K（中枢线K）
-            has_confirm_k = (confirm_idx in ov_indices)
-
-            # 判断逻辑：5K 或 4K+跳空（反向或破位跳空坐实力量），且必须时间覆盖确认K
-            is_ok = False
-            if cnt >= 5:
-                is_ok = True
-            elif cnt == 4:
-                last_ov_idx = ov_indices[-1]
-                if len(bars) > last_ov_idx + 1:
-                    next_b = bars[last_ov_idx + 1]
-                    prev_b = bars[last_ov_idx]
-                    # 只要发生物理跳空，即视为中枢力量的爆发确认
-                    is_ok = (next_b.low > prev_b.high or next_b.high < prev_b.low)
-
-            is_ok = is_ok and has_confirm_k
-
-            if is_ok:
-                return True, ov_indices[0], ov_high, ov_low, cnt
-            return False, -1, 0, 0, cnt
-
-        # 执行双向竞速
-        res_high = _scan_with_anchor(True)
-        res_low  = _scan_with_anchor(False)
-
-        # 优先选取成立的，如果都成立，取重叠 K 线更多的那个
-        if res_high[0] and res_low[0]:
-            return (True, res_high[1], res_high[2], res_high[3]) if res_high[4] >= res_low[4] else (True, res_low[1], res_low[2], res_low[3])
-        if res_high[0]:
-            return True, res_high[1], res_high[2], res_high[3]
-        if res_low[0]:
-            return True, res_low[1], res_low[2], res_low[3]
-        return False, -1, 0, 0
+        return check_5k_pattern(direction, bars, confirm_idx, _center_line)
 
 
 
@@ -1044,101 +770,8 @@ class CenterEngine:
     def _check_3_strokes_pattern_with_price(self, direction: Direction,
                                   confirm_k_idx: int, bars: list) -> tuple:
         """三笔纯势核心判断并返回价格区间"""
-        if len(bars) < 5:
-            return False, 0, 0
-
-        # --- 第一步：定位原趋势绝对极值 ---
-        ext_idx = 0
-        if direction == Direction.Up:
-            ext_val = bars[0].high
-            for i in range(1, confirm_k_idx + 1):
-                if bars[i].high > ext_val:
-                    ext_val, ext_idx = bars[i].high, i
-        else:
-            ext_val = bars[0].low
-            for i in range(1, confirm_k_idx + 1):
-                if bars[i].low < ext_val:
-                    ext_val, ext_idx = bars[i].low, i
-
-        # --- 第二步：扫描反向一笔 ---
-        rev_count   = 1
-        last_k      = bars[ext_idx]
-        rev_end_idx = ext_idx
-        # 记录反向一笔的区间
-        rev_high = bars[ext_idx].high
-        rev_low  = bars[ext_idx].low
-
-        for i in range(ext_idx + 1, len(bars)):
-            curr_k = bars[i]
-            if direction == Direction.Up:
-                # 回调：不上才有下 (Lower High & Lower Low)
-                if curr_k.high < last_k.high and curr_k.low < last_k.low:
-                    rev_count += 1
-                    last_k, rev_end_idx = curr_k, i
-                    rev_high = max(rev_high, curr_k.high) # 修正：反向一笔的最高点应取所有K线中的最高
-                    rev_low  = min(rev_low, curr_k.low)   # 修正：反向一笔的最低点应取所有K线中的最低
-                # 反弹终结（Higher High & Higher Low）→ 跳出
-                elif curr_k.high > last_k.high and curr_k.low > last_k.low:
-                    break
-            else:
-                # 反弹：不下才有上 (Higher High & Higher Low)
-                if curr_k.high > last_k.high and curr_k.low > last_k.low:
-                    rev_count += 1
-                    last_k, rev_end_idx = curr_k, i
-                    rev_high = max(rev_high, curr_k.high)
-                    rev_low  = min(rev_low, curr_k.low)
-                # 回调终结 → 跳出
-                elif curr_k.high < last_k.high and curr_k.low < last_k.low:
-                    break
-
-        # 阵眼 1：反向一笔 >= 3 根
-        # 阵眼 2：确认K 必须落在反向一笔的时间辐射内
-        if rev_count < 3 or confirm_k_idx > rev_end_idx:
-            return False, 0, 0
-
-        # --- 第三步：扫描正向一笔 ---
-        fwd_count = 1
-        last_k    = bars[rev_end_idx]
-        fwd_high = bars[rev_end_idx].high
-        fwd_low  = bars[rev_end_idx].low
-
-        for i in range(rev_end_idx + 1, len(bars)):
-            curr_k = bars[i]
-            if direction == Direction.Up:
-                # 趋势重启：不下才有上
-                if curr_k.high > last_k.high and curr_k.low > last_k.low:
-                    fwd_count += 1
-                    last_k = curr_k
-                    fwd_high = max(fwd_high, curr_k.high)
-                    fwd_low  = min(fwd_low, curr_k.low)
-                elif curr_k.high < last_k.high and curr_k.low < last_k.low:
-                    break
-            else:
-                # 趋势重启：不上才有下
-                if curr_k.high < last_k.high and curr_k.low < last_k.low:
-                    fwd_count += 1
-                    last_k = curr_k
-                    fwd_high = max(fwd_high, curr_k.high)
-                    fwd_low  = min(fwd_low, curr_k.low)
-                elif curr_k.high > last_k.high and curr_k.low > last_k.low:
-                    break
-
-        if fwd_count < 3:
-            return False, 0, 0
-            
-        # 计算三笔重叠：取反向一笔和正向一笔的公共重叠区作为最终轨道
-        final_ur = min(rev_high, fwd_high)
-        final_lr = max(rev_low, fwd_low)
-        
-        # 容错：如果公共重叠太窄或无效，退化回当前中枢线结界
-        if final_lr >= final_ur:
-            # 如果没有有效重叠，则取反向一笔和正向一笔的整体范围
-            final_ur = max(rev_high, fwd_high)
-            final_lr = min(rev_low, fwd_low)
-            
-        return True, final_ur, final_lr
+        return check_3_strokes_pattern_with_price(direction, confirm_k_idx, bars)
 
     def _check_3_strokes_pattern(self, direction: Direction,
                                   confirm_k_idx: int, bars: list) -> bool:
-        ok, _, _ = self._check_3_strokes_pattern_with_price(direction, confirm_k_idx, bars)
-        return ok
+        return check_3_strokes_pattern(direction, confirm_k_idx, bars)

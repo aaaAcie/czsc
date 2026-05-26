@@ -74,6 +74,11 @@ uv pip install -r requirements.txt
 
 等 `uv.lock` 重新刷新后，再用 `uv sync --frozen`。
 
+如果你需要读取 parquet 或做更完整的研究分析，再装完整依赖：
+```
+pip install -r requirements-full.txt
+```
+
 如果你要完整的研究、回测、服务和开发环境，再装完整依赖：
 ```
 uv sync --extra full
@@ -83,6 +88,23 @@ uv sync --extra full
 ```
 pip install -r requirements-full.txt
 ```
+
+## 安全调试
+
+项目内提供了统一的安全 Python 调试入口：
+
+```bash
+scripts/run_safe_python.sh scripts/debug_moore_case.py
+```
+
+默认行为：
+
+- 前台运行 `uv run python`
+- 默认超时 `600` 秒
+- 超时后先发 `SIGTERM`，再发 `SIGKILL`
+- 拒绝 `uv run python -` 这类匿名 stdin 代码
+
+更多约定见 [docs/safe_debugging.md](docs/safe_debugging.md)。
 
 直接从github安装：
 ```
